@@ -1,0 +1,11 @@
+[package]
+name = "tss"
+version = "0.1.0"
+authors = ["Changgyoo Park <changgyoo.park@sap.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+crossbeam-epoch = "^0.9.1"
+scc = "^0.3.21"
