@@ -1,7 +1,7 @@
 extern crate crossbeam_epoch;
 
 use super::{
-    Container, ContainerHandle, DefaultSequencer, Error, Sequencer, Snapshot, Transaction,
+    Container, ContainerHandle, DefaultSequencer, Error, Janitor, Sequencer, Snapshot, Transaction,
 };
 use crossbeam_epoch::{Atomic, Owned, Shared};
 use std::string::String;

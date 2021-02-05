@@ -1,6 +1,6 @@
 use super::{Sequencer, Storage, Transaction};
 
-/// A snapshot of an tss::Storage.
+/// A snapshot of a tss::Storage.
 ///
 /// tss::Snapshot is a snapshot of data that a tss::Storage contains at the point of time the
 /// snapshot is taken. The data stored in a storage instance is only accessible through a storage
