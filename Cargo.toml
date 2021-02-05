@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 crossbeam-epoch = "^0.9.1"
-scc = "^0.3.21"
+scc = "^0.3.22"
