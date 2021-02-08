@@ -1,13 +1,18 @@
 use super::{Error, Sequencer, Storage};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::Acquire;
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 /// A transaction is the atomic unit of work for all types of the storage operations.
+///
+/// A single strand of change records constitues a single transaction.
+/// An on-going transaction can be rewound at a certain point of time.
 pub struct Transaction<'s, S: Sequencer> {
+    /// The transaction refers to the storage instance to persist the changes at commit.
     storage: &'s Storage<S>,
+    /// The transaction refers to the sequencer instance in order to assign a sequence number for commit.
     sequencer: &'s S,
-    /// The operation sequence value is used to differentiate changes made within the transaction.
-    current_operation_sequence: AtomicUsize,
+    /// The transaction local clock value is used to differentiate changes made within the transaction.
+    transaction_local_clock: AtomicUsize,
     /// The snapshot version is assigned at commit time.
     snapshot_version: Option<S::Clock>,
 }
@@ -26,24 +31,58 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             storage,
             sequencer,
-            current_operation_sequence: AtomicUsize::new(0),
+            transaction_local_clock: AtomicUsize::new(0),
             snapshot_version: None,
         }
     }
 
-    /// Returns the current operation sequence of the transaction.
+    /// Gets the current logical clock value of the transaction.
+    ///
+    /// The given chunk of log records are kept until the transaction ends.
+    ///
     /// # Examples
     /// ```
     /// use tss::{DefaultSequencer, Storage, Transaction};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    /// assert_eq!(transaction.sequence(), 0);
+    /// assert_eq!(transaction.clock(), 0);
+    pub fn clock(&self) -> usize {
+        self.transaction_local_clock.load(Acquire)
+    }
+
+    /// Advances the logical clock of the transaction by one by feeding log records.
+    ///
+    /// The given chunk of log records are kept until the transaction ends.
+    ///
+    /// # Examples
     /// ```
-    pub fn sequence(&self) -> usize {
+    /// use tss::{DefaultSequencer, Storage, Transaction};
+    ///
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let mut transaction = storage.transaction();
+    /// let data = [0; 8];
+    /// assert_eq!(transaction.advance(&data), 0);
+    /// ```
+    pub fn advance(&mut self, data: &[u8]) -> usize {
         // An acquire fence is required as the value is used to synchronize transactional changes
         // among threads.
-        self.current_operation_sequence.load(Acquire)
+        self.transaction_local_clock.fetch_add(1, AcqRel)
+    }
+
+    /// Rewinds the transaction to the given point of time.
+    ///
+    /// All the changes made between the latest operation sequence and the given one are reverted.
+    /// # Examples
+    /// ```
+    /// use tss::{DefaultSequencer, Storage, Transaction};
+    ///
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let mut transaction = storage.transaction();
+    /// transaction.rewind(0);
+    /// ```
+    pub fn rewind(&mut self, sequence: usize) -> Result<usize, Error> {
+        Err(Error::Fail)
     }
 
     /// Commits a transaction.

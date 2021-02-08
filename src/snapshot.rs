@@ -7,7 +7,7 @@ use super::{Sequencer, Storage, Transaction};
 /// snapshot.
 pub struct Snapshot<'s, S: Sequencer> {
     storage: &'s Storage<S>,
-    transaction_info: Option<(&'s Transaction<'s, S>, usize)>,
+    transaction_clock: Option<(&'s Transaction<'s, S>, usize)>,
     snapshot: S::Clock,
 }
 
@@ -20,7 +20,7 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
     ) -> Snapshot<'s, S> {
         Snapshot {
             storage,
-            transaction_info: transaction.map(|transaction| (transaction, transaction.sequence())),
+            transaction_clock: transaction.map(|transaction| (transaction, transaction.clock())),
             snapshot: sequencer.get(),
         }
     }
