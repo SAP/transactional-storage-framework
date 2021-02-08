@@ -397,10 +397,10 @@ impl<S: Sequencer> Container<S> {
 
 impl<S: Sequencer> Version<S> for Container<S> {
     fn create(&self, transaction: &Transaction<S>) -> bool {
-	true
+        true
     }
     fn delete(&self, transaction: &Transaction<S>) -> bool {
-	true
+        true
     }
     fn visible(&self, snapshot: &Snapshot<S>) -> bool {
         if let Some(version) = self.version.as_ref() {
