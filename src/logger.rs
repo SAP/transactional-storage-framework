@@ -1,17 +1,19 @@
 use super::{Error, Sequencer, Transaction};
 use std::time::Duration;
 
+/// Log stores the data that is to be persisted.
+pub struct Log {
+    log_data: Vec<u8>,
+    undo_data: Vec<u8>,
+    undo_hook: Option<Box<dyn FnOnce((&Vec<u8>, &Vec<u8>))>>,
+}
+
 /// The Logger trait defines logging interfaces.
 pub trait Logger<S: Sequencer> {
-    /// Persists the given redo data.
+    /// Persists the given data.
     ///
-    /// It returns the log sequence number.
-    fn redo(&self, data: &[u8], transaction: &Transaction<S>) -> Result<usize, Error>;
-
-    /// Persists the given undo data.
-    ///
-    /// It returns the log sequence number.
-    fn undo(&self, data: &[u8], transaction: &Transaction<S>) -> Result<usize, Error>;
+    /// It returns the log sequence number pair of the persisted data.
+    fn persist(&self, log: &Log, transaction: &Transaction<S>) -> Result<(usize, usize), Error>;
 
     /// Flushes pending log records into the persistent storage.
     ///

@@ -1,4 +1,4 @@
-use super::{Error, Sequencer, Storage};
+use super::{Error, Log, Sequencer, Storage};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
@@ -60,14 +60,13 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// use tss::{DefaultSequencer, Storage, Transaction};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-    /// let mut transaction = storage.transaction();
-    /// let data = [0; 8];
-    /// assert_eq!(transaction.advance(&data), 0);
+    /// let transaction = storage.transaction();
+    /// assert_eq!(transaction.advance(None), 1);
     /// ```
-    pub fn advance(&mut self, data: &[u8]) -> usize {
+    pub fn advance(&self, log: Option<&Log>) -> usize {
         // An acquire fence is required as the value is used to synchronize transactional changes
         // among threads.
-        self.transaction_local_clock.fetch_add(1, AcqRel)
+        self.transaction_local_clock.fetch_add(1, AcqRel) + 1
     }
 
     /// Rewinds the transaction to the given point of time.
