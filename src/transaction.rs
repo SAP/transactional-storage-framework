@@ -120,7 +120,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         transaction_cell_ref
             .snapshot
             .store(self.sequencer.advance());
-        Err(Error::Fail)
+        Ok(Rubicon {
+            transaction: Some(self),
+        })
     }
 
     /// Rolls back a transaction.
@@ -216,5 +218,9 @@ impl<S: Sequencer> TransactionCell<S> {
         TransactionCell {
             snapshot: AtomicCell::new(S::invalid()),
         }
+    }
+
+    pub fn snapshot(&self) -> S::Clock {
+        self.snapshot.load()
     }
 }

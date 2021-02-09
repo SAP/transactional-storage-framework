@@ -15,8 +15,9 @@ pub trait Sequencer {
     /// The type should satisfy Clone, Send, Sync and PartialOrd.
     ///
     /// Send and Sync are required as a single instance of Clock can be shared among threads.
+    /// Copy is required as a logical clock value can be copied to various places.
     /// PartialOrd allows developers to implement a Lamport vector clock generator.
-    type Clock: Clone + PartialOrd + Send + Sync;
+    type Clock: Clone + Copy + PartialOrd + Send + Sync;
 
     /// Creates a new instance of Sequence.
     fn new() -> Self;
