@@ -57,7 +57,31 @@ impl<S: Sequencer> VersionCell<S> {
     }
 }
 
+impl<S: Sequencer> Drop for VersionCell<S> {
+    /// self.owner_ptr == Shared::null() partially proves the assertion that
+    /// VersionCell outlives VersionCell.
+    fn drop(&mut self) {
+        unsafe {
+            debug_assert!(self
+                .owner_ptr
+                .load(Relaxed, crossbeam_epoch::unprotected())
+                .is_null());
+            loop {
+                if self
+                    .owner_ptr
+                    .load(Relaxed, crossbeam_epoch::unprotected())
+                    .is_null()
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// VersionLocker owns a VersionCell instance.
+///
+/// It asserts that VersionCell outlives VersionLocker.
 pub struct VersionLocker<'v, S: Sequencer> {
     version_cell_ref: &'v VersionCell<S>,
     clock_ref: &'v AtomicCell<S::Clock>,
