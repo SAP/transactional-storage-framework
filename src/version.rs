@@ -12,9 +12,9 @@ pub trait Version<S: Sequencer> {
 
 /// VersionCell is a piece of data that is embedded in a versioned object.
 ///
-/// A VersionCell instance defines the range of logical clock values in which the object is valid.
 /// It consists of a pair of logical clocks, and the object is deemed valid in all the storage snapshots
-/// in that range.
+/// in that range if S::Clock satisfies the Ord trait, otherwise those two values represent the creation
+/// and deletion time without implying a range.
 ///
 /// A VersionCell can be locked by a transaction when the transaction creates or deletes the versioned
 /// object. The transaction status change is synchronously proprated to readers of the versioned object.
@@ -51,6 +51,15 @@ pub struct VersionLocker<'v, S: Sequencer> {
     version_cell_ref: &'v VersionCell<S>,
     clock_ref: &'v AtomicCell<S::Clock>,
     transaction_cell_ref: &'v TransactionCell<S>,
+}
+
+impl<'v, S: Sequencer> VersionLocker<'v, S> {
+    fn new(
+        version_cell: &VersionCell<S>,
+        transaction: &Transaction<S>,
+    ) -> Option<VersionLocker<'v, S>> {
+        None
+    }
 }
 
 impl<'v, S: Sequencer> Drop for VersionLocker<'v, S> {
