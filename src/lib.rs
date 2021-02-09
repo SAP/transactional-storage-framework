@@ -15,5 +15,5 @@ pub use logger::{Log, Logger};
 pub use sequencer::{DefaultSequencer, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
-pub use transaction::Transaction;
-pub use version::Version;
+pub use transaction::{Transaction, TransactionCell};
+pub use version::{Version, VersionCell};

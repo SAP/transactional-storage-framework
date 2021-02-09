@@ -1,6 +1,6 @@
 extern crate scc;
 
-use super::{Error, Sequencer, Snapshot, Transaction, Version};
+use super::{Error, Sequencer, Snapshot, Transaction, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
@@ -126,7 +126,7 @@ enum ContainerType<S: Sequencer> {
 pub struct Container<S: Sequencer> {
     container: ContainerType<S>,
     references: AtomicUsize,
-    version: Option<S::Clock>,
+    version_cell: VersionCell<S>,
 }
 
 impl<S: Sequencer> Container<S> {
@@ -144,7 +144,7 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Directory(Atomic::null()),
                 references: AtomicUsize::new(1),
-                version: None,
+                version_cell: VersionCell::new(),
             })),
         }
     }
@@ -163,7 +163,7 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Data(Box::new(DefaultContainerData::new())),
                 references: AtomicUsize::new(1),
-                version: None,
+                version_cell: VersionCell::new(),
             })),
         }
     }
@@ -396,20 +396,8 @@ impl<S: Sequencer> Container<S> {
 }
 
 impl<S: Sequencer> Version<S> for Container<S> {
-    fn create(&self, transaction: &Transaction<S>) -> bool {
-        true
-    }
-    fn delete(&self, transaction: &Transaction<S>) -> bool {
-        true
-    }
-    fn visible(&self, snapshot: &Snapshot<S>) -> bool {
-        if let Some(version) = self.version.as_ref() {
-            return version <= snapshot.get();
-        }
-        false
-    }
-    fn consolidate(&self) -> bool {
-        false
+    fn version_cell(&self) -> &VersionCell<S> {
+        &self.version_cell
     }
 }
 

@@ -1,13 +1,14 @@
 use super::{Error, Log, Sequencer, Storage};
+use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 /// A transaction is the atomic unit of work for all types of the storage operations.
 ///
 /// A single strand of change records constitues a single transaction.
-/// An on-going transaction can be rewound at a certain point of time.
+/// An on-going transaction can be rewound to a certain point of time.
 pub struct Transaction<'s, S: Sequencer> {
-    /// The transaction refers to the storage instance to persist the changes at commit.
+    /// The transaction refers to the storage instance to persist pending changes at commit.
     storage: &'s Storage<S>,
     /// The transaction refers to the sequencer instance in order to assign a sequence number for commit.
     sequencer: &'s S,
@@ -177,4 +178,8 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
             transaction.post_process();
         }
     }
+}
+
+pub struct TransactionCell<S: Sequencer> {
+    snapshot: AtomicCell<S::Clock>,
 }

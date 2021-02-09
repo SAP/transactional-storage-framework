@@ -9,13 +9,25 @@ use std::sync::atomic::Ordering::Relaxed;
 /// Developers are able to choose the mechanism by implementing the Sequencer trait, for instance,
 /// the system timestamp generator can directly be used, or a hardware counter can also be
 /// incorporated.
+///
+/// Developers must provide two special values: min, and invalid.
 pub trait Sequencer {
-    /// The type only should satisfy Clone and PartialOrd. PartialOrd allows developers to
-    /// implement a Lamport vector clock generator.
+    /// The type should satisfy Clone, Send, Sync and PartialOrd.
+    ///
+    /// Send and Sync are required as a single instance of Clock can be shared among threads.
+    /// PartialOrd allows developers to implement a Lamport vector clock generator.
     type Clock: Clone + PartialOrd + Send + Sync;
 
     /// Creates a new instance of Sequence.
     fn new() -> Self;
+
+    /// Returns a clock value that represents a snapshot that is always visible.
+    ///
+    /// It may not return the same value whenever it is invoked as long as it satisfies the condition.
+    fn min() -> Self::Clock;
+
+    /// Returns a clock value that no valid snapshots can be associated with.
+    fn invalid() -> Self::Clock;
 
     /// Gets the current logical clock value.
     fn get(&self) -> Self::Clock;
@@ -46,6 +58,12 @@ impl Sequencer for DefaultSequencer {
         DefaultSequencer {
             clock: AtomicUsize::new(0),
         }
+    }
+    fn min() -> usize {
+        0
+    }
+    fn invalid() -> usize {
+        usize::MAX
     }
     fn get(&self) -> Self::Clock {
         self.clock.load(Relaxed)
