@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2021 Changgyoo Park <wvwwvwwv@me.com>
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Transactional Storage Framework
 
 The transactional storage framework is a software framework that offers key operation interfaces and basic functionality for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.

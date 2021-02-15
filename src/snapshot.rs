@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2021 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{DeriveClock, Sequencer, Transaction, TransactionCell};
 use crossbeam_epoch::{Guard, Shared};
 

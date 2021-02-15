@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2021 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{Error, Log, Sequencer, Storage};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use crossbeam_utils::atomic::AtomicCell;
