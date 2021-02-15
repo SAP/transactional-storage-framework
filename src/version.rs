@@ -1,11 +1,11 @@
-use super::{Sequencer, Transaction, TransactionCell};
+use super::{Sequencer, Snapshot, Transaction, TransactionCell};
 use crossbeam_epoch::{Atomic, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 /// The Version trait enforces versioned objects to embed a VersionCell.
 ///
-/// All the versioned objects in tss::Storage must implement the trait.
+/// All the versioned objects in a Storage must implement the trait.
 pub trait Version<S: Sequencer> {
     /// Returns a reference to the VersionCell that the versioned object owns.
     fn version_cell<'v>(&'v self) -> &'v VersionCell<S>;
@@ -17,19 +17,19 @@ pub trait Version<S: Sequencer> {
 /// in that range if S::Clock satisfies the Ord trait, otherwise those two values represent the creation
 /// and deletion time without implying a range.
 ///
-/// A VersionCell can be locked by a transaction when the transaction creates or deletes the versioned
-/// object. The transaction status change is synchronously proprated to readers of the versioned object.
+/// A VersionCell can be locked by a transaction when the transaction creates or deletes the versioned object.
+/// The transaction status change is synchronously proprated to readers of the versioned object.
 pub struct VersionCell<S: Sequencer> {
     /// owner_ptr points to the owner of the VersionCell.
     ///
-    /// Readers have to check the transaction status when owner_ptr points to a valid transaction.
+    /// Readers have to check the transaction state when owner_ptr points to a valid transaction.
     owner_ptr: Atomic<TransactionCell<S>>,
     creation_time: AtomicCell<S::Clock>,
     deletion_time: AtomicCell<S::Clock>,
 }
 
 impl<S: Sequencer> VersionCell<S> {
-    /// Creates a new VersionCell that is invisible.
+    /// Creates a new VersionCell that is globally invisible.
     pub fn new() -> VersionCell<S> {
         VersionCell {
             owner_ptr: Atomic::null(),
@@ -52,14 +52,24 @@ impl<S: Sequencer> VersionCell<S> {
         if self.creation_time.load() == S::invalid() {
             None
         } else {
-            VersionLocker::lock(self, &self.deletion_time, transaction)
+            let locker = VersionLocker::lock(self, &self.deletion_time, transaction);
+            if self.creation_time.load() != S::invalid() {
+                None
+            } else {
+                locker
+            }
         }
+    }
+
+    /// Checks if the versioned object is valid in the snapshot.
+    pub fn valid(&self, snapshot: &Snapshot<S>) -> bool {
+        false
     }
 }
 
 impl<S: Sequencer> Drop for VersionCell<S> {
     /// self.owner_ptr == Shared::null() partially proves the assertion that
-    /// VersionCell outlives VersionCell.
+    /// VersionCell outlives the transaction.
     fn drop(&mut self) {
         unsafe {
             debug_assert!(self

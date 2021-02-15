@@ -12,7 +12,7 @@ pub struct Log {
 pub trait Logger<S: Sequencer> {
     /// Persists the given data.
     ///
-    /// It returns the log sequence number pair of the persisted data.
+    /// It returns the start and end log sequence number pair of the persisted data.
     fn persist(&self, log: &Log, transaction: &Transaction<S>) -> Result<(usize, usize), Error>;
 
     /// Flushes pending log records into the persistent storage.

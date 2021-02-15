@@ -1,3 +1,16 @@
+//! Transactional Storage Framework
+//!
+//! # [`tss::Storage`]
+//! [`tss::Storage`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
+//! # [`tss::Container`]
+//! [`tss::Container`] is a hierachical data container that [`tss::Storage`] manages.
+//! # [`tss::Transaction`]
+//! [`tss::Transaction`] represents storage transactions.
+//!
+//! [`tss::Storage`]: storage::Storage
+//! [`tss::Container`]: container::Container
+//! [`tss::Transaction`]: transaction::Transaction
+
 mod container;
 mod error;
 mod logger;

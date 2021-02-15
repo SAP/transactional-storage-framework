@@ -9,18 +9,20 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 /// A single strand of change records constitues a single transaction.
 /// An on-going transaction can be rewound to a certain point of time.
 pub struct Transaction<'s, S: Sequencer> {
-    /// The transaction refers to the storage instance to persist pending changes at commit.
+    /// The transaction refers to a Storage instance to persist pending changes at commit.
     storage: &'s Storage<S>,
-    /// The transaction refers to the sequencer instance in order to assign a sequence number for commit.
+    /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
     sequencer: &'s S,
     /// The transaction local clock value is used to differentiate changes made within the transaction.
+    ///
+    /// It is statically typed usize.
     transaction_local_clock: AtomicUsize,
-    /// The transaction cell contains data that can be shared and may outlive the transaction.
+    /// transaction_cell contains data that can be shared and may outlive the transaction.
     transaction_cell: Atomic<TransactionCell<S>>,
 }
 
 impl<'s, S: Sequencer> Transaction<'s, S> {
-    /// Creates a new transaction.
+    /// Creates a new Transaction.
     ///
     /// # Examples
     /// ```
@@ -37,7 +39,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
             transaction_cell: Atomic::from(Owned::new(TransactionCell::new(sequencer))),
         }
     }
-    /// Returns a shared pointer to the transaction cell.
+    /// Returns a shared pointer to the TransactionCell.
     ///
     /// # Examples
     /// ```
@@ -51,7 +53,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         self.transaction_cell.load(Relaxed, guard)
     }
 
-    /// Gets the current logical clock value of the transaction.
+    /// Gets the current transaction-local clock value of the Transaction.
     ///
     /// # Examples
     /// ```
@@ -80,9 +82,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         self.transaction_local_clock.fetch_add(1, AcqRel) + 1
     }
 
-    /// Rewinds the transaction to the given point of time.
+    /// Rewinds the Transaction to the given point of time.
     ///
-    /// All the changes made between the latest operation sequence and the given one are reverted.
+    /// All the changes made between the latest transaction-local clock and the given one are reverted.
     ///
     /// # Examples
     /// ```
@@ -92,11 +94,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let mut transaction = storage.transaction();
     /// transaction.rewind(0);
     /// ```
-    pub fn rewind(&mut self, sequence: usize) -> Result<usize, Error> {
+    pub fn rewind(&mut self, transaction_local_clock: usize) -> Result<usize, Error> {
         Err(Error::Fail)
     }
 
-    /// Commits a transaction.
+    /// Commits the changes made by the Transaction.
     ///
     /// # Examples
     /// ```
@@ -107,7 +109,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// transaction.commit();
     /// ```
     pub fn commit(mut self) -> Result<Rubicon<'s, S>, Error> {
-        // Assigns a new snapshot version.
+        // Assigns a new logical clock.
         let guard = crossbeam_epoch::pin();
         let transaction_cell_shared = self.transaction_cell(&guard);
         if transaction_cell_shared.is_null() {
@@ -122,7 +124,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         })
     }
 
-    /// Rolls back a transaction.
+    /// Rolls back the changes made by the Transaction.
     ///
     /// If there is nothing to rollback, it returns false.
     ///
@@ -139,16 +141,16 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         drop(self);
     }
 
-    /// Post processes transaction commit.
+    /// Post-processes transaction commit.
     ///
     /// Only a Rubicon instance is allowed to call this function.
-    /// Once a transaction is post-processed, the transaction cannot be rolled back.
+    /// Once the Transaction is post-processed, the Transaction cannot be rolled back.
     fn post_process(mut self) {}
 }
 
 impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     fn drop(&mut self) {
-        // Rolls back the transaction if not committed.
+        // Rolls back the Transaction if not committed.
         let guard = crossbeam_epoch::pin();
         let cell_shared = self.transaction_cell.load(Relaxed, &guard);
         if !cell_shared.is_null() {
@@ -158,13 +160,13 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     }
 }
 
-/// Rubicon gives one last chance of rolling back the transaction.
+/// Rubicon gives one last chance of rolling back the Transaction.
 ///
-/// The transaction is bound to be committed if no actions are taken before dropping the Rubicon
+/// The Transaction is bound to be committed if no actions are taken before dropping the Rubicon
 /// instance. On the other hands, the transaction stays uncommitted until the Rubicon instance is
 /// dropped.
 ///
-/// The fact that the transaction is stopped just before being fully committed enables developers
+/// The fact that the Transaction is stopped just before being fully committed enables developers
 /// to implement a distributed transaction commit protocols, such as the two-phase-commit protocol,
 /// or X/Open XA. One will be able to regard a state where a piece of code holding a Rubicon
 /// instance as being a state where the distributed transaction is prepared.
@@ -173,7 +175,7 @@ pub struct Rubicon<'s, S: Sequencer> {
 }
 
 impl<'s, S: Sequencer> Rubicon<'s, S> {
-    /// Rolls back a committable transaction.
+    /// Rolls back a committable Transaction.
     ///
     /// If there is nothing to rollback, it returns false.
     ///
@@ -198,7 +200,7 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
 }
 
 impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
-    /// Post processes the transaction is the transaction is not explicitly rolled back.
+    /// Post-processes the transaction that is not explicitly rolled back.
     fn drop(&mut self) {
         if let Some(transaction) = self.transaction.take() {
             transaction.post_process();
@@ -207,6 +209,8 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
 }
 
 /// TransactionCell is a piece of data that represents the future snapshot when the transaction is committed.
+///
+/// If the Transaction is rolled back, the TransactionCell is dropped without being updated.
 pub struct TransactionCell<S: Sequencer> {
     snapshot: AtomicCell<S::Clock>,
 }

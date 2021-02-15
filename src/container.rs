@@ -106,7 +106,7 @@ impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
 /// ContainerDirectory is a tree storing handles to sub containers.
 type ContainerDirectory<S: Sequencer> = TreeIndex<String, ContainerHandle<S>>;
 
-/// A container can either be Data or Directory.
+/// Container can either be Data or Directory.
 enum ContainerType<S: Sequencer> {
     Data(Box<dyn ContainerData<S> + Send + Sync>),
     Directory(Atomic<ContainerDirectory<S>>),
@@ -114,15 +114,12 @@ enum ContainerType<S: Sequencer> {
 
 /// A transactional data container.
 ///
-/// tss::Container is a container of organized data. The data organization is specified in the
+/// Container is a container of organized data. The data organization is specified in the
 /// metadata of the container. A container may point to external data sources, or embed all the
 /// data inside it.
 ///
-/// A container may hold references to other containers, and those containers holding container
-/// references are called a directory as tss::Storage regards them as parent directories.
-///
-/// A directory container may provide its readers with an aggregated view on sub containers,
-/// making it similar to the concept of a 'view' on database tables.
+/// A Container may hold references to other Container instances, and those holding Container
+/// references are called a directory.
 pub struct Container<S: Sequencer> {
     container: ContainerType<S>,
     references: AtomicUsize,

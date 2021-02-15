@@ -3,27 +3,27 @@ extern crate crossbeam_epoch;
 use super::{Container, ContainerHandle, Error, Sequencer, Snapshot, Transaction};
 use std::string::String;
 
-/// A transactional storage.
+/// Storage is a transactional data storage.
 ///
-/// tss::Storage is a collection of internal containers that are hierarchically organized.
-/// The organization of containers resembles that of POSIX file system as it allows symbolic links
+/// Storage is a collection of internal containers that are hierarchically organized.
+/// The organization of containers resembles that of a POSIX file system as it allows symbolic linking
 /// and offers basic access control mechanisms.
 ///
-/// Apart from containers being organized like a file system, every piece of data that tss::Storage
-/// manages is multi-versioned, and transactionally updated. Therefore, tss::Storage can be viewed
+/// Apart from containers being organized like a file system, every piece of data that a Storage
+/// manages is multi-versioned, and transactionally updated. Therefore, a Storage can be viewed
 /// as the storage layer of a huge database management system, while its flexibility allows the
 /// developers and users to develop, or plug-in new features and transaction mechanisms easily.
 pub struct Storage<S: Sequencer> {
     /// The name of the storage.
     name: String,
-    /// The logical clock of the storage.
+    /// The logical clock generator of the storage.
     sequencer: S,
     /// The root container of the storage.
     root_container: ContainerHandle<S>,
 }
 
 impl<S: Sequencer> Storage<S> {
-    /// Creates a new storage instance.
+    /// Creates a new Storage.
     ///
     /// # Examples
     /// ```
@@ -54,7 +54,7 @@ impl<S: Sequencer> Storage<S> {
 
     /// Takes a snapshot of the storage.
     ///
-    /// If a transaction is given, the snapshot includes changes that have been made by the
+    /// If a Transaction is given, the snapshot includes changes that have been made by the
     /// transaction.
     ///
     /// # Examples
@@ -105,10 +105,10 @@ impl<S: Sequencer> Storage<S> {
         }
     }
 
-    /// Gets a container located at the given path.
+    /// Gets the Container located at the given path.
     ///
-    /// When a transaction is given, and the container at the given path is created by the
-    /// transaction, the container is returned.
+    /// When a Transaction is given, and the Container at the given path is created by the
+    /// Transaction, the Container is returned.
     ///
     /// # Examples
     /// ```
@@ -143,7 +143,9 @@ impl<S: Sequencer> Storage<S> {
         }
     }
 
-    /// Reads a container.
+    /// Reads the Container at the given path.
+    ///
+    /// Getting a reference to a Container requires zero write operations on the storage.
     ///
     /// # Examples
     /// ```
@@ -263,7 +265,7 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Removes a container.
+    /// Removes the Container at the given path.
     ///
     /// # Examples
     /// ```

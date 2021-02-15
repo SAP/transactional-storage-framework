@@ -9,7 +9,6 @@ The transactional storage framework is a software framework that offers key oper
 * [tss::Transaction](#transaction)
 * [tss::Logger](#logger)
 * [tss::Version](#version)
-* [tss::Janitor](#janitor)
 
 This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hotspots caused by the large number of processors. It turns out that small, toy programs are very useful when it comes to checking if a specific database mechanism scales well as the number of processors increases, because those adverse effects that the paper describes will be hardly detected on a large database instance running on the same hardware.
 
@@ -42,6 +41,3 @@ tss::Logger is an abstract module for implementing write-ahead-logging mechanism
 
 ## tss::Version <a name="version">
 tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data.
-
-## tss::Janitor <a name="janitor">
-tss::Janitor defines the common interfaces for a database garbage collector.

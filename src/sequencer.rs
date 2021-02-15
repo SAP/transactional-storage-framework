@@ -8,7 +8,7 @@ pub trait DeriveClock<C> {
     fn derive(&self) -> C;
 }
 
-/// A sequencer acts as a logical clock for the storage system.
+/// Sequencer acts as a logical clock for the storage system.
 ///
 /// The logical clock is the most important feature of a transactional storage system as it defines
 /// the flow of time.
@@ -16,10 +16,8 @@ pub trait DeriveClock<C> {
 /// Developers are able to choose the mechanism by implementing the Sequencer trait, for instance,
 /// the system timestamp generator can directly be used, or a hardware counter can also be
 /// incorporated.
-///
-/// The lifetime os a sequencer adheres to that of the storage that owns it.
 pub trait Sequencer {
-    /// Clock is a type that the sequencer generates.
+    /// Clock is a partially ordered type that the Sequencer relies on.
     ///
     /// It should satisfy Clone, Send, Sync and PartialOrd.
     ///
@@ -79,7 +77,7 @@ impl DeriveClock<usize> for DefaultTracker {
     }
 }
 
-/// The default sequencer is an atomic counter with a mutex-protected BTreeMap tracker.
+/// The default sequencer is an atomic counter with a mutex-protected BTreeMap.
 ///
 /// An atomic counter is very inefficient when the system is equipped with a large number of processors.
 /// Furthermore, the mutex-protected BTreeMap does not scale as the number of threads increases.
