@@ -1,9 +1,6 @@
 extern crate crossbeam_epoch;
 
-use super::{
-    Container, ContainerHandle, DefaultSequencer, Error, Janitor, Sequencer, Snapshot, Transaction,
-};
-use crossbeam_epoch::{Atomic, Owned, Shared};
+use super::{Container, ContainerHandle, Error, Sequencer, Snapshot, Transaction};
 use std::string::String;
 
 /// A transactional storage.
@@ -69,7 +66,7 @@ impl<S: Sequencer> Storage<S> {
     /// let snapshot = storage.snapshot(Some(&transaction));
     /// ```
     pub fn snapshot<'s>(&'s self, transaction: Option<&'s Transaction<S>>) -> Snapshot<S> {
-        Snapshot::new(self, &self.sequencer, transaction)
+        Snapshot::new(&self.sequencer, transaction)
     }
 
     /// Creates a new container directory.

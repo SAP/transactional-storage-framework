@@ -4,7 +4,7 @@ use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
-/// A transaction is the atomic unit of work for all types of the storage operations.
+/// Transaction is the atomic unit of work for all types of the storage operations.
 ///
 /// A single strand of change records constitues a single transaction.
 /// An on-going transaction can be rewound to a certain point of time.
@@ -34,7 +34,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
             storage,
             sequencer,
             transaction_local_clock: AtomicUsize::new(0),
-            transaction_cell: Atomic::from(Owned::new(TransactionCell::new())),
+            transaction_cell: Atomic::from(Owned::new(TransactionCell::new(sequencer))),
         }
     }
     /// Returns a shared pointer to the transaction cell.
@@ -53,22 +53,18 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Gets the current logical clock value of the transaction.
     ///
-    /// The given chunk of log records are kept until the transaction ends.
-    ///
     /// # Examples
     /// ```
     /// use tss::{DefaultSequencer, Storage, Transaction};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    /// assert_eq!(transaction.clock(), 0);
+    ///assert_eq!(transaction.clock(), 0);
     pub fn clock(&self) -> usize {
         self.transaction_local_clock.load(Acquire)
     }
 
     /// Advances the logical clock of the transaction by one by feeding log records.
-    ///
-    /// The given chunk of log records are kept until the transaction ends.
     ///
     /// # Examples
     /// ```
@@ -87,6 +83,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// Rewinds the transaction to the given point of time.
     ///
     /// All the changes made between the latest operation sequence and the given one are reverted.
+    ///
     /// # Examples
     /// ```
     /// use tss::{DefaultSequencer, Storage, Transaction};
@@ -209,12 +206,13 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
     }
 }
 
+/// TransactionCell is a piece of data that represents the future snapshot when the transaction is committed.
 pub struct TransactionCell<S: Sequencer> {
     snapshot: AtomicCell<S::Clock>,
 }
 
 impl<S: Sequencer> TransactionCell<S> {
-    fn new() -> TransactionCell<S> {
+    fn new(sequencer: &S) -> TransactionCell<S> {
         TransactionCell {
             snapshot: AtomicCell::new(S::invalid()),
         }

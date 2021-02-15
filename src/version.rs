@@ -1,4 +1,4 @@
-use super::{Sequencer, Snapshot, Transaction, TransactionCell};
+use super::{Sequencer, Transaction, TransactionCell};
 use crossbeam_epoch::{Atomic, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
@@ -29,7 +29,7 @@ pub struct VersionCell<S: Sequencer> {
 }
 
 impl<S: Sequencer> VersionCell<S> {
-    /// Creates a new VersionCell.
+    /// Creates a new VersionCell that is invisible.
     pub fn new() -> VersionCell<S> {
         VersionCell {
             owner_ptr: Atomic::null(),

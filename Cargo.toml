@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 crossbeam-epoch = "^0.9.1"
 crossbeam-utils = "^0.8.1"
-scc = "^0.4.0"
+scc = "^0.4.2"
 
 [workspace]
 members = [".", "tests"]
