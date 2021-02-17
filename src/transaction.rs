@@ -174,6 +174,8 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
         let guard = crossbeam_epoch::pin();
         let cell_shared = self.transaction_cell.load(Relaxed, &guard);
         if !cell_shared.is_null() {
+            // Rewinds the transaction.
+            self.rewind(0);
             // The transaction cell has neither passed to other components nor consumed.
             drop(unsafe { cell_shared.into_owned() });
         }
