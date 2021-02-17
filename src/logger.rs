@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Error, Sequencer, Transaction};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Log stores the data that is to be persisted.

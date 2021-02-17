@@ -5,7 +5,7 @@
 use super::{Error, Log, Sequencer, Storage};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use crossbeam_utils::atomic::AtomicCell;
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
+use std::sync::atomic::Ordering::Relaxed;
 
 /// Transaction is the atomic unit of work for all types of the storage operations.
 ///
@@ -81,7 +81,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let transaction = storage.transaction();
     /// assert_eq!(transaction.advance(Log::new()), 1);
     /// ```
-    pub fn advance(&self, mut log: Log) -> usize {
+    pub fn advance(&self, log: Log) -> usize {
         let mut log_records = self.log_records.lock().unwrap();
         log_records.push(log);
         log_records.len()
@@ -128,7 +128,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let mut transaction = storage.transaction();
     /// transaction.commit();
     /// ```
-    pub fn commit(mut self) -> Result<Rubicon<'s, S>, Error> {
+    pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
         let guard = crossbeam_epoch::pin();
         let transaction_cell_shared = self.transaction_cell(&guard);
@@ -156,7 +156,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let mut transaction = storage.transaction();
     /// transaction.rollback();
     /// ```
-    pub fn rollback(mut self) {
+    pub fn rollback(self) {
         // Dropping the instance entails a synchronous transaction rollback.
         drop(self);
     }
@@ -165,7 +165,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// Only a Rubicon instance is allowed to call this function.
     /// Once the Transaction is post-processed, the Transaction cannot be rolled back.
-    fn post_process(mut self) {}
+    fn post_process(self) {}
 }
 
 impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
@@ -175,7 +175,7 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
         let cell_shared = self.transaction_cell.load(Relaxed, &guard);
         if !cell_shared.is_null() {
             // Rewinds the transaction.
-            self.rewind(0);
+            let _result = self.rewind(0);
             // The transaction cell has neither passed to other components nor consumed.
             drop(unsafe { cell_shared.into_owned() });
         }

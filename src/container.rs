@@ -108,7 +108,7 @@ impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
 }
 
 /// ContainerDirectory is a tree storing handles to sub containers.
-type ContainerDirectory<S: Sequencer> = TreeIndex<String, ContainerHandle<S>>;
+type ContainerDirectory<S> = TreeIndex<String, ContainerHandle<S>>;
 
 /// Container can either be Data or Directory.
 enum ContainerType<S: Sequencer> {

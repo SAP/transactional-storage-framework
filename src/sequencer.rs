@@ -140,7 +140,7 @@ impl Sequencer for DefaultSequencer {
         }
     }
     fn fold<F: Fn(&Self::Clock)>(&self, f: F) {
-        if let Ok(mut min_heap) = self.min_heap.lock() {
+        if let Ok(min_heap) = self.min_heap.lock() {
             for entry in min_heap.iter() {
                 f(entry.0);
             }

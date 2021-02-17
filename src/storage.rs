@@ -258,7 +258,7 @@ impl<S: Sequencer> Storage<S> {
                         .get(&guard)
                         .link(name, container_handle.clone())
                     {
-                        self.remove(path, transaction, snapshot);
+                        let _result = self.remove(path, transaction, snapshot);
                         return Ok(container_handle);
                     }
                 }
