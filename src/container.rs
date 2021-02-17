@@ -229,13 +229,13 @@ impl<S: Sequencer> Container<S> {
     /// type Handle = ContainerHandle<DefaultSequencer>;
     ///
     /// let container_handle_root: Handle = Container::new_directory();
-    /// let apple = String::from("apple");
+    /// let apple = "apple";
     ///
     /// let guard = crossbeam_epoch::pin();
     /// let sub_directory = container_handle_root.get(&guard).create_directory(&apple);
     /// assert!(sub_directory.is_some());
     /// ```
-    pub fn create_directory(&self, name: &String) -> Option<ContainerHandle<S>> {
+    pub fn create_directory(&self, name: &str) -> Option<ContainerHandle<S>> {
         let guard = crossbeam_epoch::pin();
         if let ContainerType::Directory(directory) = &self.container {
             let mut directory_shared_ptr = directory.load(Relaxed, &guard);
@@ -250,7 +250,7 @@ impl<S: Sequencer> Container<S> {
                     Err(result) => directory_shared_ptr = result.current,
                 }
                 let directory_ref = unsafe { directory_shared_ptr.deref() };
-                let mut name = name.clone();
+                let mut name = String::from(name);
                 let new_directory = Self::new_directory();
                 loop {
                     if let Err((key, value)) = directory_ref.insert(name, new_directory.clone()) {
@@ -284,7 +284,7 @@ impl<S: Sequencer> Container<S> {
     ///
     /// let container_handle_root: Handle = Container::new_directory();
     /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = String::from("apple");
+    /// let apple = "apple";
     ///
     /// let guard = crossbeam_epoch::pin();
     /// let root_ref = container_handle_root.get(&guard);
@@ -294,16 +294,18 @@ impl<S: Sequencer> Container<S> {
     /// let apple_ref = root_ref.search(&apple, &guard);
     /// assert!(apple_ref.is_some());
     /// ```
-    pub fn search<'g>(&self, name: &String, guard: &'g Guard) -> Option<&'g Container<S>> {
+    pub fn search<'g>(&self, name: &str, guard: &'g Guard) -> Option<&'g Container<S>> {
         if let ContainerType::Directory(directory) = &self.container {
             let directory_shared_ptr = directory.load(Relaxed, guard);
             if directory_shared_ptr.is_null() {
                 None
             } else {
                 unsafe {
-                    directory_shared_ptr.deref().read(name, |_, value_ref| {
-                        value_ref.pointer.load(Relaxed, guard).deref()
-                    })
+                    directory_shared_ptr
+                        .deref()
+                        .read(&String::from(name), |_, value_ref| {
+                            value_ref.pointer.load(Relaxed, guard).deref()
+                        })
                 }
             }
         } else {
@@ -322,14 +324,14 @@ impl<S: Sequencer> Container<S> {
     ///
     /// let container_handle_root: Handle = Container::new_directory();
     /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = String::from("apple");
+    /// let apple = "apple";
     ///
     /// let guard = crossbeam_epoch::pin();
     /// let root_ref = container_handle_root.get(&guard);
     /// let result = root_ref.link(&apple, container_handle_apple);
     /// assert!(result);
     /// ```
-    pub fn link(&self, name: &String, container_handle: ContainerHandle<S>) -> bool {
+    pub fn link(&self, name: &str, container_handle: ContainerHandle<S>) -> bool {
         let guard = crossbeam_epoch::pin();
         match (&self.container, &container_handle.get(&guard).container) {
             (ContainerType::Directory(directory), ContainerType::Data(_)) => {
@@ -348,7 +350,7 @@ impl<S: Sequencer> Container<S> {
                 unsafe {
                     directory_shared_ptr
                         .deref()
-                        .insert(name.clone(), container_handle)
+                        .insert(String::from(name), container_handle)
                         .is_ok()
                 }
             }
@@ -365,7 +367,7 @@ impl<S: Sequencer> Container<S> {
     ///
     /// let container_handle_root: Handle = Container::new_directory();
     /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = String::from("apple");
+    /// let apple = "apple";
     ///
     /// let guard = crossbeam_epoch::pin();
     /// let root_ref = container_handle_root.get(&guard);
@@ -381,14 +383,14 @@ impl<S: Sequencer> Container<S> {
     /// let apple_ref = root_ref.search(&apple, &guard);
     /// assert!(apple_ref.is_none());
     /// ```
-    pub fn unlink(&self, name: &String) -> bool {
+    pub fn unlink(&self, name: &str) -> bool {
         if let ContainerType::Directory(directory) = &self.container {
             let guard = crossbeam_epoch::pin();
             let directory_shared_ptr = directory.load(Relaxed, &guard);
             if directory_shared_ptr.is_null() {
                 false
             } else {
-                unsafe { directory_shared_ptr.deref().remove(name) }
+                unsafe { directory_shared_ptr.deref().remove(&String::from(name)) }
             }
         } else {
             false

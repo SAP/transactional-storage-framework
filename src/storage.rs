@@ -33,7 +33,7 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     /// use tss::{DefaultSequencer, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("farm"));
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// ```
     pub fn new(name: String) -> Storage<S> {
         Storage {
@@ -49,7 +49,7 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     /// use tss::{DefaultSequencer, Snapshot, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("farm"));
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     /// ```
     pub fn transaction(&self) -> Transaction<S> {
@@ -65,7 +65,7 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     /// use tss::{DefaultSequencer, Snapshot, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("farm"));
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
     /// ```
@@ -79,24 +79,22 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     /// use tss::{DefaultSequencer, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("farm"));
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     ///
-    /// let result = storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
+    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
     /// ```
     pub fn create_directory(
         &self,
-        path: &String,
+        path: &str,
         transaction: &Transaction<S>,
     ) -> Result<ContainerHandle<S>, Error> {
-        let split = path.as_str().split('/');
+        let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some(directory_handle) =
-                current_container_ref.create_directory(&String::from(name))
-            {
+            if let Some(directory_handle) = current_container_ref.create_directory(name) {
                 current_container_ref = directory_handle.get(&guard);
             } else {
                 return Err(Error::Fail);
@@ -121,20 +119,20 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
     ///
-    /// let result = storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
+    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
     /// transaction.commit();
     ///
     /// let snapshot = storage.snapshot(None);
-    /// let result = storage.get(&String::from("/thomas/eats/apples"), &snapshot);
+    /// let result = storage.get("/thomas/eats/apples", &snapshot);
     /// assert!(result.is_some());
     /// ```
-    pub fn get(&self, path: &String, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
-        let split = path.as_str().split('/');
+    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
+        let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(&String::from(name), &guard) {
+            if let Some(container_ref) = current_container_ref.search(name, &guard) {
                 current_container_ref = container_ref;
             } else {
                 return None;
@@ -159,21 +157,21 @@ impl<S: Sequencer> Storage<S> {
     /// let transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
     ///
-    /// storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
-    /// let result = storage.read(&String::from("/thomas/eats/apples"), |_| true, &snapshot);
+    /// storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let result = storage.read("/thomas/eats/apples", |_| true, &snapshot);
     /// assert!(result.unwrap());
     /// ```
     pub fn read<R, F: FnOnce(&Container<S>) -> R>(
         &self,
-        path: &String,
+        path: &str,
         reader: F,
         snapshot: &Snapshot<S>,
     ) -> Option<R> {
-        let split = path.as_str().split('/');
+        let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(&String::from(name), &guard) {
+            if let Some(container_ref) = current_container_ref.search(name, &guard) {
                 current_container_ref = container_ref;
             } else {
                 return None;
@@ -192,13 +190,13 @@ impl<S: Sequencer> Storage<S> {
     /// let mut transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
     ///
-    /// let result = storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
+    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
     ///
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link(&String::from("/thomas/eats/apples"), new_data_container,  &String::from("apple1"), &transaction, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &transaction, &snapshot);
     ///
-    /// let result = storage.get(&String::from("/thomas/eats/apples/apple1"), &snapshot);
+    /// let result = storage.get("/thomas/eats/apples/apple1", &snapshot);
     /// assert!(result.is_some());
     ///
     /// drop(snapshot);
@@ -206,9 +204,9 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     pub fn link(
         &self,
-        path: &String,
+        path: &str,
         container: ContainerHandle<S>,
-        name: &String,
+        name: &str,
         transaction: &Transaction<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
@@ -231,34 +229,34 @@ impl<S: Sequencer> Storage<S> {
     /// let mut transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
     ///
-    /// let result = storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
+    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
     ///
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link(&String::from("/thomas/eats/apples"), new_data_container,  &String::from("apple1"), &transaction, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &transaction, &snapshot);
     ///
-    /// storage.relocate(&String::from("/thomas/eats/apples/apple1"), &String::from("/thomas/eats"), &transaction, &snapshot);
+    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &transaction, &snapshot);
     ///
-    /// let result = storage.get(&String::from("/thomas/eats/apples/apple1"), &snapshot);
+    /// let result = storage.get("/thomas/eats/apples/apple1", &snapshot);
     /// assert!(result.is_none());
     ///
-    /// let result = storage.get(&String::from("/thomas/eats/apple1"), &snapshot);
+    /// let result = storage.get("/thomas/eats/apple1", &snapshot);
     /// assert!(result.is_some());
     /// ```
     pub fn relocate(
         &self,
-        path: &String,
-        target_path: &String,
+        path: &str,
+        target_path: &str,
         transaction: &Transaction<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
-        if let Some(container_handle) = self.get(&path, snapshot) {
-            if let Some(target_directory_container_handle) = self.get(&target_path, snapshot) {
+        if let Some(container_handle) = self.get(path, snapshot) {
+            if let Some(target_directory_container_handle) = self.get(target_path, snapshot) {
                 if let Some((name, _)) = Self::name(&path) {
                     let guard = crossbeam_epoch::pin();
                     if target_directory_container_handle
                         .get(&guard)
-                        .link(&String::from(name), container_handle.clone())
+                        .link(name, container_handle.clone())
                     {
                         self.remove(path, transaction, snapshot);
                         return Ok(container_handle);
@@ -279,29 +277,29 @@ impl<S: Sequencer> Storage<S> {
     /// let mut transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
     ///
-    /// let result = storage.create_directory(&String::from("/thomas/eats/apples"), &transaction);
+    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
     /// drop(snapshot);
     /// transaction.commit();
     ///
     /// let mut transaction = storage.transaction();
     /// let snapshot = storage.snapshot(Some(&transaction));
-    /// let result = storage.remove(&String::from("/thomas/eats/apples"), &transaction, &snapshot);
+    /// let result = storage.remove("/thomas/eats/apples", &transaction, &snapshot);
     /// assert!(result.is_ok());
     /// ```
     pub fn remove(
         &self,
-        path: &String,
+        path: &str,
         transaction: &Transaction<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
-        let split = path.as_str().split('/');
+        let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         let mut parent_container_ref: Option<&Container<S>> = None;
         let mut parent_container_name: Option<&str> = None;
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(&String::from(name), &guard) {
+            if let Some(container_ref) = current_container_ref.search(name, &guard) {
                 parent_container_ref.replace(current_container_ref);
                 parent_container_name.replace(name);
                 current_container_ref = container_ref;
@@ -313,7 +311,7 @@ impl<S: Sequencer> Storage<S> {
             if let (Some(parent_container_ref), Some(parent_container_name)) =
                 (parent_container_ref, parent_container_name)
             {
-                if !parent_container_ref.unlink(&String::from(parent_container_name)) {
+                if !parent_container_ref.unlink(parent_container_name) {
                     return Err(Error::Fail);
                 }
             }

@@ -3,13 +3,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Error, Sequencer, Transaction};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Log stores the data that is to be persisted.
 pub struct Log {
-    log_data: Vec<u8>,
-    undo_data: Vec<u8>,
-    undo_hook: Option<Box<dyn FnOnce((&Vec<u8>, &Vec<u8>))>>,
+    /// The data stored in the vector is persisted.
+    log: Vec<u8>,
+    /// undo_hook is invoked when the transaction is rewound or rolled back.
+    ///
+    /// The undo data can be stored separately.
+    undo_hook: Option<(Vec<u8>, Box<dyn FnOnce(&Vec<u8>)>)>,
+}
+
+impl Log {
+    /// Creates a new Log.
+    pub fn new() -> Log {
+        Log {
+            log: Vec::new(),
+            undo_hook: None,
+        }
+    }
+
+    /// Invokes the undo hook.
+    pub fn undo(mut self) {
+        if let Some((undo_data, undo_hook)) = self.undo_hook.take() {
+            undo_hook(&undo_data);
+        }
+    }
 }
 
 /// The Logger trait defines logging interfaces.
