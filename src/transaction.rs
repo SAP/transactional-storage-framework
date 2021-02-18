@@ -40,6 +40,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
             log_records: std::sync::Mutex::new(Vec::new()),
         }
     }
+
     /// Returns a shared pointer to the TransactionCell.
     ///
     /// # Examples
