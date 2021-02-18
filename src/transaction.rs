@@ -263,9 +263,9 @@ impl<S: Sequencer> TransactionCell<S> {
     }
 
     /// Returns true if the transaction is visible to the reader.
-    pub fn visible(&self, snapshot: S::Clock) -> bool {
-        if self.preliminary_snapshot == S::invalid() || self.preliminary_snapshot >= snapshot {
-            return false;
+    pub fn visible(&self, snapshot: &S::Clock) -> (bool, S::Clock) {
+        if self.preliminary_snapshot == S::invalid() || self.preliminary_snapshot >= *snapshot {
+            return (false, S::invalid());
         }
         // The transaction will either be committed or rolled back soon.
         if self.final_snapshot == S::invalid() {
@@ -275,7 +275,11 @@ impl<S: Sequencer> TransactionCell<S> {
             }
         }
         // Checks the final snapshot.
-        self.final_snapshot != S::invalid() && self.final_snapshot <= snapshot
+        let final_snapshot = self.final_snapshot;
+        (
+            final_snapshot != S::invalid() && final_snapshot <= *snapshot,
+            final_snapshot,
+        )
     }
 
     pub fn snapshot(&self) -> S::Clock {

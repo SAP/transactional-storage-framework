@@ -5,7 +5,7 @@
 use super::{Sequencer, Snapshot, Transaction, TransactionCell};
 use crossbeam_epoch::{Atomic, Shared};
 use crossbeam_utils::atomic::AtomicCell;
-use std::sync::atomic::Ordering::{Relaxed, Release};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// The Version trait enforces versioned objects to embed a VersionCell.
 ///
@@ -72,7 +72,40 @@ impl<S: Sequencer> VersionCell<S> {
     }
 
     /// Checks if the versioned object is valid in the snapshot.
-    pub fn valid(&self, _snapshot: &Snapshot<S>) -> bool {
+    pub fn valid(&self, snapshot: &Snapshot<S>) -> bool {
+        // Checks the owner.
+        if !self
+            .owner_ptr
+            .load(Relaxed, unsafe { crossbeam_epoch::unprotected() })
+            .is_null()
+        {
+            let guard = crossbeam_epoch::pin();
+            let owner_shared = self.owner_ptr.load(Acquire, &guard);
+            if !owner_shared.is_null() {
+                let transaction_cell_ref = unsafe { owner_shared.deref() };
+                let (visible, clock) = transaction_cell_ref.visible(snapshot.clock());
+                if visible {
+                    let creation_time = self.creation_time.load();
+                    if creation_time == S::invalid() {
+                        return true;
+                    } else if creation_time == clock {
+                        return true;
+                    }
+                    // What it has seen is the deletor.
+                    return false;
+                }
+            }
+        }
+        // Checks the creation time.
+        let creation_time = self.creation_time.load();
+        if creation_time == S::invalid() || creation_time > *snapshot.clock() {
+            return false;
+        }
+        // Checks the deletion time.
+        let deletion_time = self.deletion_time.load();
+        if deletion_time == S::invalid() || deletion_time > *snapshot.clock() {
+            return true;
+        }
         false
     }
 }
