@@ -24,7 +24,7 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
         let tracker = sequencer.issue();
         let snapshot = tracker
             .as_ref()
-            .map_or_else(|| S::invalid(), |tracker| tracker.derive());
+            .map_or_else(S::invalid, |tracker| tracker.derive());
         Snapshot {
             sequencer,
             tracker,

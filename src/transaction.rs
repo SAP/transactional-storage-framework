@@ -4,8 +4,8 @@
 
 use super::{Error, Log, Sequencer, Storage};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
-use crossbeam_utils::atomic::AtomicCell;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Relaxed, Release};
+use std::sync::{Condvar, Mutex};
 
 /// Transaction is the atomic unit of work for all types of the storage operations.
 ///
@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering::Relaxed;
 /// An on-going transaction can be rewound to a certain point of time.
 pub struct Transaction<'s, S: Sequencer> {
     /// The transaction refers to a Storage instance to persist pending changes at commit.
-    storage: &'s Storage<S>,
+    _storage: &'s Storage<S>,
     /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
     sequencer: &'s S,
     /// transaction_cell contains data that can be shared and may outlive the transaction.
@@ -34,9 +34,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     pub fn new(storage: &'s Storage<S>, sequencer: &'s S) -> Transaction<'s, S> {
         Transaction {
-            storage,
+            _storage: storage,
             sequencer,
-            transaction_cell: Atomic::from(Owned::new(TransactionCell::new(sequencer))),
+            transaction_cell: Atomic::from(Owned::new(TransactionCell::new())),
             log_records: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -132,14 +132,18 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
         let guard = crossbeam_epoch::pin();
-        let transaction_cell_shared = self.transaction_cell(&guard);
+        let mut transaction_cell_shared = self.transaction_cell(&guard);
         if transaction_cell_shared.is_null() {
             return Err(Error::Fail);
         }
-        let transaction_cell_ref = unsafe { transaction_cell_shared.deref() };
-        transaction_cell_ref
-            .snapshot
-            .store(self.sequencer.advance());
+        let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
+        transaction_cell_ref.preliminary_snapshot = self.sequencer.get();
+        std::sync::atomic::fence(Release);
+        transaction_cell_ref.final_snapshot = self.sequencer.advance();
+        if let Ok(mut completed) = transaction_cell_ref.wait_queue.0.lock() {
+            *completed = true;
+            transaction_cell_ref.wait_queue.1.notify_all();
+        }
         Ok(Rubicon {
             transaction: Some(self),
         })
@@ -173,12 +177,18 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     fn drop(&mut self) {
         // Rolls back the Transaction if not committed.
         let guard = crossbeam_epoch::pin();
-        let cell_shared = self.transaction_cell.load(Relaxed, &guard);
-        if !cell_shared.is_null() {
+        let mut transaction_cell_shared = self.transaction_cell.load(Relaxed, &guard);
+        if !transaction_cell_shared.is_null() {
+            // The transaction cell has neither passed to other components nor consumed.
+            let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
+            transaction_cell_ref.preliminary_snapshot = S::invalid();
+            if let Ok(mut completed) = transaction_cell_ref.wait_queue.0.lock() {
+                *completed = true;
+                transaction_cell_ref.wait_queue.1.notify_all();
+            }
+            unsafe { guard.defer_destroy(transaction_cell_shared) };
             // Rewinds the transaction.
             let _result = self.rewind(0);
-            // The transaction cell has neither passed to other components nor consumed.
-            drop(unsafe { cell_shared.into_owned() });
         }
     }
 }
@@ -235,17 +245,40 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
 ///
 /// If the Transaction is rolled back, the TransactionCell is dropped without being updated.
 pub struct TransactionCell<S: Sequencer> {
-    snapshot: AtomicCell<S::Clock>,
+    wait_queue: (Mutex<bool>, Condvar),
+    preliminary_snapshot: S::Clock,
+    final_snapshot: S::Clock,
 }
 
 impl<S: Sequencer> TransactionCell<S> {
-    fn new(sequencer: &S) -> TransactionCell<S> {
+    fn new() -> TransactionCell<S> {
         TransactionCell {
-            snapshot: AtomicCell::new(S::invalid()),
+            /// wait_queue is used when the transaction is being committed.
+            wait_queue: (Mutex::new(false), Condvar::new()),
+            /// A valid clock value is assigned when the transaction starts to commit.
+            preliminary_snapshot: S::invalid(),
+            /// A valid clock value is assigned once the transaction has been committed.
+            final_snapshot: S::invalid(),
         }
     }
 
+    /// Returns true if the transaction is visible to the reader.
+    pub fn visible(&self, snapshot: S::Clock) -> bool {
+        if self.preliminary_snapshot == S::invalid() || self.preliminary_snapshot >= snapshot {
+            return false;
+        }
+        // The transaction will either be committed or rolled back soon.
+        if self.final_snapshot == S::invalid() {
+            let mut completed = self.wait_queue.0.lock().unwrap();
+            while !*completed {
+                completed = self.wait_queue.1.wait(completed).unwrap();
+            }
+        }
+        // Checks the final snapshot.
+        self.final_snapshot != S::invalid() && self.final_snapshot <= snapshot
+    }
+
     pub fn snapshot(&self) -> S::Clock {
-        self.snapshot.load()
+        self.final_snapshot
     }
 }

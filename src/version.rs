@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 /// All the versioned objects in a Storage must implement the trait.
 pub trait Version<S: Sequencer> {
     /// Returns a reference to the VersionCell that the versioned object owns.
-    fn version_cell<'v>(&'v self) -> &'v VersionCell<S>;
+    fn version_cell(&self) -> &VersionCell<S>;
 }
 
 /// VersionCell is a piece of data that is embedded in a versioned object.
@@ -32,14 +32,20 @@ pub struct VersionCell<S: Sequencer> {
     deletion_time: AtomicCell<S::Clock>,
 }
 
-impl<S: Sequencer> VersionCell<S> {
-    /// Creates a new VersionCell that is globally invisible.
-    pub fn new() -> VersionCell<S> {
+impl<S: Sequencer> Default for VersionCell<S> {
+    fn default() -> VersionCell<S> {
         VersionCell {
             owner_ptr: Atomic::null(),
             creation_time: AtomicCell::new(S::invalid()),
             deletion_time: AtomicCell::new(S::invalid()),
         }
+    }
+}
+
+impl<S: Sequencer> VersionCell<S> {
+    /// Creates a new VersionCell that is globally invisible.
+    pub fn new() -> VersionCell<S> {
+        Default::default()
     }
 
     /// Assigns the transaction as the creator.
@@ -66,7 +72,7 @@ impl<S: Sequencer> VersionCell<S> {
     }
 
     /// Checks if the versioned object is valid in the snapshot.
-    pub fn valid(&self, snapshot: &Snapshot<S>) -> bool {
+    pub fn valid(&self, _snapshot: &Snapshot<S>) -> bool {
         false
     }
 }
@@ -124,10 +130,10 @@ impl<'v, S: Sequencer> VersionLocker<'v, S> {
             version_cell_ref.owner_ptr.store(Shared::null(), Relaxed);
             return None;
         }
-        return Some(VersionLocker {
+        Some(VersionLocker {
             version_cell_ref,
             clock_ref,
-        });
+        })
     }
 }
 

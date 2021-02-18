@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Error;
+use super::{ContainerHandle, Error, Sequencer, Transaction};
 
 /// LogState denotes the location of the log data.
 pub enum LogState {
@@ -30,19 +30,31 @@ pub struct Log {
     undo_hook: Option<(Vec<u8>, Box<dyn FnOnce(&Vec<u8>)>)>,
 }
 
-impl Log {
-    /// Creates a new Log.
-    pub fn new() -> Log {
+impl Default for Log {
+    fn default() -> Log {
         Log {
             log: Some(LogState::Memory(Vec::new())),
             undo_hook: None,
         }
     }
+}
+
+impl Log {
+    /// Creates a new Log.
+    pub fn new() -> Log {
+        Default::default()
+    }
 
     /// Passes the log data to the logger.
-    pub fn submit<L: Logger>(&mut self, logger: &L) -> Result<(), Error> {
+    ///
+    /// The given transaction can be used by the logger for transaction recovery.
+    pub fn submit<S: Sequencer, L: Logger<S>>(
+        &mut self,
+        logger: &L,
+        transaction: &Transaction<S>,
+    ) -> Result<(), Error> {
         if let Some(LogState::Memory(data)) = self.log.take() {
-            match logger.submit(data) {
+            match logger.submit(data, transaction) {
                 Ok((start_position, end_position)) => {
                     self.log
                         .replace(LogState::Pending(start_position, end_position));
@@ -57,7 +69,7 @@ impl Log {
     }
 
     /// Makes sure that the pending log is persisted.
-    pub fn persist<L: Logger>(&mut self, logger: &L) -> Result<(), Error> {
+    pub fn persist<S: Sequencer, L: Logger<S>>(&mut self, logger: &L) -> Result<(), Error> {
         if let Some(LogState::Pending(_, end_position)) = self.log.take() {
             match logger.persist(end_position) {
                 Ok(max_persisted_position) => {
@@ -82,14 +94,27 @@ impl Log {
 }
 
 /// The Logger trait defines logging interfaces.
-pub trait Logger {
+pub trait Logger<S: Sequencer> {
+    /// Creates a new logger instance.
+    fn new(anchor: &str) -> Self;
+
     /// Submits the given data to the log buffer.
     ///
     /// It returns the start and end log sequence number pair of the submitted data.
-    fn submit(&self, log_data: Vec<u8>) -> Result<(usize, usize), Error>;
+    /// The given transaction is associated to the log data, thereby enabling it to recover transactions.
+    fn submit(
+        &self,
+        log_data: Vec<u8>,
+        transaction: &Transaction<S>,
+    ) -> Result<(usize, usize), Error>;
 
     /// Persists the log buffer up to the given log position.
     ///
     /// It returns the max flushed log sequence number.
     fn persist(&self, position: usize) -> Result<usize, Error>;
+
+    /// Recovers the storage.
+    ///
+    /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
+    fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
 }

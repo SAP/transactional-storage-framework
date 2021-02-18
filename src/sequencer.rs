@@ -109,7 +109,7 @@ impl Sequencer for DefaultSequencer {
                 return *entry.0;
             }
         }
-        return 0;
+        0
     }
     fn get(&self) -> Self::Clock {
         self.clock.load(Relaxed)

@@ -57,48 +57,48 @@ pub trait ContainerData<S: Sequencer> {
 
 /// DefaultContainerData is a two dimensional array of u8.
 pub struct DefaultContainerData {
-    data: Vec<Vec<u8>>,
+    _data: Vec<Vec<u8>>,
 }
 
 impl DefaultContainerData {
     pub fn new() -> DefaultContainerData {
-        DefaultContainerData { data: Vec::new() }
+        DefaultContainerData { _data: Vec::new() }
     }
 }
 
 impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
     fn get(
         &self,
-        record_index: usize,
-        column_index: usize,
-        snapshot: &Snapshot<S>,
+        _record_index: usize,
+        _column_index: usize,
+        _snapshot: &Snapshot<S>,
     ) -> Option<&[u8]> {
         None
     }
     fn update(
         &self,
-        record_index: usize,
-        column_index: usize,
-        data: (&[u8], usize),
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
+        _record_index: usize,
+        _column_index: usize,
+        _data: (&[u8], usize),
+        _transaction: &Transaction<S>,
+        _snapshot: &Snapshot<S>,
     ) -> Result<(usize, usize), Error> {
         Err(Error::Fail)
     }
     fn put(
         &self,
-        data: (&[u8], usize),
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
+        _data: (&[u8], usize),
+        _transaction: &Transaction<S>,
+        _snapshot: &Snapshot<S>,
     ) -> Result<usize, Error> {
         Err(Error::Fail)
     }
     fn remove(
         &self,
-        record_index: usize,
-        column_index: usize,
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
+        _record_index: usize,
+        _column_index: usize,
+        _transaction: &Transaction<S>,
+        _snapshot: &Snapshot<S>,
     ) -> Result<(usize, usize), Error> {
         Err(Error::Fail)
     }
@@ -253,8 +253,8 @@ impl<S: Sequencer> Container<S> {
                 let mut name = String::from(name);
                 let new_directory = Self::new_directory();
                 loop {
-                    if let Err((key, value)) = directory_ref.insert(name, new_directory.clone()) {
-                        if let Some(existing_directory) = directory_ref.read(&key, |key, value| {
+                    if let Err((key, _)) = directory_ref.insert(name, new_directory.clone()) {
+                        if let Some(existing_directory) = directory_ref.read(&key, |_, value| {
                             if let ContainerType::Directory(_) = &value.get(&guard).container {
                                 Some(value.clone())
                             } else {

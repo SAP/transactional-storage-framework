@@ -19,7 +19,7 @@ use std::string::String;
 /// developers and users to develop, or plug-in new features and transaction mechanisms easily.
 pub struct Storage<S: Sequencer> {
     /// The name of the storage.
-    name: String,
+    _name: String,
     /// The logical clock generator of the storage.
     sequencer: S,
     /// The root container of the storage.
@@ -37,7 +37,7 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     pub fn new(name: String) -> Storage<S> {
         Storage {
-            name,
+            _name: name,
             sequencer: S::new(),
             root_container: Container::new_directory(),
         }
@@ -88,7 +88,7 @@ impl<S: Sequencer> Storage<S> {
     pub fn create_directory(
         &self,
         path: &str,
-        transaction: &Transaction<S>,
+        _transaction: &Transaction<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
@@ -127,7 +127,7 @@ impl<S: Sequencer> Storage<S> {
     /// let result = storage.get("/thomas/eats/apples", &snapshot);
     /// assert!(result.is_some());
     /// ```
-    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
+    pub fn get(&self, path: &str, _snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
@@ -165,7 +165,7 @@ impl<S: Sequencer> Storage<S> {
         &self,
         path: &str,
         reader: F,
-        snapshot: &Snapshot<S>,
+        _snapshot: &Snapshot<S>,
     ) -> Option<R> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
@@ -207,7 +207,7 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         container: ContainerHandle<S>,
         name: &str,
-        transaction: &Transaction<S>,
+        _transaction: &Transaction<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
@@ -290,8 +290,8 @@ impl<S: Sequencer> Storage<S> {
     pub fn remove(
         &self,
         path: &str,
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
+        _transaction: &Transaction<S>,
+        _snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
@@ -325,10 +325,8 @@ impl<S: Sequencer> Storage<S> {
     fn name(path: &str) -> Option<(&str, usize)> {
         let split = path.split('/');
         let mut last_token = None;
-        let mut position = 0;
-        for name in split {
-            last_token.replace((name, position));
-            position += 1;
+        for (index, name) in split.enumerate() {
+            last_token.replace((name, index));
         }
         last_token
     }
