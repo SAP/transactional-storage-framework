@@ -86,9 +86,7 @@ impl<S: Sequencer> VersionCell<S> {
                 let (visible, clock) = transaction_cell_ref.visible(snapshot.clock());
                 if visible {
                     let creation_time = self.creation_time.load();
-                    if creation_time == S::invalid() {
-                        return true;
-                    } else if creation_time == clock {
+                    if creation_time == S::invalid() || creation_time == clock {
                         return true;
                     }
                     // What it has seen is the deletor.
