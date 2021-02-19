@@ -10,7 +10,7 @@ use std::sync::{Condvar, Mutex};
 
 /// Transaction is the atomic unit of work for all types of the storage operations.
 ///
-/// A single strand of change records constitues a single transaction.
+/// A single strand of change records constitutes a single transaction.
 /// An on-going transaction can be rewound to a certain point of time.
 pub struct Transaction<'s, S: Sequencer> {
     /// The transaction refers to a Storage instance to persist pending changes at commit.
@@ -150,10 +150,6 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         transaction_cell_ref.preliminary_snapshot = self.sequencer.get();
         std::sync::atomic::fence(Release);
         transaction_cell_ref.final_snapshot = self.sequencer.advance();
-        if let Ok(mut completed) = transaction_cell_ref.wait_queue.0.lock() {
-            *completed = true;
-            transaction_cell_ref.wait_queue.1.notify_all();
-        }
         Ok(Rubicon {
             transaction: Some(self),
         })
@@ -180,7 +176,13 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// Only a Rubicon instance is allowed to call this function.
     /// Once the Transaction is post-processed, the Transaction cannot be rolled back.
-    fn post_process(self) {}
+    fn post_process(self) {
+        let guard = crossbeam_epoch::pin();
+        let transaction_cell_shared = self.transaction_cell.swap(Shared::null(), Relaxed, &guard);
+        let transaction_cell_ref = unsafe { transaction_cell_shared.deref() };
+        transaction_cell_ref.end();
+        unsafe { guard.defer_destroy(transaction_cell_shared) };
+    }
 }
 
 impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
@@ -192,10 +194,7 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
             // The transaction cell has neither passed to other components nor consumed.
             let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
             transaction_cell_ref.preliminary_snapshot = S::invalid();
-            if let Ok(mut completed) = transaction_cell_ref.wait_queue.0.lock() {
-                *completed = true;
-                transaction_cell_ref.wait_queue.1.notify_all();
-            }
+            transaction_cell_ref.end();
             unsafe { guard.defer_destroy(transaction_cell_shared) };
             // Rewinds the transaction.
             let _result = self.rewind(0);
@@ -218,7 +217,7 @@ pub struct Rubicon<'s, S: Sequencer> {
 }
 
 impl<'s, S: Sequencer> Rubicon<'s, S> {
-    /// Rolls back a committable Transaction.
+    /// Rolls back a Transaction.
     ///
     /// If there is nothing to rollback, it returns false.
     ///
@@ -255,7 +254,7 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
 ///
 /// If the Transaction is rolled back, the TransactionCell is dropped without being updated.
 pub struct TransactionCell<S: Sequencer> {
-    wait_queue: (Mutex<bool>, Condvar),
+    wait_queue: (Mutex<(bool, usize)>, Condvar),
     preliminary_snapshot: S::Clock,
     final_snapshot: S::Clock,
 }
@@ -263,13 +262,61 @@ pub struct TransactionCell<S: Sequencer> {
 impl<S: Sequencer> TransactionCell<S> {
     fn new() -> TransactionCell<S> {
         TransactionCell {
-            /// wait_queue is used when the transaction is being committed.
-            wait_queue: (Mutex::new(false), Condvar::new()),
+            /// wait_queue is used to wait for the transaction to be completed.
+            ///
+            /// The end and wait functions implement a FIFO wait queuing mechanism.
+            /// It acts as a lock for a versioned object.
+            wait_queue: (Mutex::new((false, 0)), Condvar::new()),
             /// A valid clock value is assigned when the transaction starts to commit.
             preliminary_snapshot: S::invalid(),
             /// A valid clock value is assigned once the transaction has been committed.
             final_snapshot: S::invalid(),
         }
+    }
+
+    // The transaction has either been committed or rolled back.
+    fn end(&self) {
+        if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
+            if !wait_queue.0 {
+                // Setting the flag true has an immediate effect on all the versioned owned by the transaction.
+                //  - It allows all the other transaction to have a chance to take ownership of the versioned objects.
+                wait_queue.0 = true;
+                self.wait_queue.1.notify_one();
+            }
+        }
+
+        // Asynchronously post-processing cleanup with the mutex acquired.
+        //  - Still, the transaction is holding all the VersionLock instances.
+        //  - Therefore, firstly, wakes all the waiting threads up.
+        //  - Then, explicitly unlocks all the versions.
+        while let Ok(wait_queue) = self.wait_queue.0.lock() {
+            if wait_queue.1 == 0 {
+                break;
+            }
+            drop(wait_queue);
+        }
+    }
+
+    /// Waits for the transaction to be completed.
+    pub fn wait<R, F: FnOnce(&Self) -> R>(&self, f: F) -> Option<R> {
+        if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
+            while !wait_queue.0 {
+                wait_queue.1 += 1;
+                wait_queue = self.wait_queue.1.wait(wait_queue).unwrap();
+                wait_queue.1 -= 1;
+            }
+            // Before waking up the next waiting thread, call the given function with the mutex acquired.
+            //  - For instance, if the version is owned by the transaction, ownership can be transferred.
+            let result = f(self);
+
+            // Once the thread wakes up, it is mandated to wake the next thread up.
+            if wait_queue.1 > 0 {
+                self.wait_queue.1.notify_one();
+            }
+
+            return Some(result);
+        }
+        None
     }
 
     /// Returns true if the transaction is visible to the reader.
@@ -279,10 +326,7 @@ impl<S: Sequencer> TransactionCell<S> {
         }
         // The transaction will either be committed or rolled back soon.
         if self.final_snapshot == S::invalid() {
-            let mut completed = self.wait_queue.0.lock().unwrap();
-            while !*completed {
-                completed = self.wait_queue.1.wait(completed).unwrap();
-            }
+            self.wait(|_| ());
         }
         // Checks the final snapshot.
         let final_snapshot = self.final_snapshot;
@@ -294,5 +338,41 @@ impl<S: Sequencer> TransactionCell<S> {
 
     pub fn snapshot(&self) -> S::Clock {
         self.final_snapshot
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::DefaultSequencer;
+    use crossbeam_utils::thread;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn wait_queue() {
+        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+        let num_threads = 64;
+        let barrier = Arc::new(Barrier::new(num_threads + 1));
+        let guard = crossbeam_epoch::pin();
+        thread::scope(|s| {
+            let transaction = storage.transaction();
+            let transaction_cell_ref = unsafe { transaction.transaction_cell(&guard).deref() };
+            for _ in 0..num_threads {
+                let barrier_cloned = barrier.clone();
+                s.spawn(move |_| {
+                    barrier_cloned.wait();
+                    transaction_cell_ref
+                        .wait(|c| assert!(c.snapshot() != DefaultSequencer::invalid()));
+                    barrier_cloned.wait();
+                    transaction_cell_ref
+                        .wait(|c| assert!(c.snapshot() != DefaultSequencer::invalid()));
+                });
+            }
+            barrier.wait();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert!(transaction.commit().is_ok());
+            barrier.wait();
+        })
+        .unwrap();
     }
 }

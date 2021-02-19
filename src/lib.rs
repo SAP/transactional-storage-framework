@@ -31,4 +31,4 @@ pub use sequencer::{DefaultSequencer, DeriveClock, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
 pub use transaction::{Transaction, TransactionCell};
-pub use version::{Version, VersionCell};
+pub use version::{Version, VersionCell, VersionLocker};
