@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Sequencer, Snapshot, Transaction, TransactionCell};
-use crossbeam_epoch::{Atomic, Shared};
+use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
@@ -12,7 +12,18 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 /// All the versioned objects in a Storage must implement the trait.
 pub trait Version<S: Sequencer> {
     /// Returns a reference to the VersionCell that the versioned object owns.
-    fn version_cell(&self) -> &VersionCell<S>;
+    fn version_cell<'g>(&'g self, guard: &'g Guard) -> Shared<'g, VersionCell<S>>;
+
+    /// Returns true if the versioned object is valid in the given snapshot.
+    fn valid(&self, guard: &Guard, snapshot: &Snapshot<S>) -> bool {
+        let version_cell_shared = self.version_cell(guard);
+        if version_cell_shared.is_null() {
+            // The lack of VersionCell indicates that the versioned object has been fully consolidated.
+            return true;
+        }
+        let version_cell_ref = unsafe { version_cell_shared.deref() };
+        version_cell_ref.valid(snapshot)
+    }
 }
 
 /// VersionCell is a piece of data that is embedded in a versioned object.
@@ -23,21 +34,27 @@ pub trait Version<S: Sequencer> {
 ///
 /// A VersionCell can be locked by a transaction when the transaction creates or deletes the versioned object.
 /// The transaction status change is synchronously proprated to readers of the versioned object.
+///
+/// A VersionCell is !Unpin as references to a VersionCell must stay valid throughout its lifetime.
 pub struct VersionCell<S: Sequencer> {
     /// owner_ptr points to the owner of the VersionCell.
     ///
     /// Readers have to check the transaction state when owner_ptr points to a valid transaction.
     owner_ptr: Atomic<TransactionCell<S>>,
+    deletor_ptr: Atomic<TransactionCell<S>>,
     creation_time: AtomicCell<S::Clock>,
     deletion_time: AtomicCell<S::Clock>,
+    _pin: std::marker::PhantomPinned,
 }
 
 impl<S: Sequencer> Default for VersionCell<S> {
     fn default() -> VersionCell<S> {
         VersionCell {
-            owner_ptr: Atomic::null(),
+            creator_ptr: Atomic::null(),
+            deletor_ptr: Atomic::null(),
             creation_time: AtomicCell::new(S::invalid()),
             deletion_time: AtomicCell::new(S::invalid()),
+            _pin: std::marker::PhantomPinned,
         }
     }
 }
@@ -52,26 +69,17 @@ impl<S: Sequencer> VersionCell<S> {
     ///
     /// If the transaction is committed without reverting it, a new creation time is set.
     pub fn create(&self, transaction: &Transaction<S>) -> Option<VersionLocker<S>> {
-        VersionLocker::lock(self, &self.creation_time, transaction)
+        VersionLocker::create(self, transaction)
     }
 
     /// Assigns the transaction as the deletor.
     ///
     /// If the transaction is committed without reverting it, a new deletion time is set.
     pub fn delete(&self, transaction: &Transaction<S>) -> Option<VersionLocker<S>> {
-        if self.creation_time.load() == S::invalid() {
-            None
-        } else {
-            let locker = VersionLocker::lock(self, &self.deletion_time, transaction);
-            if self.creation_time.load() != S::invalid() {
-                None
-            } else {
-                locker
-            }
-        }
+        VersionLocker::delete(self, transaction)
     }
 
-    /// Checks if the versioned object is valid in the snapshot.
+    /// Checks if the versioned object is valid in the given snapshot.
     pub fn valid(&self, snapshot: &Snapshot<S>) -> bool {
         // Checks the owner.
         if !self
@@ -133,38 +141,78 @@ impl<S: Sequencer> Drop for VersionCell<S> {
 /// VersionLocker owns a VersionCell instance.
 ///
 /// It asserts that VersionCell outlives VersionLocker.
-pub struct VersionLocker<'v, S: Sequencer> {
-    version_cell_ref: &'v VersionCell<S>,
-    clock_ref: &'v AtomicCell<S::Clock>,
+/// In order to revert or commit the changes on a VersionCell,
+/// the VersionLocker must be included in the undo log storage.
+pub struct VersionLocker<S: Sequencer> {
+    /// The VersionCell is guaranteed to outlive by VersionCell::drop.
+    version_cell_ptr: Atomic<VersionCell<S>>,
+    /// The TransactionCell owns the VersionCell.
+    transaction_cell_ptr: Atomic<TransactionCell<S>>,
+    /// The flag denotes the type of operation.
+    creator: bool,
+    /// The flag denotes that the VersionCell must not be updated on drop.
+    rolled_back: bool,
 }
 
-impl<'v, S: Sequencer> VersionLocker<'v, S> {
-    /// Locks the version cell.
-    fn lock(
-        version_cell_ref: &'v VersionCell<S>,
-        clock_ref: &'v AtomicCell<S::Clock>,
+impl<S: Sequencer> VersionLocker<S> {
+    /// Locks the VersionCell.
+    fn create(
+        version_cell_ref: &VersionCell<S>,
         transaction: &Transaction<S>,
-    ) -> Option<VersionLocker<'v, S>> {
-        if clock_ref.load() != S::invalid() {
+    ) -> Option<VersionLocker<S>> {
+        if version_cell_ref.creation_time.load() != S::invalid() {
+            // The VersionCell has been created by another transaction.
             return None;
         }
         let guard = crossbeam_epoch::pin();
         let transaction_cell_shared = transaction.transaction_cell(&guard);
-        if version_cell_ref
-            .owner_ptr
-            .compare_and_set(Shared::null(), transaction_cell_shared, Relaxed, &guard)
-            .is_err()
-        {
-            return None;
+        while let Err(result) = version_cell_ref.creator_ptr.compare_and_set(
+            Shared::null(),
+            transaction_cell_shared,
+            Relaxed,
+            &guard,
+        ) {
+            let current_owner_shared = result.current;
+            let current_owner_ref = unsafe { current_owner_shared.deref() };
+            if current_owner_ref
+                .wait(|cell| {
+                    if cell.snapshot() == S::invalid() {
+                        // The transaction has been rolled back.
+                        version_cell_ref
+                            .creator_ptr
+                            .compare_and_set(
+                                current_owner_shared,
+                                transaction_cell_shared,
+                                Relaxed,
+                                &guard,
+                            )
+                            .is_ok()
+                    } else {
+                        false
+                    }
+                })
+                .map_or_else(|| false, |result| result)
+            {
+                break;
+            }
         }
-        if clock_ref.load() != S::invalid() {
-            version_cell_ref.owner_ptr.store(Shared::null(), Relaxed);
-            return None;
+        if version_cell_ref.creation_time.load() != S::invalid() {
+            // The VersionCell has been updated by another transaction.
+            Some(VersionLocker {
+                version_cell_ptr: Atomic::from(version_cell_ref as *const _),
+                transaction_cell_ptr: Atomic::from(transaction_cell_shared),
+                rolled_back: true,
+            })
+        } else {
+            // Successfully took ownership of the VersionCell.
         }
-        Some(VersionLocker {
-            version_cell_ref,
-            clock_ref,
-        })
+    }
+
+    fn delete(
+        version_cell_ref: &VersionCell<S>,
+        transaction: &Transaction<S>,
+    ) -> Option<VersionLocker<S>> {
+        None
     }
 }
 

@@ -8,7 +8,7 @@ use super::{Error, Sequencer, Snapshot, Transaction, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
 /// ContainerData defines the data container interfaces.
 ///
@@ -127,7 +127,7 @@ enum ContainerType<S: Sequencer> {
 pub struct Container<S: Sequencer> {
     container: ContainerType<S>,
     references: AtomicUsize,
-    version_cell: VersionCell<S>,
+    version_cell: Atomic<VersionCell<S>>,
 }
 
 impl<S: Sequencer> Container<S> {
@@ -145,7 +145,7 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Directory(Atomic::null()),
                 references: AtomicUsize::new(1),
-                version_cell: VersionCell::new(),
+                version_cell: Atomic::null(),
             })),
         }
     }
@@ -399,8 +399,8 @@ impl<S: Sequencer> Container<S> {
 }
 
 impl<S: Sequencer> Version<S> for Container<S> {
-    fn version_cell(&self) -> &VersionCell<S> {
-        &self.version_cell
+    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
+        self.version_cell.load(Acquire, guard)
     }
 }
 
