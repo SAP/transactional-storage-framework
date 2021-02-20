@@ -2,8 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, Log, Sequencer, Storage};
-use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
+use super::{Error, Log, Sequencer, Snapshot, Storage, Version, VersionLocker};
+use crossbeam_epoch::{Atomic, Owned, Shared};
+use scc::HashMap;
+use std::collections::hash_map::RandomState;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::{Condvar, Mutex};
@@ -18,6 +20,8 @@ pub struct Transaction<'s, S: Sequencer> {
     /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
     sequencer: &'s S,
     /// transaction_cell contains data that can be shared and may outlive the transaction.
+    ///
+    /// transaction_cell is hidden therefore any functions requiring it can only be called by the transaction.
     transaction_cell: Atomic<TransactionCell<S>>,
     /// transaction_clock is a clock generator that is local to the transaction.
     ///
@@ -47,18 +51,15 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
-    /// Returns a shared pointer to the TransactionCell.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
-    ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-    /// let transaction = storage.transaction();
-    /// let guard = crossbeam_epoch::pin();
-    /// assert!(!transaction.transaction_cell(&guard).is_null());
-    pub fn transaction_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, TransactionCell<S>> {
-        self.transaction_cell.load(Relaxed, guard)
+    pub fn snapshot(&self) -> Snapshot<S> {
+        Snapshot::new(
+            &self.sequencer,
+            Some(unsafe {
+                self.transaction_cell
+                    .load(Relaxed, crossbeam_epoch::unprotected())
+                    .deref()
+            }),
+        )
     }
 
     /// Gets the current transaction-local clock value of the Transaction.
@@ -71,7 +72,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    ///assert_eq!(transaction.clock(), 0);
+    /// assert_eq!(transaction.clock(), 0);
     pub fn clock(&self) -> usize {
         self.transaction_clock.load(Acquire)
     }
@@ -129,6 +130,27 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
+    /// Locks a versioned object.
+    pub fn lock<V: Version<S>>(&self, version: &V) -> Result<(), Error> {
+        let guard = crossbeam_epoch::pin();
+        let mut transaction_cell_shared = self.transaction_cell.load(Acquire, &guard);
+        if transaction_cell_shared.is_null() {
+            return Err(Error::Fail);
+        }
+        let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
+        let version_cell_shared = version.version_cell(&guard);
+        if version_cell_shared.is_null() {
+            // The versioned object is not ready for versioning.
+            return Err(Error::Fail);
+        }
+        let version_cell_ref = unsafe { version_cell_shared.deref() };
+        if let Some(locker) = version_cell_ref.lock(transaction_cell_ref, &guard) {
+            transaction_cell_ref.lock(version_cell_ref.id(), locker);
+            return Ok(());
+        }
+        Err(Error::Fail)
+    }
+
     /// Commits the changes made by the Transaction.
     ///
     /// # Examples
@@ -142,7 +164,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
         let guard = crossbeam_epoch::pin();
-        let mut transaction_cell_shared = self.transaction_cell(&guard);
+        let mut transaction_cell_shared = self.transaction_cell.load(Acquire, &guard);
         if transaction_cell_shared.is_null() {
             return Err(Error::Fail);
         }
@@ -255,6 +277,7 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
 /// If the Transaction is rolled back, the TransactionCell is dropped without being updated.
 pub struct TransactionCell<S: Sequencer> {
     wait_queue: (Mutex<(bool, usize)>, Condvar),
+    locks: HashMap<usize, VersionLocker<S>, RandomState>,
     preliminary_snapshot: S::Clock,
     final_snapshot: S::Clock,
 }
@@ -267,6 +290,8 @@ impl<S: Sequencer> TransactionCell<S> {
             /// The end and wait functions implement a FIFO wait queuing mechanism.
             /// It acts as a lock for a versioned object.
             wait_queue: (Mutex::new((false, 0)), Condvar::new()),
+            /// Locks that the transaction has acquired.
+            locks: Default::default(),
             /// A valid clock value is assigned when the transaction starts to commit.
             preliminary_snapshot: S::invalid(),
             /// A valid clock value is assigned once the transaction has been committed.
@@ -288,13 +313,22 @@ impl<S: Sequencer> TransactionCell<S> {
         // Asynchronously post-processing cleanup with the mutex acquired.
         //  - Still, the transaction is holding all the VersionLock instances.
         //  - Therefore, firstly, wakes all the waiting threads up.
-        //  - Then, explicitly unlocks all the versions.
         while let Ok(wait_queue) = self.wait_queue.0.lock() {
             if wait_queue.1 == 0 {
                 break;
             }
             drop(wait_queue);
         }
+
+        // Explicitly unlocks all the locks.
+        for lock in self.locks.iter() {
+            lock.1.unlock(self);
+        }
+    }
+
+    fn lock(&self, id: usize, lock: VersionLocker<S>) {
+        let result = self.locks.insert(id, lock);
+        debug_assert!(result.is_ok());
     }
 
     /// Waits for the transaction to be completed.
@@ -356,7 +390,8 @@ mod test {
         let guard = crossbeam_epoch::pin();
         thread::scope(|s| {
             let transaction = storage.transaction();
-            let transaction_cell_ref = unsafe { transaction.transaction_cell(&guard).deref() };
+            let transaction_cell_ref =
+                unsafe { transaction.transaction_cell.load(Acquire, &guard).deref() };
             for _ in 0..num_threads {
                 let barrier_cloned = barrier.clone();
                 s.spawn(move |_| {

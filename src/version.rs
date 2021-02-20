@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Sequencer, Snapshot, Transaction, TransactionCell};
+use super::{Sequencer, Snapshot, TransactionCell};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -69,8 +69,12 @@ impl<S: Sequencer> VersionCell<S> {
     ///
     /// The transaction semantics adheres to the two-phase locking protocol.
     /// If the transaction is committed, a new time point is set.
-    pub fn lock(&self, transaction: &Transaction<S>) -> Option<VersionLocker<S>> {
-        VersionLocker::lock(self, transaction)
+    pub fn lock(
+        &self,
+        transaction_cell: &TransactionCell<S>,
+        guard: &Guard,
+    ) -> Option<VersionLocker<S>> {
+        VersionLocker::lock(self, transaction_cell, guard)
     }
 
     /// Checks if the VersionCell predates the snapshot.
@@ -91,7 +95,10 @@ impl<S: Sequencer> VersionCell<S> {
             let owner_shared = self.owner_ptr.load(Acquire, &guard);
             if owner_shared.as_raw() != self.locked_state() && !owner_shared.is_null() {
                 let transaction_cell_ref = unsafe { owner_shared.deref() };
-                let (visible, clock) = transaction_cell_ref.visible(snapshot.clock());
+                if snapshot.own(transaction_cell_ref) {
+                    return true;
+                }
+                let visible = transaction_cell_ref.visible(snapshot.clock()).0;
                 if self.owner_ptr.load(Acquire, &guard) == owner_shared {
                     // The owner has yet to post-process changes after committed.
                     return visible;
@@ -104,6 +111,11 @@ impl<S: Sequencer> VersionCell<S> {
         time_point != S::invalid() && time_point <= *snapshot.clock()
     }
 
+    /// The memory address is used as its identifier.
+    pub fn id(&self) -> usize {
+        self.locked_state() as usize
+    }
+
     /// VersionCell having owner_ptr == locked_state() is currently being locked.
     fn locked_state(&self) -> *const TransactionCell<S> {
         self as *const _ as *const TransactionCell<S>
@@ -111,14 +123,13 @@ impl<S: Sequencer> VersionCell<S> {
 }
 
 impl<S: Sequencer> Drop for VersionCell<S> {
-    /// self.owner_ptr == Shared::null() partially proves the assertion that
-    /// VersionCell outlives the transaction.
+    /// VersionCell cannot be dropped when it is locked.
+    ///
+    /// self.owner_ptr == Shared::null() partially proves the assertion that VersionCell outlives the TransactionCell.
+    /// Dropping a VersionCell is usually triggered by the garbage collector of the storage system,
+    /// and the garbage collector must ensure to consolidate versioned objects after the transactions are post-processed.
     fn drop(&mut self) {
         unsafe {
-            debug_assert!(self
-                .owner_ptr
-                .load(Relaxed, crossbeam_epoch::unprotected())
-                .is_null());
             loop {
                 if self
                     .owner_ptr
@@ -135,8 +146,7 @@ impl<S: Sequencer> Drop for VersionCell<S> {
 /// VersionLocker owns a VersionCell instance.
 ///
 /// It asserts that VersionCell outlives VersionLocker.
-/// In order to revert or commit the changes on a VersionCell,
-/// the VersionLocker must be included in the undo log storage.
+/// It is not an RAII-style type, and it requires the owner to explicitly call the unlock function.
 pub struct VersionLocker<S: Sequencer> {
     /// The VersionCell is guaranteed to outlive by VersionCell::drop.
     version_cell_ptr: Atomic<VersionCell<S>>,
@@ -146,16 +156,15 @@ impl<S: Sequencer> VersionLocker<S> {
     /// Locks the VersionCell.
     fn lock(
         version_cell_ref: &VersionCell<S>,
-        transaction: &Transaction<S>,
+        transaction_cell: &TransactionCell<S>,
+        guard: &Guard,
     ) -> Option<VersionLocker<S>> {
         if version_cell_ref.time_point.load() != S::invalid() {
             // The VersionCell has been updated by another transaction.
             return None;
         }
 
-        let guard = crossbeam_epoch::pin();
         let locked_state = Shared::from(version_cell_ref.locked_state());
-        let transaction_cell_shared = transaction.transaction_cell(&guard);
         while let Err(result) = version_cell_ref.owner_ptr.compare_and_set(
             Shared::null(),
             locked_state,
@@ -168,16 +177,18 @@ impl<S: Sequencer> VersionLocker<S> {
                 continue;
             }
             let current_owner_ref = unsafe { current_owner_shared.deref() };
-            // The VersionCell is locked, therefore waiting for the transaction to be completed.
             if current_owner_ref
                 .wait(|cell| {
                     if cell.snapshot() == S::invalid() {
                         // The transaction has been rolled back.
+                        //  - Tries to overtake ownership.
+                        //  - CAS returning false means that another transaction overtook ownership.
                         version_cell_ref
                             .owner_ptr
                             .compare_and_set(current_owner_shared, locked_state, Relaxed, &guard)
                             .is_ok()
                     } else {
+                        // The transaction has been committed, and the time point is bound to be set.
                         false
                     }
                 })
@@ -201,35 +212,30 @@ impl<S: Sequencer> VersionLocker<S> {
             debug_assert_eq!(owner_shared, locked_state);
             return None;
         }
-        let owner_shared =
-            version_cell_ref
-                .owner_ptr
-                .swap(transaction_cell_shared, Relaxed, &guard);
+        let owner_shared = version_cell_ref.owner_ptr.swap(
+            Shared::from(transaction_cell as *const _),
+            Relaxed,
+            &guard,
+        );
+        debug_assert_eq!(owner_shared, locked_state);
 
         Some(VersionLocker {
             version_cell_ptr: Atomic::from(version_cell_ref as *const _),
         })
     }
 
-    fn delete(
-        version_cell_ref: &VersionCell<S>,
-        transaction: &Transaction<S>,
-    ) -> Option<VersionLocker<S>> {
-        None
-    }
-}
-
-impl<S: Sequencer> Drop for VersionLocker<S> {
-    fn drop(&mut self) {
+    /// Unlocks the VersionCell.
+    pub fn unlock(&self, transaction_cell_ref: &TransactionCell<S>) {
         let guard = crossbeam_epoch::pin();
         let version_cell_ref = unsafe { self.version_cell_ptr.load(Relaxed, &guard).deref() };
-        let transaction_cell_ref =
-            unsafe { version_cell_ref.owner_ptr.load(Relaxed, &guard).deref() };
         let snapshot = transaction_cell_ref.snapshot();
         version_cell_ref.time_point.store(snapshot);
-        let owner_shared = version_cell_ref
-            .owner_ptr
-            .swap(Shared::null(), Release, &guard);
-        debug_assert_eq!(owner_shared.as_raw(), transaction_cell_ref as *const _);
+        let result = version_cell_ref.owner_ptr.compare_and_set(
+            Shared::from(transaction_cell_ref as *const _),
+            Shared::null(),
+            Release,
+            &guard,
+        );
+        debug_assert!(snapshot == S::invalid() || result.is_ok());
     }
 }

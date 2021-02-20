@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DeriveClock, Sequencer, Transaction, TransactionCell};
-use crossbeam_epoch::{Guard, Shared};
+use super::{DeriveClock, Sequencer, TransactionCell};
 
 /// Snapshot represents a state of a Storage at a point of time.
 ///
@@ -12,7 +11,7 @@ use crossbeam_epoch::{Guard, Shared};
 pub struct Snapshot<'s, S: Sequencer> {
     sequencer: &'s S,
     tracker: Option<S::Tracker>,
-    transaction_clock: Option<(&'s Transaction<'s, S>, usize)>,
+    transaction_cell: Option<&'s TransactionCell<S>>,
     snapshot: S::Clock,
 }
 
@@ -20,7 +19,10 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
     /// Takes a new snapshot of the storage.
     ///
     /// The clock value that the new Snapshot instance owns is tracked by the Sequencer.
-    pub fn new(sequencer: &'s S, transaction: Option<&'s Transaction<S>>) -> Snapshot<'s, S> {
+    pub fn new(
+        sequencer: &'s S,
+        transaction_cell: Option<&'s TransactionCell<S>>,
+    ) -> Snapshot<'s, S> {
         let tracker = sequencer.issue();
         let snapshot = tracker
             .as_ref()
@@ -28,7 +30,7 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
         Snapshot {
             sequencer,
             tracker,
-            transaction_clock: transaction.map(|transaction| (transaction, transaction.clock())),
+            transaction_cell,
             snapshot,
         }
     }
@@ -38,17 +40,12 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
         &self.snapshot
     }
 
-    /// Returns the transaction-local clock value of the Snapshot.
-    pub fn transaction_clock<'g>(
-        &self,
-        guard: &'g Guard,
-    ) -> Option<(Shared<'g, TransactionCell<S>>, usize)> {
-        self.transaction_clock.as_ref().map(|transaction_clock| {
-            (
-                transaction_clock.0.transaction_cell(guard),
-                transaction_clock.1,
-            )
-        })
+    /// Returns true if the snapshot belongs to the transaction.
+    pub fn own(&self, transaction_cell: &TransactionCell<S>) -> bool {
+        self.transaction_cell.as_ref().map_or_else(
+            || false,
+            |&owner| owner as *const _ == transaction_cell as *const _,
+        )
     }
 }
 

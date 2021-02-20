@@ -70,7 +70,11 @@ impl<S: Sequencer> Storage<S> {
     /// let snapshot = storage.snapshot(Some(&transaction));
     /// ```
     pub fn snapshot<'s>(&'s self, transaction: Option<&'s Transaction<S>>) -> Snapshot<S> {
-        Snapshot::new(&self.sequencer, transaction)
+        if let Some(transaction) = transaction.as_ref() {
+            transaction.snapshot()
+        } else {
+            Snapshot::new(&self.sequencer, None)
+        }
     }
 
     /// Creates a new container directory.
