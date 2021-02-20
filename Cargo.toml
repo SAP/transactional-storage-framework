@@ -5,7 +5,7 @@
 [package]
 name = "tss"
 version = "0.1.0"
-authors = ["Changgyoo Park <changgyoo.park@sap.com>"]
+authors = ["wvwwvwwv <wvwwvwwv@me.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,7 +13,7 @@ edition = "2018"
 [dependencies]
 crossbeam-epoch = "^0.9.1"
 crossbeam-utils = "^0.8.1"
-scc = "^0.4.2"
+scc = "^0.4.3"
 
 [workspace]
 members = [".", "tests"]

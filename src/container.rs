@@ -164,7 +164,7 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Data(Box::new(DefaultContainerData::new())),
                 references: AtomicUsize::new(1),
-                version_cell: VersionCell::new(),
+                version_cell: Atomic::null(),
             })),
         }
     }
