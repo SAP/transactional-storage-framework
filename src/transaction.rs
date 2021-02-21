@@ -51,6 +51,15 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
+    /// Takes a snapshot of the storage including changes made by the transaction.
+    ///
+    /// # Examples
+    /// ```
+    /// use tss::{DefaultSequencer, Storage, Transaction};
+    ///
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let transaction = storage.transaction();
+    /// let snapshot = transaction.snapshot();
     pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::new(
             &self.sequencer,
@@ -131,6 +140,23 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Locks a versioned object.
+    ///
+    /// The acquired lock is never released until the transaction is committed or rolled back.
+    ///
+    /// # Examples
+    /// ```
+    /// use tss::{DefaultSequencer, DefaultVersionedObject, Storage, Transaction, Version};
+    ///
+    /// let versioned_object = DefaultVersionedObject::new();
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let mut transaction = storage.transaction();
+    /// assert!(transaction.lock(&versioned_object).is_ok());
+    /// transaction.commit();
+    ///
+    /// let snapshot = storage.snapshot(None);
+    /// let guard = crossbeam_epoch::pin();
+    /// assert!(unsafe { versioned_object.version_cell(&guard).deref() }.predate(&snapshot));
+    /// ```
     pub fn lock<V: Version<S>>(&self, version: &V) -> Result<(), Error> {
         let guard = crossbeam_epoch::pin();
         let mut transaction_cell_shared = self.transaction_cell.load(Acquire, &guard);
@@ -144,11 +170,26 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
             return Err(Error::Fail);
         }
         let version_cell_ref = unsafe { version_cell_shared.deref() };
-        if let Some(locker) = version_cell_ref.lock(transaction_cell_ref, &guard) {
-            transaction_cell_ref.lock(version_cell_ref.id(), locker);
-            return Ok(());
-        }
-        Err(Error::Fail)
+        let result = match transaction_cell_ref
+            .locks
+            .insert(version_cell_ref.id(), None)
+        {
+            Ok(result) => {
+                if let Some(locker) = version_cell_ref.lock(transaction_cell_ref, &guard) {
+                    result.get().1.replace(locker);
+                    Ok(())
+                } else {
+                    // It does not allow the lock container to have None.
+                    result.erase();
+                    Err(Error::Fail)
+                }
+            }
+            Err(error) => {
+                debug_assert!(error.0.get().1.is_some());
+                Err(Error::Fail)
+            }
+        };
+        result
     }
 
     /// Commits the changes made by the Transaction.
@@ -261,6 +302,31 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
             transaction.rollback();
         }
     }
+
+    /// Gets the assigned snapshot of the transaction.
+    ///
+    /// # Examples
+    /// ```
+    /// use tss::{DefaultSequencer, Sequencer, Storage, Transaction};
+    ///
+    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let mut transaction = storage.transaction();
+    /// if let Ok(rubicon) = transaction.commit() {
+    ///     assert!(rubicon.snapshot() != DefaultSequencer::invalid());
+    ///     rubicon.rollback();
+    /// };
+    /// ```
+    pub fn snapshot(&self) -> S::Clock {
+        unsafe {
+            self.transaction
+                .as_ref()
+                .unwrap()
+                .transaction_cell
+                .load(Relaxed, crossbeam_epoch::unprotected())
+                .deref()
+                .snapshot()
+        }
+    }
 }
 
 impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
@@ -277,7 +343,7 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
 /// If the Transaction is rolled back, the TransactionCell is dropped without being updated.
 pub struct TransactionCell<S: Sequencer> {
     wait_queue: (Mutex<(bool, usize)>, Condvar),
-    locks: HashMap<usize, VersionLocker<S>, RandomState>,
+    locks: HashMap<usize, Option<VersionLocker<S>>, RandomState>,
     preliminary_snapshot: S::Clock,
     final_snapshot: S::Clock,
 }
@@ -322,13 +388,8 @@ impl<S: Sequencer> TransactionCell<S> {
 
         // Explicitly unlocks all the locks.
         for lock in self.locks.iter() {
-            lock.1.unlock(self);
+            lock.1.as_ref().map(|lock| lock.unlock(self));
         }
-    }
-
-    fn lock(&self, id: usize, lock: VersionLocker<S>) {
-        let result = self.locks.insert(id, lock);
-        debug_assert!(result.is_ok());
     }
 
     /// Waits for the transaction to be completed.

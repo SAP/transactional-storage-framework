@@ -402,9 +402,15 @@ impl<S: Sequencer> Version<S> for Container<S> {
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
     }
+    fn unversion(&self, guard: &Guard) -> bool {
+        !self
+            .version_cell
+            .swap(Shared::null(), Relaxed, guard)
+            .is_null()
+    }
 }
 
-/// A ref-counted handle for tss::Container.
+/// A ref-counted handle for Container.
 pub struct ContainerHandle<S: Sequencer> {
     pointer: Atomic<Container<S>>,
 }

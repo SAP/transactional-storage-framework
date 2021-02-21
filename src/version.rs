@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Sequencer, Snapshot, TransactionCell};
+use super::{DefaultSequencer, Sequencer, Snapshot, TransactionCell};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -24,6 +24,9 @@ pub trait Version<S: Sequencer> {
         let version_cell_ref = unsafe { version_cell_shared.deref() };
         version_cell_ref.predate(snapshot)
     }
+
+    /// Unversions the versioned object to make it visible to all the present and future readers.
+    fn unversion(&self, guard: &Guard) -> bool;
 }
 
 /// VersionCell is a piece of data that is embedded in a versioned object.
@@ -237,5 +240,29 @@ impl<S: Sequencer> VersionLocker<S> {
             &guard,
         );
         debug_assert!(snapshot == S::invalid() || result.is_ok());
+    }
+}
+
+pub struct DefaultVersionedObject {
+    version_cell: Atomic<VersionCell<DefaultSequencer>>,
+}
+
+impl DefaultVersionedObject {
+    pub fn new() -> DefaultVersionedObject {
+        DefaultVersionedObject {
+            version_cell: Atomic::new(VersionCell::new()),
+        }
+    }
+}
+
+impl Version<DefaultSequencer> for DefaultVersionedObject {
+    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<DefaultSequencer>> {
+        self.version_cell.load(Relaxed, guard)
+    }
+    fn unversion<'g>(&self, guard: &'g Guard) -> bool {
+        !self
+            .version_cell
+            .swap(Shared::null(), Relaxed, guard)
+            .is_null()
     }
 }
