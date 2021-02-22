@@ -11,7 +11,7 @@ use super::{DeriveClock, Sequencer, TransactionCell};
 pub struct Snapshot<'s, S: Sequencer> {
     sequencer: &'s S,
     tracker: Option<S::Tracker>,
-    transaction_cell: Option<&'s TransactionCell<S>>,
+    transaction_clock: Option<(&'s TransactionCell<S>, usize)>,
     snapshot: S::Clock,
 }
 
@@ -21,7 +21,7 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
     /// The clock value that the new Snapshot instance owns is tracked by the Sequencer.
     pub fn new(
         sequencer: &'s S,
-        transaction_cell: Option<&'s TransactionCell<S>>,
+        transaction_clock: Option<(&'s TransactionCell<S>, usize)>,
     ) -> Snapshot<'s, S> {
         let tracker = sequencer.issue();
         let snapshot = tracker
@@ -30,7 +30,7 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
         Snapshot {
             sequencer,
             tracker,
-            transaction_cell,
+            transaction_clock,
             snapshot,
         }
     }
@@ -40,11 +40,14 @@ impl<'s, S: Sequencer> Snapshot<'s, S> {
         &self.snapshot
     }
 
-    /// Returns true if the snapshot belongs to the transaction.
-    pub fn own(&self, transaction_cell: &TransactionCell<S>) -> bool {
-        self.transaction_cell.as_ref().map_or_else(
+    /// Returns true if the given transaction clock is visible.
+    pub fn visible(&self, transaction_clock: (&TransactionCell<S>, usize)) -> bool {
+        self.transaction_clock.as_ref().map_or_else(
             || false,
-            |&owner| owner as *const _ == transaction_cell as *const _,
+            |(owner, clock)| {
+                owner as *const _ == &transaction_clock.0 as *const _
+                    && *clock >= transaction_clock.1
+            },
         )
     }
 }

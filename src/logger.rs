@@ -24,17 +24,12 @@ pub struct Log {
     ///
     /// log being None indicates that the Log instance is invalid.
     log: Option<LogState>,
-    /// undo_hook is invoked when the transaction is rewound or rolled back.
-    ///
-    /// The undo data can be stored separately.
-    undo_hook: Option<(Vec<u8>, Box<dyn FnOnce(&Vec<u8>)>)>,
 }
 
 impl Default for Log {
     fn default() -> Log {
         Log {
             log: Some(LogState::Memory(Vec::new())),
-            undo_hook: None,
         }
     }
 }
@@ -86,10 +81,8 @@ impl Log {
     }
 
     /// Invokes the undo hook.
-    pub fn undo(mut self) {
-        if let Some((undo_data, undo_hook)) = self.undo_hook.take() {
-            undo_hook(&undo_data);
-        }
+    pub fn undo(self) {
+        //
     }
 }
 
