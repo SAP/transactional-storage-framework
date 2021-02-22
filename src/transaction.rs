@@ -19,16 +19,14 @@ pub struct Transaction<'s, S: Sequencer> {
     _storage: &'s Storage<S>,
     /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
     sequencer: &'s S,
-    /// transaction_cell contains data that can be shared and may outlive the transaction.
+    /// A piece of data that can be shared among threads via versioned objects, and may outlive the transaction.
+    cell: Atomic<TransactionCell<S>>,
+    /// A transaction-local clock generator.
     ///
-    /// transaction_cell is hidden therefore any functions requiring it can only be called by the transaction.
-    transaction_cell: Atomic<TransactionCell<S>>,
-    /// transaction_clock is a clock generator that is local to the transaction.
-    ///
-    /// The clock value is updated whenever a new log is pushed.
-    transaction_clock: AtomicUsize,
-    /// The changes made by the transaction are kept in transaction_changes.
-    transaction_changes: std::sync::Mutex<Vec<TransactionChange<S>>>,
+    /// The clock value is updated whenever a new TransactionSession is pushed.
+    clock: AtomicUsize,
+    /// The changes made by the transaction are in TransactionRecords instances.
+    submitted_change_records: std::sync::Mutex<Vec<TransactionRecord<S>>>,
 }
 
 impl<'s, S: Sequencer> Transaction<'s, S> {
@@ -45,9 +43,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            transaction_cell: Atomic::new(TransactionCell::new()),
-            transaction_clock: AtomicUsize::new(0),
-            transaction_changes: std::sync::Mutex::new(Vec::new()),
+            cell: Atomic::new(TransactionCell::new()),
+            clock: AtomicUsize::new(0),
+            submitted_change_records: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -79,7 +77,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Snapshot::new(
             &self.sequencer,
             Some(unsafe {
-                self.transaction_cell
+                self.cell
                     .load(Relaxed, crossbeam_epoch::unprotected())
                     .deref()
             }),
@@ -99,7 +97,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// assert_eq!(transaction.clock(), 0);
     /// ```
     pub fn clock(&self) -> usize {
-        self.transaction_clock.load(Acquire)
+        self.clock.load(Acquire)
     }
 
     /// Advances the logical clock of the transaction by one by feeding a completed TransactionSession.
@@ -116,10 +114,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// assert_eq!(transaction.advance(transaction_session), 1);
     /// ```
     pub fn advance<'t>(&'t self, transaction_session: TransactionSession<'s, 't, S>) -> usize {
-        let mut transaction_changes = self.transaction_changes.lock().unwrap();
-        transaction_changes.push(transaction_session.context);
-        let new_clock = transaction_changes.len();
-        self.transaction_clock.store(new_clock, Release);
+        let mut change_records = self.submitted_change_records.lock().unwrap();
+        change_records.push(transaction_session.context);
+        let new_clock = change_records.len();
+        self.clock.store(new_clock, Release);
         new_clock
     }
 
@@ -141,18 +139,18 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let result = transaction.rewind(0);
     /// assert!(result.is_ok());
     /// ```
-    pub fn rewind(&mut self, transaction_clock: usize) -> Result<usize, Error> {
-        let mut transaction_changes = self.transaction_changes.lock().unwrap();
-        if transaction_changes.len() <= transaction_clock {
+    pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
+        let mut change_records = self.submitted_change_records.lock().unwrap();
+        if change_records.len() <= clock {
             Err(Error::Fail)
         } else {
-            while transaction_changes.len() > transaction_clock {
-                if let Some(transaction_change) = transaction_changes.pop() {
-                    transaction_change.revert();
+            while change_records.len() > clock {
+                if let Some(change_unit) = change_records.pop() {
+                    change_unit.revert();
                 }
             }
-            let new_clock = transaction_changes.len();
-            self.transaction_clock.store(new_clock, Release);
+            let new_clock = change_records.len();
+            self.clock.store(new_clock, Release);
             Ok(new_clock)
         }
     }
@@ -177,23 +175,20 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     pub fn lock<V: Version<S>>(&self, version: &V) -> Result<(), Error> {
         let guard = crossbeam_epoch::pin();
-        let mut transaction_cell_shared = self.transaction_cell.load(Acquire, &guard);
-        if transaction_cell_shared.is_null() {
+        let mut cell_shared = self.cell.load(Acquire, &guard);
+        if cell_shared.is_null() {
             return Err(Error::Fail);
         }
-        let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
+        let cell_ref = unsafe { cell_shared.deref_mut() };
         let version_cell_shared = version.version_cell(&guard);
         if version_cell_shared.is_null() {
             // The versioned object is not ready for versioning.
             return Err(Error::Fail);
         }
         let version_cell_ref = unsafe { version_cell_shared.deref() };
-        let result = match transaction_cell_ref
-            .locks
-            .insert(version_cell_ref.id(), None)
-        {
+        let result = match cell_ref.locks.insert(version_cell_ref.id(), None) {
             Ok(result) => {
-                if let Some(locker) = version_cell_ref.lock(transaction_cell_ref, &guard) {
+                if let Some(locker) = version_cell_ref.lock(cell_ref, &guard) {
                     result.get().1.replace(locker);
                     Ok(())
                 } else {
@@ -223,14 +218,14 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
         let guard = crossbeam_epoch::pin();
-        let mut transaction_cell_shared = self.transaction_cell.load(Acquire, &guard);
-        if transaction_cell_shared.is_null() {
+        let mut cell_shared = self.cell.load(Acquire, &guard);
+        if cell_shared.is_null() {
             return Err(Error::Fail);
         }
-        let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
-        transaction_cell_ref.preliminary_snapshot = self.sequencer.get();
+        let cell_ref = unsafe { cell_shared.deref_mut() };
+        cell_ref.preliminary_snapshot = self.sequencer.get();
         std::sync::atomic::fence(Release);
-        transaction_cell_ref.final_snapshot = self.sequencer.advance();
+        cell_ref.final_snapshot = self.sequencer.advance();
         Ok(Rubicon {
             transaction: Some(self),
         })
@@ -259,10 +254,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// Once the Transaction is post-processed, the Transaction cannot be rolled back.
     fn post_process(self) {
         let guard = crossbeam_epoch::pin();
-        let transaction_cell_shared = self.transaction_cell.swap(Shared::null(), Relaxed, &guard);
-        let transaction_cell_ref = unsafe { transaction_cell_shared.deref() };
-        transaction_cell_ref.end();
-        unsafe { guard.defer_destroy(transaction_cell_shared) };
+        let cell_shared = self.cell.swap(Shared::null(), Relaxed, &guard);
+        let cell_ref = unsafe { cell_shared.deref() };
+        cell_ref.end();
+        unsafe { guard.defer_destroy(cell_shared) };
     }
 }
 
@@ -270,13 +265,13 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     fn drop(&mut self) {
         // Rolls back the Transaction if not committed.
         let guard = crossbeam_epoch::pin();
-        let mut transaction_cell_shared = self.transaction_cell.load(Relaxed, &guard);
-        if !transaction_cell_shared.is_null() {
+        let mut cell_shared = self.cell.load(Relaxed, &guard);
+        if !cell_shared.is_null() {
             // The transaction cell has neither passed to other components nor consumed.
-            let transaction_cell_ref = unsafe { transaction_cell_shared.deref_mut() };
-            transaction_cell_ref.preliminary_snapshot = S::invalid();
-            transaction_cell_ref.end();
-            unsafe { guard.defer_destroy(transaction_cell_shared) };
+            let cell_ref = unsafe { cell_shared.deref_mut() };
+            cell_ref.preliminary_snapshot = S::invalid();
+            cell_ref.end();
+            unsafe { guard.defer_destroy(cell_shared) };
             // Rewinds the transaction.
             let _result = self.rewind(0);
         }
@@ -339,7 +334,7 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
             self.transaction
                 .as_ref()
                 .unwrap()
-                .transaction_cell
+                .cell
                 .load(Relaxed, crossbeam_epoch::unprotected())
                 .deref()
                 .snapshot()
@@ -356,13 +351,13 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
     }
 }
 
-/// TransactionChange consists of locks acquired and logs generated by the TransactionSession.
-struct TransactionChange<S: Sequencer> {
+/// TransactionRecord consists of locks acquired and logs generated by the TransactionSession.
+struct TransactionRecord<S: Sequencer> {
     _locks: Vec<VersionLocker<S>>,
     logs: Vec<Log>,
 }
 
-impl<S: Sequencer> TransactionChange<S> {
+impl<S: Sequencer> TransactionRecord<S> {
     /// Reverts changes.
     fn revert(self) {
         for log in self.logs.into_iter() {
@@ -376,14 +371,14 @@ impl<S: Sequencer> TransactionChange<S> {
 /// Locks and log records are accumulated in a TransactionSession.
 pub struct TransactionSession<'s, 't, S: Sequencer> {
     _transaction: &'t Transaction<'s, S>,
-    context: TransactionChange<S>,
+    context: TransactionRecord<S>,
 }
 
 impl<'s, 't, S: Sequencer> TransactionSession<'s, 't, S> {
     fn new(transaction: &'t Transaction<'s, S>) -> TransactionSession<'s, 't, S> {
         TransactionSession {
             _transaction: transaction,
-            context: TransactionChange {
+            context: TransactionRecord {
                 _locks: Vec::new(),
                 logs: Vec::new(),
             },
