@@ -227,9 +227,8 @@ impl<S: Sequencer> VersionLocker<S> {
         })
     }
 
-    /// Unlocks the VersionCell.
-    pub fn unlock(&self, transaction_cell_ref: &TransactionCell<S>) {
-        let guard = crossbeam_epoch::pin();
+    /// Releases the VersionCell.
+    pub fn release(&self, transaction_cell_ref: &TransactionCell<S>, guard: &Guard) {
         let version_cell_ref = unsafe { self.version_cell_ptr.load(Relaxed, &guard).deref() };
         let snapshot = transaction_cell_ref.snapshot();
         version_cell_ref.time_point.store(snapshot);
