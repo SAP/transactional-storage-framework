@@ -87,8 +87,8 @@ let mut transaction = storage.transaction();
 let result = transaction.rewind(1);
 assert!(result.is_err());
 
-let transaction_record = transaction.start();
-transaction.submit(transaction_record);
+let journal = transaction.start();
+journal.submit();
 
 let result = transaction.rewind(0);
 assert!(result.is_ok());
@@ -122,9 +122,9 @@ let versioned_object = DefaultVersionedObject::new();
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let mut transaction = storage.transaction();
 
-let mut transaction_record = transaction.start();
-assert!(transaction_record.lock(&versioned_object).is_ok());
-transaction.submit(transaction_record);
+let mut journal = transaction.start();
+assert!(journal.lock(&versioned_object).is_ok());
+journal.submit();
 
 transaction.commit();
 

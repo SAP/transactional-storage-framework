@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DefaultSequencer, Sequencer, Snapshot, TransactionRecordAnchor};
+use super::{DefaultSequencer, JournalAnchor, Sequencer, Snapshot};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -42,8 +42,8 @@ pub trait Version<S: Sequencer> {
 pub struct VersionCell<S: Sequencer> {
     /// owner_ptr points to the owner of the VersionCell.
     ///
-    /// Readers have to check the transaction state when owner_ptr points to a TransactionRecordAnchor.
-    owner_ptr: Atomic<TransactionRecordAnchor<S>>,
+    /// Readers have to check the transaction state when owner_ptr points to a JournalAnchor.
+    owner_ptr: Atomic<JournalAnchor<S>>,
     /// time_point represents a point of time when the version is created or deleted.
     ///
     /// The time point value cannot be reset, or updated once set by a transaction.
@@ -74,10 +74,10 @@ impl<S: Sequencer> VersionCell<S> {
     /// If the transaction is committed, a new time point is set.
     pub fn lock(
         &self,
-        transaction_record_anchor_shared: Shared<TransactionRecordAnchor<S>>,
+        journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
     ) -> Option<VersionLocker<S>> {
-        VersionLocker::lock(self, transaction_record_anchor_shared, guard)
+        VersionLocker::lock(self, journal_anchor_shared, guard)
     }
 
     /// Checks if the VersionCell predates the snapshot.
@@ -97,14 +97,12 @@ impl<S: Sequencer> VersionCell<S> {
             let guard = crossbeam_epoch::pin();
             let owner_shared = self.owner_ptr.load(Acquire, &guard);
             if owner_shared.as_raw() != self.locked_state() && !owner_shared.is_null() {
-                let transaction_record_anchor_ref = unsafe { owner_shared.deref() };
-                if snapshot.visible(transaction_record_anchor_ref, &guard) {
+                let journal_anchor_ref = unsafe { owner_shared.deref() };
+                if snapshot.visible(journal_anchor_ref, &guard) {
                     // The change has been made by a TransactionSession that predates the snapshot.
                     return true;
                 }
-                let visible = transaction_record_anchor_ref
-                    .visible(snapshot.clock(), &guard)
-                    .0;
+                let visible = journal_anchor_ref.visible(snapshot.clock(), &guard).0;
                 if self.owner_ptr.load(Acquire, &guard) == owner_shared {
                     // The owner has yet to post-process changes after committed.
                     return visible;
@@ -123,8 +121,8 @@ impl<S: Sequencer> VersionCell<S> {
     }
 
     /// VersionCell having owner_ptr == locked_state() is currently being locked.
-    fn locked_state(&self) -> *const TransactionRecordAnchor<S> {
-        self as *const _ as *const TransactionRecordAnchor<S>
+    fn locked_state(&self) -> *const JournalAnchor<S> {
+        self as *const _ as *const JournalAnchor<S>
     }
 }
 
@@ -157,14 +155,14 @@ pub struct VersionLocker<S: Sequencer> {
     /// The VersionCell is guaranteed to outlive by VersionCell::drop.
     version_cell_ptr: Atomic<VersionCell<S>>,
     /// The previous owner ptr.
-    prev_owner_ptr: Atomic<TransactionRecordAnchor<S>>,
+    prev_owner_ptr: Atomic<JournalAnchor<S>>,
 }
 
 impl<S: Sequencer> VersionLocker<S> {
     /// Locks the VersionCell.
     fn lock(
         version_cell_ref: &VersionCell<S>,
-        transaction_record_anchor_shared: Shared<TransactionRecordAnchor<S>>,
+        journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
     ) -> Option<VersionLocker<S>> {
         if version_cell_ref.time_point.load() != S::invalid() {
@@ -185,14 +183,14 @@ impl<S: Sequencer> VersionLocker<S> {
                 // Another transaction is locking the VersionCell.
                 continue;
             }
-            if current_owner_shared == transaction_record_anchor_shared {
+            if current_owner_shared == journal_anchor_shared {
                 // The TransactionRecord has acquired the lock.
                 return None;
             }
             let (same_trans, lockable) = unsafe {
                 current_owner_shared
                     .deref()
-                    .lockable(transaction_record_anchor_shared.deref(), guard)
+                    .lockable(journal_anchor_shared.deref(), guard)
             };
             if same_trans {
                 if !lockable {
@@ -256,10 +254,9 @@ impl<S: Sequencer> VersionLocker<S> {
             debug_assert_eq!(owner_shared, locked_state);
             return None;
         }
-        let owner_shared =
-            version_cell_ref
-                .owner_ptr
-                .swap(transaction_record_anchor_shared, Relaxed, &guard);
+        let owner_shared = version_cell_ref
+            .owner_ptr
+            .swap(journal_anchor_shared, Relaxed, &guard);
         debug_assert_eq!(owner_shared, locked_state);
 
         Some(VersionLocker {
@@ -271,7 +268,7 @@ impl<S: Sequencer> VersionLocker<S> {
     /// Releases the VersionCell.
     pub fn release(
         self,
-        transaction_record_anchor_shared: Shared<TransactionRecordAnchor<S>>,
+        journal_anchor_shared: Shared<JournalAnchor<S>>,
         snapshot: S::Clock,
         guard: &Guard,
     ) {
@@ -280,7 +277,7 @@ impl<S: Sequencer> VersionLocker<S> {
             version_cell_ref.time_point.store(snapshot);
         }
         let result = version_cell_ref.owner_ptr.compare_and_set(
-            transaction_record_anchor_shared,
+            journal_anchor_shared,
             self.prev_owner_ptr.load(Relaxed, &guard),
             Release,
             &guard,
