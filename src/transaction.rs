@@ -44,7 +44,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
-    /// Starts a new transaction session.
+    /// Starts a new transaction record.
     ///
     /// # Examples
     /// use tss::{DefaultSequencer, Storage, Transaction};
