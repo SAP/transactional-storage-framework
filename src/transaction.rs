@@ -625,6 +625,42 @@ mod test {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn visibility() {
+        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+        let versioned_object = DefaultVersionedObject::new();
+        let transaction = storage.transaction();
+        let barrier = Arc::new(Barrier::new(2));
+        thread::scope(|s| {
+            let versioned_object_ref = &versioned_object;
+            let transaction_ref = &transaction;
+            let barrier_cloned = barrier.clone();
+            s.spawn(move |_| {
+                // Step 1. Tries to acquire lock acquired by an active transaction record.
+                barrier_cloned.wait();
+                let mut transaction_record = transaction_ref.start();
+                assert!(transaction_record.lock(versioned_object_ref).is_err());
+                drop(transaction_record);
+
+                // Step 2. Tries to acquire lock acquired by a submitted transaction record.
+                barrier_cloned.wait();
+                barrier_cloned.wait();
+                let mut transaction_record = transaction_ref.start();
+                assert!(transaction_record.lock(versioned_object_ref).is_ok());
+                transaction_ref.submit(transaction_record);
+            });
+
+            let mut transaction_record = transaction.start();
+            assert!(transaction_record.lock(&versioned_object).is_ok());
+            barrier.wait();
+            barrier.wait();
+            transaction.submit(transaction_record);
+            barrier.wait();
+        })
+        .unwrap();
+        assert!(transaction.commit().is_ok());
+    }
+
+    #[test]
     fn wait_queue() {
         let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
         let versioned_object = DefaultVersionedObject::new();

@@ -156,6 +156,8 @@ impl<S: Sequencer> Drop for VersionCell<S> {
 pub struct VersionLocker<S: Sequencer> {
     /// The VersionCell is guaranteed to outlive by VersionCell::drop.
     version_cell_ptr: Atomic<VersionCell<S>>,
+    /// The previous owner ptr.
+    prev_owner_ptr: Atomic<TransactionRecordAnchor<S>>,
 }
 
 impl<S: Sequencer> VersionLocker<S> {
@@ -171,13 +173,14 @@ impl<S: Sequencer> VersionLocker<S> {
         }
 
         let locked_state = Shared::from(version_cell_ref.locked_state());
+        let mut current_owner_shared = Shared::null();
         while let Err(result) = version_cell_ref.owner_ptr.compare_and_set(
             Shared::null(),
             locked_state,
             Relaxed,
             &guard,
         ) {
-            let current_owner_shared = result.current;
+            current_owner_shared = result.current;
             if current_owner_shared.as_raw() == version_cell_ref.locked_state() {
                 // Another transaction is locking the VersionCell.
                 continue;
@@ -235,6 +238,7 @@ impl<S: Sequencer> VersionLocker<S> {
                 .map_or_else(|| false, |result| result)
             {
                 // This transaction has sucessfully locked the VersionCell.
+                current_owner_shared = Shared::null();
                 break;
             }
 
@@ -260,6 +264,7 @@ impl<S: Sequencer> VersionLocker<S> {
 
         Some(VersionLocker {
             version_cell_ptr: Atomic::from(version_cell_ref as *const _),
+            prev_owner_ptr: Atomic::from(current_owner_shared),
         })
     }
 
@@ -276,7 +281,7 @@ impl<S: Sequencer> VersionLocker<S> {
         }
         let result = version_cell_ref.owner_ptr.compare_and_set(
             transaction_record_anchor_shared,
-            Shared::null(),
+            self.prev_owner_ptr.load(Relaxed, &guard),
             Release,
             &guard,
         );
