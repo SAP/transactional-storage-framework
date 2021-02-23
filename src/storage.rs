@@ -67,14 +67,10 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = storage.snapshot();
     /// ```
-    pub fn snapshot<'s>(&'s self, transaction: Option<&'s Transaction<S>>) -> Snapshot<S> {
-        if let Some(transaction) = transaction.as_ref() {
-            transaction.snapshot()
-        } else {
-            Snapshot::new(&self.sequencer, None)
-        }
+    pub fn snapshot<'s>(&'s self) -> Snapshot<S> {
+        Snapshot::new(&self.sequencer, None, None)
     }
 
     /// Creates a new container directory.
@@ -127,7 +123,7 @@ impl<S: Sequencer> Storage<S> {
     /// assert!(result.is_ok());
     /// transaction.commit();
     ///
-    /// let snapshot = storage.snapshot(None);
+    /// let snapshot = storage.snapshot();
     /// let result = storage.get("/thomas/eats/apples", &snapshot);
     /// assert!(result.is_some());
     /// ```
@@ -159,7 +155,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = transaction.snapshot();
     ///
     /// storage.create_directory("/thomas/eats/apples", &transaction);
     /// let result = storage.read("/thomas/eats/apples", |_| true, &snapshot);
@@ -192,7 +188,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = transaction.snapshot();
     ///
     /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
@@ -231,7 +227,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = transaction.snapshot();
     ///
     /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
@@ -279,7 +275,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = transaction.snapshot();
     ///
     /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
     /// assert!(result.is_ok());
@@ -287,7 +283,7 @@ impl<S: Sequencer> Storage<S> {
     /// transaction.commit();
     ///
     /// let mut transaction = storage.transaction();
-    /// let snapshot = storage.snapshot(Some(&transaction));
+    /// let snapshot = transaction.snapshot();
     /// let result = storage.remove("/thomas/eats/apples", &transaction, &snapshot);
     /// assert!(result.is_ok());
     /// ```

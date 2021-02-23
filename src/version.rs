@@ -98,10 +98,7 @@ impl<S: Sequencer> VersionCell<S> {
             let owner_shared = self.owner_ptr.load(Acquire, &guard);
             if owner_shared.as_raw() != self.locked_state() && !owner_shared.is_null() {
                 let transaction_record_anchor_ref = unsafe { owner_shared.deref() };
-                let submit_clock = transaction_record_anchor_ref.submit_clock();
-                let transaction_cell_ref =
-                    transaction_record_anchor_ref.transaction_cell_ref(&guard);
-                if snapshot.visible((transaction_cell_ref, submit_clock)) {
+                if snapshot.visible(transaction_record_anchor_ref) {
                     // The change has been made by a TransactionSession that predates the snapshot.
                     return true;
                 }
@@ -188,8 +185,8 @@ impl<S: Sequencer> VersionLocker<S> {
             let current_owner_ref = unsafe { current_owner_shared.deref() };
             if current_owner_ref
                 .wait(
-                    |cell| {
-                        if cell.snapshot() == S::invalid() {
+                    |snapshot| {
+                        if *snapshot == S::invalid() {
                             // The transaction has been rolled back.
                             //  - Tries to overtake ownership.
                             //  - CAS returning false means that another transaction overtook ownership.

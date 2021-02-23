@@ -30,5 +30,5 @@ pub use logger::{Log, Logger};
 pub use sequencer::{DefaultSequencer, DeriveClock, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
-pub use transaction::{Transaction, TransactionCell, TransactionRecordAnchor};
+pub use transaction::{Transaction, TransactionRecord, TransactionRecordAnchor};
 pub use version::{DefaultVersionedObject, Version, VersionCell, VersionLocker};
