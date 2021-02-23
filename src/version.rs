@@ -98,7 +98,7 @@ impl<S: Sequencer> VersionCell<S> {
             let owner_shared = self.owner_ptr.load(Acquire, &guard);
             if owner_shared.as_raw() != self.locked_state() && !owner_shared.is_null() {
                 let transaction_record_anchor_ref = unsafe { owner_shared.deref() };
-                if snapshot.visible(transaction_record_anchor_ref) {
+                if snapshot.visible(transaction_record_anchor_ref, &guard) {
                     // The change has been made by a TransactionSession that predates the snapshot.
                     return true;
                 }
@@ -182,14 +182,40 @@ impl<S: Sequencer> VersionLocker<S> {
                 // Another transaction is locking the VersionCell.
                 continue;
             }
+            if current_owner_shared == transaction_record_anchor_shared {
+                // The TransactionRecord has acquired the lock.
+                return None;
+            }
+            let (same_trans, lockable) = unsafe {
+                current_owner_shared
+                    .deref()
+                    .lockable(transaction_record_anchor_shared.deref(), guard)
+            };
+            if same_trans {
+                if !lockable {
+                    // In order to prevent deadlock, immediately returns None.
+                    return None;
+                }
+                // Takes ownership.
+                if version_cell_ref
+                    .owner_ptr
+                    .compare_and_set(current_owner_shared, locked_state, Relaxed, &guard)
+                    .is_ok()
+                {
+                    // Succesfully took ownership.
+                    break;
+                }
+                continue;
+            }
             let current_owner_ref = unsafe { current_owner_shared.deref() };
             if current_owner_ref
                 .wait(
                     |snapshot| {
                         if *snapshot == S::invalid() {
-                            // The transaction has been rolled back.
+                            // The transaction has been rolled back, or the transaction record has been discarded.
                             //  - Tries to overtake ownership.
                             //  - CAS returning false means that another transaction overtook ownership.
+                            //  - The thread is pinned, so there is no possibility of ABA.
                             version_cell_ref
                                 .owner_ptr
                                 .compare_and_set(

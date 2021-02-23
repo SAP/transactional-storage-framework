@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{DeriveClock, Sequencer, Transaction, TransactionRecord, TransactionRecordAnchor};
+use crossbeam_epoch::Guard;
 
 /// Snapshot represents a state of the entire storage system at a point of time.
 ///
@@ -55,15 +56,24 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
     }
 
     /// Returns true if the given transaction record is visible.
-    pub fn visible(&self, transaction_record_anchor: &TransactionRecordAnchor<S>) -> bool {
+    pub fn visible(
+        &self,
+        transaction_record_anchor: &TransactionRecordAnchor<S>,
+        guard: &Guard,
+    ) -> bool {
         self.transaction.as_ref().map_or_else(
             || false,
-            |(_, transaction_clock)| {
+            |(transaction, transaction_clock)| {
                 let anchor_ref = self
                     .transaction_record
                     .as_ref()
                     .map(|record| (*record).anchor_ref());
-                transaction_record_anchor.predate(*transaction_clock, anchor_ref)
+                transaction_record_anchor.predate(
+                    transaction,
+                    *transaction_clock,
+                    anchor_ref,
+                    guard,
+                )
             },
         )
     }
