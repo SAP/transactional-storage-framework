@@ -4,7 +4,7 @@
 
 extern crate crossbeam_epoch;
 
-use super::{Container, ContainerHandle, Error, Sequencer, Snapshot, Transaction};
+use super::{Container, ContainerHandle, Error, Journal, Sequencer, Snapshot, Transaction};
 use std::string::String;
 
 /// Storage is a transactional data storage.
@@ -82,13 +82,15 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     ///
-    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// let result = storage.create_directory("/thomas/eats/apples", &journal);
     /// assert!(result.is_ok());
+    /// journal.submit();
     /// ```
     pub fn create_directory(
         &self,
         path: &str,
-        _transaction: &Transaction<S>,
+        _journal: &Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
@@ -119,8 +121,11 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
     ///
-    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// let result = storage.create_directory("/thomas/eats/apples", &journal);
     /// assert!(result.is_ok());
+    /// journal.submit();
+    ///
     /// transaction.commit();
     ///
     /// let snapshot = storage.snapshot();
@@ -155,9 +160,12 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
-    /// let snapshot = transaction.snapshot();
     ///
-    /// storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// storage.create_directory("/thomas/eats/apples", &journal);
+    /// journal.submit();
+    ///
+    /// let snapshot = transaction.snapshot();
     /// let result = storage.read("/thomas/eats/apples", |_| true, &snapshot);
     /// assert!(result.unwrap());
     /// ```
@@ -188,18 +196,24 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = transaction.snapshot();
     ///
-    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// let result = storage.create_directory("/thomas/eats/apples", &journal);
     /// assert!(result.is_ok());
+    /// journal.submit();
     ///
+    /// let journal = transaction.start();
+    /// let snapshot = journal.snapshot();
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &transaction, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &journal, &snapshot);
+    /// drop(snapshot);
+    /// journal.submit();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let result = storage.get("/thomas/eats/apples/apple1", &snapshot);
     /// assert!(result.is_some());
-    ///
     /// drop(snapshot);
+    ///
     /// transaction.commit();
     /// ```
     pub fn link(
@@ -207,7 +221,7 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         container: ContainerHandle<S>,
         name: &str,
-        _transaction: &Transaction<S>,
+        _journal: &Journal<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
@@ -227,16 +241,26 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = transaction.snapshot();
     ///
-    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// let result = storage.create_directory("/thomas/eats/apples", &journal);
     /// assert!(result.is_ok());
+    /// journal.submit();
     ///
+    /// let journal = transaction.start();
+    /// let snapshot = journal.snapshot();
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &transaction, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &journal, &snapshot);
+    /// drop(snapshot);
+    /// journal.submit();
     ///
-    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &transaction, &snapshot);
+    /// let journal = transaction.start();
+    /// let snapshot = journal.snapshot();
+    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &journal, &snapshot);
+    /// drop(snapshot);
+    /// journal.submit();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let result = storage.get("/thomas/eats/apples/apple1", &snapshot);
     /// assert!(result.is_none());
     ///
@@ -247,7 +271,7 @@ impl<S: Sequencer> Storage<S> {
         &self,
         path: &str,
         target_path: &str,
-        transaction: &Transaction<S>,
+        journal: &Journal<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
@@ -258,7 +282,7 @@ impl<S: Sequencer> Storage<S> {
                         .get(&guard)
                         .link(name, container_handle.clone())
                     {
-                        let _result = self.remove(path, transaction, snapshot);
+                        let _result = self.remove(path, journal, snapshot);
                         return Ok(container_handle);
                     }
                 }
@@ -275,22 +299,29 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
-    /// let snapshot = transaction.snapshot();
-    ///
-    /// let result = storage.create_directory("/thomas/eats/apples", &transaction);
+    /// let journal = transaction.start();
+    /// let result = storage.create_directory("/thomas/eats/apples", &journal);
     /// assert!(result.is_ok());
-    /// drop(snapshot);
+    /// journal.submit();
     /// transaction.commit();
     ///
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
-    /// let result = storage.remove("/thomas/eats/apples", &transaction, &snapshot);
+    /// let journal = transaction.start();
+    /// let result = storage.remove("/thomas/eats/apples", &journal, &snapshot);
     /// assert!(result.is_ok());
+    /// drop(snapshot);
+    /// journal.submit();
+    /// transaction.commit();
+    ///
+    /// let snapshot = storage.snapshot();
+    /// let result = storage.get("/thomas/eats/apples", &snapshot);
+    /// assert!(result.is_none());
     /// ```
     pub fn remove(
         &self,
         path: &str,
-        _transaction: &Transaction<S>,
+        _journal: &Journal<S>,
         _snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');

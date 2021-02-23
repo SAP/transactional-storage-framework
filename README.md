@@ -80,7 +80,7 @@ assert!(result.is_some());
 tss::Transaction represents a set of changes made to a tss::Storage that can be atomically committed. Developers and researchers are able to add / modify / remove transactional semantics easily as the storage actions are implemented in a highly flexible way. The logging format is not explicitly specified, and therefore developers can freely define the log structure, or even omit logging. The changes made in a transaction can be partially reverted by using the rewinding mechanism. Every change made in a transaction must be submitted, and the submitted change can be discarded without fully rolling back the transaction.
 
 ```rust
-use tss::{DefaultSequencer, Log, Storage, Transaction};
+use tss::{DefaultSequencer, Storage, Transaction};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let mut transaction = storage.transaction();
@@ -88,7 +88,8 @@ let result = transaction.rewind(1);
 assert!(result.is_err());
 
 let journal = transaction.start();
-journal.submit();
+let clock = journal.submit();
+assert_eq!(clock, 1);
 
 let result = transaction.rewind(0);
 assert!(result.is_ok());
