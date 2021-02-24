@@ -106,7 +106,7 @@ impl<S: Sequencer> Storage<S> {
             }
         }
         if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_container_handle() {
+            if let Some(container_handle) = container_ref.create_handle() {
                 return Ok(container_handle);
             }
         }
@@ -148,7 +148,7 @@ impl<S: Sequencer> Storage<S> {
             }
         }
         if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_container_handle() {
+            if let Some(container_handle) = container_ref.create_handle() {
                 return Some(container_handle);
             }
         }
@@ -361,7 +361,7 @@ impl<S: Sequencer> Storage<S> {
             current_container_name.take(),
             parent_container_ref.take(),
         ) {
-            if let Some(container_handle) = current_container_ref.create_container_handle() {
+            if let Some(container_handle) = current_container_ref.create_handle() {
                 if parent_container_ref.unlink(current_container_name, journal) {
                     return Ok(container_handle);
                 }

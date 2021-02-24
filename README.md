@@ -39,10 +39,7 @@ tss::Container is a transactional data container that is analogous to a database
 use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-let transaction = storage.transaction();
-
-let result = storage.create_directory("/thomas/eats/apples", &transaction);
-assert!(result.is_ok());
+let container_handle: Handle = Container::new_default_container();
 ```
 
 ## tss::Sequencer <a name="sequencer">

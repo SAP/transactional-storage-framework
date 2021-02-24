@@ -105,7 +105,9 @@ impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
     }
 }
 
-/// ContainerDirectory is a tree storing handles to sub containers.
+/// ContainerDirectory is a tree storing versioned handles to sub containers.
+///
+/// Traversing a container path requires a Snapshot.
 type ContainerDirectory<S> = TreeIndex<String, ContainerVersion<S>>;
 
 /// Container can either be Data or Directory.
@@ -117,9 +119,14 @@ enum ContainerType<S: Sequencer> {
 }
 
 /// ContainerVersion implements the Version trait, embeding a Container.
+///
+/// ContainerVersion forms a linked list of containers under the same path.
 pub struct ContainerVersion<S: Sequencer> {
+    /// version_cell represents the creation time point.
     version_cell: Atomic<VersionCell<S>>,
+    /// container_handle pointing to nothing represents a state where the container has been removed.
     container_handle: ContainerHandle<S>,
+    /// previous_version points to the immediate previous version of the Container.
     previous_version: Atomic<ContainerVersion<S>>,
 }
 
@@ -164,7 +171,9 @@ impl<S: Sequencer> Version<S> for ContainerVersion<S> {
 /// A Container may hold references to other Container instances, and those holding Container
 /// references are called a directory.
 pub struct Container<S: Sequencer> {
+    /// It is either a Data or Directory container.
     container: ContainerType<S>,
+    /// Container is reference counted.
     references: AtomicUsize,
 }
 
@@ -206,7 +215,7 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Creates a new container handle out of self.
-    pub fn create_container_handle(&self) -> Option<ContainerHandle<S>> {
+    pub fn create_handle(&self) -> Option<ContainerHandle<S>> {
         // Tries to increment the reference count by one.
         let mut prev_ref = self.references.load(Relaxed);
         loop {
