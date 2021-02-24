@@ -112,8 +112,12 @@ type ContainerDirectory<S> = TreeIndex<String, ContainerHandle<S>>;
 
 /// Container can either be Data or Directory.
 enum ContainerType<S: Sequencer> {
+    /// A two dimensional data plane.
     Data(Box<dyn ContainerData<S> + Send + Sync>),
+    /// Directory has child containers without managing data.
     Directory(Atomic<ContainerDirectory<S>>),
+    /// Obsolete is a version marker that represents a state where the container is removed.
+    _Obsolete,
 }
 
 /// A transactional data container.
@@ -128,6 +132,7 @@ pub struct Container<S: Sequencer> {
     container: ContainerType<S>,
     references: AtomicUsize,
     version_cell: Atomic<VersionCell<S>>,
+    _prev_version: Atomic<Container<S>>,
 }
 
 impl<S: Sequencer> Container<S> {
@@ -145,7 +150,8 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Directory(Atomic::null()),
                 references: AtomicUsize::new(1),
-                version_cell: Atomic::null(),
+                version_cell: Atomic::new(VersionCell::new()),
+                _prev_version: Atomic::null(),
             })),
         }
     }
@@ -164,7 +170,8 @@ impl<S: Sequencer> Container<S> {
             pointer: Atomic::from(Owned::new(Container {
                 container: ContainerType::Data(Box::new(DefaultContainerData::new())),
                 references: AtomicUsize::new(1),
-                version_cell: Atomic::null(),
+                version_cell: Atomic::new(VersionCell::new()),
+                _prev_version: Atomic::null(),
             })),
         }
     }
@@ -235,7 +242,7 @@ impl<S: Sequencer> Container<S> {
     /// let sub_directory = container_handle_root.get(&guard).create_directory(&apple);
     /// assert!(sub_directory.is_some());
     /// ```
-    pub fn create_directory(&self, name: &str) -> Option<ContainerHandle<S>> {
+    pub fn create_directory(&self, name: &str) -> Option<(ContainerHandle<S>, bool)> {
         let guard = crossbeam_epoch::pin();
         if let ContainerType::Directory(directory) = &self.container {
             let mut directory_shared_ptr = directory.load(Relaxed, &guard);
@@ -261,11 +268,11 @@ impl<S: Sequencer> Container<S> {
                                 None
                             }
                         }) {
-                            return existing_directory;
+                            return existing_directory.map(|directory| (directory, false));
                         }
                         name = key;
                     } else {
-                        return Some(new_directory);
+                        return Some((new_directory, true));
                     }
                 }
             }

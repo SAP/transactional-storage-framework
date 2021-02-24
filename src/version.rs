@@ -15,7 +15,7 @@ pub trait Version<S: Sequencer> {
     fn version_cell<'g>(&'g self, guard: &'g Guard) -> Shared<'g, VersionCell<S>>;
 
     /// Returns true if the version predates the snapshot.
-    fn predate(&self, guard: &Guard, snapshot: &Snapshot<S>) -> bool {
+    fn predate(&self, snapshot: &Snapshot<S>, guard: &Guard) -> bool {
         let version_cell_shared = self.version_cell(guard);
         if version_cell_shared.is_null() {
             // The lack of VersionCell indicates that the versioned object has been fully consolidated.
