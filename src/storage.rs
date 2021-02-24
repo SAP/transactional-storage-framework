@@ -2,11 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-extern crate crossbeam_epoch;
-
-use super::{
-    Container, ContainerHandle, Error, Journal, Sequencer, Snapshot, Transaction, Version,
-};
+use super::{Container, ContainerHandle, Error, Journal, Sequencer, Snapshot, Transaction};
 use std::string::String;
 
 /// Storage is a transactional data storage.
@@ -39,11 +35,6 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     pub fn new(name: String) -> Storage<S> {
         let root_container = Container::new_directory();
-        unsafe {
-            root_container
-                .get(crossbeam_epoch::unprotected())
-                .unversion(crossbeam_epoch::unprotected());
-        }
         Storage {
             _name: name,
             sequencer: S::new(),
@@ -104,20 +95,20 @@ impl<S: Sequencer> Storage<S> {
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some((directory_handle, created)) = current_container_ref.create_directory(name)
-            {
-                current_container_ref = directory_handle.get(&guard);
-                if created {
-                    if journal.lock(current_container_ref).is_err() {
-                        return Err(Error::Fail);
-                    }
+            if let Some(container_ref) = current_container_ref.as_ref() {
+                if let Some(directory_handle) = container_ref.create_directory(name, journal) {
+                    current_container_ref = directory_handle.get(&guard);
+                } else {
+                    return Err(Error::Fail);
                 }
             } else {
                 return Err(Error::Fail);
             }
         }
-        if let Some(container_handle) = current_container_ref.create_container_handle() {
-            return Ok(container_handle);
+        if let Some(container_ref) = current_container_ref.take() {
+            if let Some(container_handle) = container_ref.create_container_handle() {
+                return Ok(container_handle);
+            }
         }
         Err(Error::Fail)
     }
@@ -150,21 +141,18 @@ impl<S: Sequencer> Storage<S> {
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(name, &guard) {
-                if container_ref.predate(snapshot, &guard) {
-                    current_container_ref = container_ref;
-                } else {
-                    return None;
-                }
+            if let Some(container_ref) = current_container_ref.as_ref() {
+                current_container_ref = container_ref.search(name, &snapshot, &guard);
             } else {
                 return None;
             }
         }
-        if let Some(container_handle) = current_container_ref.create_container_handle() {
-            Some(container_handle)
-        } else {
-            None
+        if let Some(container_ref) = current_container_ref.take() {
+            if let Some(container_handle) = container_ref.create_container_handle() {
+                return Some(container_handle);
+            }
         }
+        None
     }
 
     /// Reads the Container at the given path.
@@ -196,17 +184,16 @@ impl<S: Sequencer> Storage<S> {
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(name, &guard) {
-                if current_container_ref.predate(snapshot, &guard) {
-                    current_container_ref = container_ref;
-                } else {
-                    return None;
-                }
+            if let Some(container_ref) = current_container_ref.as_ref() {
+                current_container_ref = container_ref.search(name, &snapshot, &guard);
             } else {
                 return None;
             }
         }
-        Some(reader(current_container_ref))
+        if let Some(container_ref) = current_container_ref.take() {
+            return Some(reader(container_ref));
+        }
+        None
     }
 
     /// Links a data container to the given directory.
@@ -248,11 +235,9 @@ impl<S: Sequencer> Storage<S> {
         if let Some(container_handle) = self.get(path, snapshot) {
             let guard = crossbeam_epoch::pin();
             let container_directory_ref = container_handle.get(&guard);
-            if journal.lock(container_directory_ref).is_ok() {
-                if journal.lock(container.get(&guard)).is_ok() {
-                    if container_directory_ref.link(name, container.clone()) {
-                        return Ok(container);
-                    }
+            if let Some(container_ref) = container_directory_ref {
+                if container_ref.link(name, container.clone(), journal) {
+                    return Ok(container);
                 }
             }
         }
@@ -280,11 +265,11 @@ impl<S: Sequencer> Storage<S> {
     /// journal.submit();
     /// drop(snapshot);
     ///
-    /// let journal = transaction.start();
-    /// let snapshot = journal.snapshot();
-    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &journal, &snapshot);
-    /// drop(snapshot);
+    /// let snapshot = transaction.snapshot();
+    /// let mut journal = transaction.start();
+    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &mut journal, &snapshot);
     /// journal.submit();
+    /// drop(snapshot);
     ///
     /// let snapshot = transaction.snapshot();
     /// let result = storage.get("/thomas/eats/apples/apple1", &snapshot);
@@ -297,19 +282,18 @@ impl<S: Sequencer> Storage<S> {
         &self,
         path: &str,
         target_path: &str,
-        journal: &Journal<S>,
+        journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
             if let Some(target_directory_container_handle) = self.get(target_path, snapshot) {
                 if let Some((name, _)) = Self::name(&path) {
                     let guard = crossbeam_epoch::pin();
-                    if target_directory_container_handle
-                        .get(&guard)
-                        .link(name, container_handle.clone())
-                    {
-                        let _result = self.remove(path, journal, snapshot);
-                        return Ok(container_handle);
+                    if let Some(container_ref) = target_directory_container_handle.get(&guard) {
+                        if container_ref.link(name, container_handle.clone(), journal) {
+                            let _result = self.remove(path, journal, snapshot);
+                            return Ok(container_handle);
+                        }
                     }
                 }
             }
@@ -333,11 +317,11 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
-    /// let journal = transaction.start();
-    /// let result = storage.remove("/thomas/eats/apples", &journal, &snapshot);
+    /// let mut journal = transaction.start();
+    /// let result = storage.remove("/thomas/eats/apples", &mut journal, &snapshot);
     /// assert!(result.is_ok());
-    /// drop(snapshot);
     /// journal.submit();
+    /// drop(snapshot);
     /// transaction.commit();
     ///
     /// let snapshot = storage.snapshot();
@@ -347,35 +331,43 @@ impl<S: Sequencer> Storage<S> {
     pub fn remove(
         &self,
         path: &str,
-        _journal: &Journal<S>,
-        _snapshot: &Snapshot<S>,
+        journal: &mut Journal<S>,
+        snapshot: &Snapshot<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
         let mut current_container_ref = self.root_container.get(&guard);
+        let mut current_container_name: Option<&str> = None;
         let mut parent_container_ref: Option<&Container<S>> = None;
-        let mut parent_container_name: Option<&str> = None;
         for name in split {
-            if let Some(container_ref) = current_container_ref.search(name, &guard) {
-                parent_container_ref.replace(current_container_ref);
-                parent_container_name.replace(name);
-                current_container_ref = container_ref;
+            if let Some(container_ref) = current_container_ref.as_ref() {
+                if let Some(child_container_ref) = container_ref.search(name, &snapshot, &guard) {
+                    parent_container_ref.replace(container_ref);
+                    current_container_name.replace(name);
+                    current_container_ref.replace(child_container_ref);
+                } else {
+                    return Err(Error::Fail);
+                }
             } else {
                 return Err(Error::Fail);
             }
         }
-        if let Some(container_handle) = current_container_ref.create_container_handle() {
-            if let (Some(parent_container_ref), Some(parent_container_name)) =
-                (parent_container_ref, parent_container_name)
-            {
-                if !parent_container_ref.unlink(parent_container_name) {
-                    return Err(Error::Fail);
+        if let (
+            Some(current_container_ref),
+            Some(current_container_name),
+            Some(parent_container_ref),
+        ) = (
+            current_container_ref.take(),
+            current_container_name.take(),
+            parent_container_ref.take(),
+        ) {
+            if let Some(container_handle) = current_container_ref.create_container_handle() {
+                if parent_container_ref.unlink(current_container_name, journal) {
+                    return Ok(container_handle);
                 }
             }
-            Ok(container_handle)
-        } else {
-            Err(Error::Fail)
         }
+        Err(Error::Fail)
     }
 
     /// Extracts the name and position of the container out of a string.

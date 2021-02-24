@@ -2,9 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-extern crate scc;
-
-use super::{Error, Sequencer, Snapshot, Transaction, Version, VersionCell};
+use super::{Error, Journal, Sequencer, Snapshot, Transaction, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
@@ -108,7 +106,7 @@ impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
 }
 
 /// ContainerDirectory is a tree storing handles to sub containers.
-type ContainerDirectory<S> = TreeIndex<String, ContainerHandle<S>>;
+type ContainerDirectory<S> = TreeIndex<String, ContainerVersion<S>>;
 
 /// Container can either be Data or Directory.
 enum ContainerType<S: Sequencer> {
@@ -116,8 +114,45 @@ enum ContainerType<S: Sequencer> {
     Data(Box<dyn ContainerData<S> + Send + Sync>),
     /// Directory has child containers without managing data.
     Directory(Atomic<ContainerDirectory<S>>),
-    /// Obsolete is a version marker that represents a state where the container is removed.
-    _Obsolete,
+}
+
+/// ContainerVersion implements the Version trait, embeding a Container.
+pub struct ContainerVersion<S: Sequencer> {
+    version_cell: Atomic<VersionCell<S>>,
+    container_handle: ContainerHandle<S>,
+    previous_version: Atomic<ContainerVersion<S>>,
+}
+
+impl<S: Sequencer> ContainerVersion<S> {
+    fn new(container_handle: ContainerHandle<S>) -> ContainerVersion<S> {
+        ContainerVersion {
+            version_cell: Atomic::new(VersionCell::new()),
+            container_handle,
+            previous_version: Atomic::null(),
+        }
+    }
+}
+
+impl<S: Sequencer> Clone for ContainerVersion<S> {
+    fn clone(&self) -> Self {
+        ContainerVersion {
+            version_cell: self.version_cell.clone(),
+            container_handle: self.container_handle.clone(),
+            previous_version: self.previous_version.clone(),
+        }
+    }
+}
+
+impl<S: Sequencer> Version<S> for ContainerVersion<S> {
+    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
+        self.version_cell.load(Acquire, guard)
+    }
+    fn unversion(&self, guard: &Guard) -> bool {
+        !self
+            .version_cell
+            .swap(Shared::null(), Relaxed, guard)
+            .is_null()
+    }
 }
 
 /// A transactional data container.
@@ -131,8 +166,6 @@ enum ContainerType<S: Sequencer> {
 pub struct Container<S: Sequencer> {
     container: ContainerType<S>,
     references: AtomicUsize,
-    version_cell: Atomic<VersionCell<S>>,
-    _prev_version: Atomic<Container<S>>,
 }
 
 impl<S: Sequencer> Container<S> {
@@ -147,12 +180,10 @@ impl<S: Sequencer> Container<S> {
     /// ```
     pub fn new_directory() -> ContainerHandle<S> {
         ContainerHandle {
-            pointer: Atomic::from(Owned::new(Container {
+            container_ptr: Atomic::new(Container {
                 container: ContainerType::Directory(Atomic::null()),
                 references: AtomicUsize::new(1),
-                version_cell: Atomic::new(VersionCell::new()),
-                _prev_version: Atomic::null(),
-            })),
+            }),
         }
     }
 
@@ -167,44 +198,14 @@ impl<S: Sequencer> Container<S> {
     /// ```
     pub fn new_default_container() -> ContainerHandle<S> {
         ContainerHandle {
-            pointer: Atomic::from(Owned::new(Container {
+            container_ptr: Atomic::new(Container {
                 container: ContainerType::Data(Box::new(DefaultContainerData::new())),
                 references: AtomicUsize::new(1),
-                version_cell: Atomic::new(VersionCell::new()),
-                _prev_version: Atomic::null(),
-            })),
+            }),
         }
     }
 
     /// Creates a new container handle out of self.
-    ///
-    /// The instance may be reachable even when the reference count is zero due to the epoch-based
-    /// memory reclamation mechanism.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
-    ///
-    /// let container_handle_root: Handle = Container::new_directory();
-    /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = String::from("apple");
-    ///
-    /// let guard = crossbeam_epoch::pin();
-    /// let root_ref = container_handle_root.get(&guard);
-    /// let result = root_ref.link(&apple, container_handle_apple);
-    /// assert!(result);
-    ///
-    /// let apple_ref = root_ref.search(&apple, &guard);
-    /// assert!(apple_ref.is_some());
-    ///
-    /// if let Some(apple_ref) = apple_ref {
-    ///     let apple_handle = apple_ref.create_container_handle();
-    ///     drop(guard);
-    ///     let apple_handle_cloned = apple_handle.clone();
-    /// }
-    ///
-    /// ```
     pub fn create_container_handle(&self) -> Option<ContainerHandle<S>> {
         // Tries to increment the reference count by one.
         let mut prev_ref = self.references.load(Relaxed);
@@ -218,7 +219,7 @@ impl<S: Sequencer> Container<S> {
             {
                 Ok(_) => {
                     return Some(ContainerHandle {
-                        pointer: Atomic::from(self as *const _),
+                        container_ptr: Atomic::from(self as *const _),
                     })
                 }
                 Err(value) => prev_ref = value,
@@ -227,22 +228,11 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Creates a new container directory under the given name.
-    ///
-    /// If a directory exists under the given name, returns it.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
-    ///
-    /// let container_handle_root: Handle = Container::new_directory();
-    /// let apple = "apple";
-    ///
-    /// let guard = crossbeam_epoch::pin();
-    /// let sub_directory = container_handle_root.get(&guard).create_directory(&apple);
-    /// assert!(sub_directory.is_some());
-    /// ```
-    pub fn create_directory(&self, name: &str) -> Option<(ContainerHandle<S>, bool)> {
+    pub fn create_directory(
+        &self,
+        name: &str,
+        journal: &mut Journal<S>,
+    ) -> Option<ContainerHandle<S>> {
         let guard = crossbeam_epoch::pin();
         if let ContainerType::Directory(directory) = &self.container {
             let mut directory_shared_ptr = directory.load(Relaxed, &guard);
@@ -259,20 +249,30 @@ impl<S: Sequencer> Container<S> {
                 let directory_ref = unsafe { directory_shared_ptr.deref() };
                 let mut name = String::from(name);
                 let new_directory = Self::new_directory();
+                let new_container_version = ContainerVersion::new(new_directory.clone());
                 loop {
-                    if let Err((key, _)) = directory_ref.insert(name, new_directory.clone()) {
+                    if let Err((key, _)) = directory_ref.insert(name, new_container_version.clone())
+                    {
                         if let Some(existing_directory) = directory_ref.read(&key, |_, value| {
-                            if let ContainerType::Directory(_) = &value.get(&guard).container {
-                                Some(value.clone())
+                            if let Some(ContainerType::Directory(_)) = &value
+                                .container_handle
+                                .get(&guard)
+                                .map(|container| &container.container)
+                            {
+                                Some(value.container_handle.clone())
                             } else {
                                 None
                             }
                         }) {
-                            return existing_directory.map(|directory| (directory, false));
+                            return existing_directory;
                         }
                         name = key;
                     } else {
-                        return Some((new_directory, true));
+                        if journal.lock(&new_container_version).is_ok() {
+                            return Some(new_directory);
+                        } else {
+                            return None;
+                        }
                     }
                 }
             }
@@ -281,116 +281,76 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Searches for a container associated with the given name.
-    ///
-    /// It does not perform a memory write operation, relying on the given guard.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
-    ///
-    /// let container_handle_root: Handle = Container::new_directory();
-    /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = "apple";
-    ///
-    /// let guard = crossbeam_epoch::pin();
-    /// let root_ref = container_handle_root.get(&guard);
-    /// let result = root_ref.link(&apple, container_handle_apple);
-    /// assert!(result);
-    ///
-    /// let apple_ref = root_ref.search(&apple, &guard);
-    /// assert!(apple_ref.is_some());
-    /// ```
-    pub fn search<'g>(&self, name: &str, guard: &'g Guard) -> Option<&'g Container<S>> {
+    pub fn search<'g>(
+        &self,
+        name: &str,
+        snapshot: &Snapshot<S>,
+        guard: &'g Guard,
+    ) -> Option<&'g Container<S>> {
         if let ContainerType::Directory(directory) = &self.container {
             let directory_shared_ptr = directory.load(Relaxed, guard);
-            if directory_shared_ptr.is_null() {
-                None
-            } else {
-                unsafe {
+            if !directory_shared_ptr.is_null() {
+                if let Some(result) = unsafe {
                     directory_shared_ptr
                         .deref()
                         .read(&String::from(name), |_, value_ref| {
-                            value_ref.pointer.load(Relaxed, guard).deref()
+                            if value_ref.predate(snapshot, guard) {
+                                value_ref.container_handle.get(guard)
+                            } else {
+                                None
+                            }
                         })
+                } {
+                    return result;
                 }
             }
-        } else {
-            None
         }
+        None
     }
 
-    /// Links the given container to the current container.
-    ///
-    /// The given container cannot be a directory container.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
-    ///
-    /// let container_handle_root: Handle = Container::new_directory();
-    /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = "apple";
-    ///
-    /// let guard = crossbeam_epoch::pin();
-    /// let root_ref = container_handle_root.get(&guard);
-    /// let result = root_ref.link(&apple, container_handle_apple);
-    /// assert!(result);
-    /// ```
-    pub fn link(&self, name: &str, container_handle: ContainerHandle<S>) -> bool {
+    /// Links the given data container to itself if it is a directory.
+    pub fn link(
+        &self,
+        name: &str,
+        container_handle: ContainerHandle<S>,
+        journal: &mut Journal<S>,
+    ) -> bool {
         let guard = crossbeam_epoch::pin();
-        match (&self.container, &container_handle.get(&guard).container) {
-            (ContainerType::Directory(directory), ContainerType::Data(_)) => {
-                let mut directory_shared_ptr = directory.load(Relaxed, &guard);
-                if directory_shared_ptr.is_null() {
-                    match directory.compare_and_set(
-                        Shared::null(),
-                        Owned::new(TreeIndex::new()),
-                        Relaxed,
-                        &guard,
-                    ) {
-                        Ok(result) => directory_shared_ptr = result,
-                        Err(result) => directory_shared_ptr = result.current,
+        match (&self.container, container_handle.get(&guard)) {
+            (ContainerType::Directory(directory), Some(container)) => {
+                if let ContainerType::Data(_) = &container.container {
+                    let mut directory_shared_ptr = directory.load(Relaxed, &guard);
+                    if directory_shared_ptr.is_null() {
+                        match directory.compare_and_set(
+                            Shared::null(),
+                            Owned::new(TreeIndex::new()),
+                            Relaxed,
+                            &guard,
+                        ) {
+                            Ok(result) => directory_shared_ptr = result,
+                            Err(result) => directory_shared_ptr = result.current,
+                        }
+                    }
+                    let new_container_version = ContainerVersion::new(container_handle);
+                    if unsafe {
+                        directory_shared_ptr
+                            .deref()
+                            .insert(String::from(name), new_container_version.clone())
+                            .is_ok()
+                    } {
+                        if journal.lock(&new_container_version).is_ok() {
+                            return true;
+                        }
                     }
                 }
-                unsafe {
-                    directory_shared_ptr
-                        .deref()
-                        .insert(String::from(name), container_handle)
-                        .is_ok()
-                }
+                false
             }
             (_, _) => false,
         }
     }
 
     /// Unlinks a container associated with the given name.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
-    ///
-    /// let container_handle_root: Handle = Container::new_directory();
-    /// let container_handle_apple: Handle = Container::new_default_container();
-    /// let apple = "apple";
-    ///
-    /// let guard = crossbeam_epoch::pin();
-    /// let root_ref = container_handle_root.get(&guard);
-    /// let result = root_ref.link(&apple, container_handle_apple);
-    /// assert!(result);
-    ///
-    /// let apple_ref = root_ref.search(&apple, &guard);
-    /// assert!(apple_ref.is_some());
-    ///
-    /// let result = root_ref.unlink(&apple);
-    /// assert!(result);
-    ///
-    /// let apple_ref = root_ref.search(&apple, &guard);
-    /// assert!(apple_ref.is_none());
-    /// ```
-    pub fn unlink(&self, name: &str) -> bool {
+    pub fn unlink(&self, name: &str, _journal: &mut Journal<S>) -> bool {
         if let ContainerType::Directory(directory) = &self.container {
             let guard = crossbeam_epoch::pin();
             let directory_shared_ptr = directory.load(Relaxed, &guard);
@@ -405,36 +365,37 @@ impl<S: Sequencer> Container<S> {
     }
 }
 
-impl<S: Sequencer> Version<S> for Container<S> {
-    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
-        self.version_cell.load(Acquire, guard)
-    }
-    fn unversion(&self, guard: &Guard) -> bool {
-        !self
-            .version_cell
-            .swap(Shared::null(), Relaxed, guard)
-            .is_null()
-    }
-}
-
 /// A ref-counted handle for Container.
 pub struct ContainerHandle<S: Sequencer> {
-    pointer: Atomic<Container<S>>,
+    container_ptr: Atomic<Container<S>>,
 }
 
 impl<S: Sequencer> ContainerHandle<S> {
+    /// Creates a null handle.
+    fn _null() -> ContainerHandle<S> {
+        ContainerHandle {
+            container_ptr: Atomic::null(),
+        }
+    }
+
     /// Gets a reference to the container.
-    pub fn get<'g>(&self, guard: &'g Guard) -> &'g Container<S> {
-        unsafe { self.pointer.load(Relaxed, guard).deref() }
+    pub fn get<'g>(&self, guard: &'g Guard) -> Option<&'g Container<S>> {
+        let container_shared = self.container_ptr.load(Relaxed, guard);
+        if container_shared.is_null() {
+            None
+        } else {
+            Some(unsafe { container_shared.deref() })
+        }
     }
 }
 
 impl<S: Sequencer> Clone for ContainerHandle<S> {
     fn clone(&self) -> Self {
-        let guard = crossbeam_epoch::pin();
-        self.get(&guard).references.fetch_add(1, Relaxed);
+        // The Container instance is protected by a positive reference count.
+        self.get(unsafe { crossbeam_epoch::unprotected() })
+            .map(|container| container.references.fetch_add(1, Relaxed));
         ContainerHandle {
-            pointer: self.pointer.clone(),
+            container_ptr: self.container_ptr.clone(),
         }
     }
 }
@@ -442,11 +403,13 @@ impl<S: Sequencer> Clone for ContainerHandle<S> {
 impl<S: Sequencer> Drop for ContainerHandle<S> {
     fn drop(&mut self) {
         let guard = crossbeam_epoch::pin();
-        let shared_ptr = self.pointer.load(Relaxed, &guard);
-        unsafe {
-            if shared_ptr.deref().references.fetch_sub(1, Relaxed) == 1 {
-                guard.defer_destroy(shared_ptr);
+        let container_shared = self.container_ptr.load(Relaxed, &guard);
+        if !container_shared.is_null() {
+            unsafe {
+                if container_shared.deref().references.fetch_sub(1, Relaxed) == 1 {
+                    guard.defer_destroy(container_shared);
+                }
             }
-        };
+        }
     }
 }
