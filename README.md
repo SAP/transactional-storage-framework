@@ -36,7 +36,7 @@ let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 tss::Container is a transactional data container that is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string.
 
 ```rust
-use tss::{DefaultSequencer, Storage, Transaction};
+use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let transaction = storage.transaction();
@@ -50,9 +50,18 @@ assert!(result.is_ok());
 tss::Sequencer is a logical clock generator that gives an identifier to each storage database change committed by a transaction. The framework allows one to implement the Lamport vector clock as the Sequence trait only assumes PartialOrd for the clock value. It offers a default sequencer that is based on a single atomic counter. It is the most important type in a transactional storage system as it defines the flow of time.
 
 ```rust
-pub struct DefaultSequencer {
-    clock: AtomicUsize,
-    min_heap: std::sync::Mutex<std::collections::BTreeMap<usize, usize>>,
+pub trait Sequencer {
+    type Clock: Clone + Copy + PartialOrd + Send + Sync;
+    type Tracker: DeriveClock<Self::Clock>;
+    fn new() -> Self;
+    fn invalid() -> Self::Clock;
+    fn min(&self) -> Self::Clock;
+    fn get(&self) -> Self::Clock;
+    fn issue(&self) -> Option<Self::Tracker>;
+    fn confiscate(&self, tracker: Self::Tracker);
+    fn fold<F: Fn(&Self::Clock)>(&self, f: F);
+    fn set(&self, new_sequence: Self::Clock) -> Result<Self::Clock, Self::Clock>;
+    fn advance(&self) -> Self::Clock;
 }
 ```
 
@@ -80,7 +89,7 @@ assert!(result.is_some());
 tss::Transaction represents a set of changes made to a tss::Storage that can be atomically committed. Developers and researchers are able to add / modify / remove transactional semantics easily as the storage actions are implemented in a highly flexible way. The logging format is not explicitly specified, and therefore developers can freely define the log structure, or even omit logging. The changes made in a transaction can be partially reverted by using the rewinding mechanism. Every change made in a transaction must be submitted, and the submitted change can be discarded without fully rolling back the transaction.
 
 ```rust
-use tss::{DefaultSequencer, Storage, Transaction};
+use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let mut transaction = storage.transaction();
@@ -117,7 +126,7 @@ pub trait Logger<S: Sequencer> {
 tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to modify the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
 
 ```rust
-use tss::{DefaultSequencer, DefaultVersionedObject, Storage, Transaction, Version};
+use tss::{DefaultSequencer, DefaultVersionedObject, Storage};
 
 let versioned_object = DefaultVersionedObject::new();
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));

@@ -47,7 +47,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Snapshot, Storage, Transaction};
+    /// use tss::{DefaultSequencer, Snapshot, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
@@ -63,7 +63,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Snapshot, Storage, Transaction};
+    /// use tss::{DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
@@ -77,7 +77,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
@@ -156,7 +156,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
@@ -192,7 +192,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, DefaultSequencer, Storage, Transaction};
+    /// use tss::{Container, DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
@@ -237,7 +237,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, DefaultSequencer, Storage, Transaction};
+    /// use tss::{Container, DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
@@ -295,7 +295,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
