@@ -217,7 +217,7 @@ impl<S: Sequencer> VersionLocker<S> {
                             //  - Tries to overtake ownership.
                             //  - CAS returning false means that another transaction overtook ownership.
                             //  - The thread is pinned, so there is no possibility of ABA.
-                            version_cell_ref
+                            return version_cell_ref
                                 .owner_ptr
                                 .compare_and_set(
                                     current_owner_shared,
@@ -225,11 +225,9 @@ impl<S: Sequencer> VersionLocker<S> {
                                     Relaxed,
                                     &guard,
                                 )
-                                .is_ok()
-                        } else {
-                            // The transaction has been committed, and the time point is bound to be set.
-                            false
+                                .is_ok();
                         }
+                        false
                     },
                     guard,
                 )
@@ -290,11 +288,16 @@ pub struct DefaultVersionedObject {
     version_cell: Atomic<VersionCell<DefaultSequencer>>,
 }
 
-impl DefaultVersionedObject {
-    pub fn new() -> DefaultVersionedObject {
+impl Default for DefaultVersionedObject {
+    fn default() -> Self {
         DefaultVersionedObject {
             version_cell: Atomic::new(VersionCell::new()),
         }
+    }
+}
+impl DefaultVersionedObject {
+    pub fn new() -> DefaultVersionedObject {
+        Default::default()
     }
 }
 
@@ -302,7 +305,7 @@ impl Version<DefaultSequencer> for DefaultVersionedObject {
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<DefaultSequencer>> {
         self.version_cell.load(Relaxed, guard)
     }
-    fn unversion<'g>(&self, guard: &'g Guard) -> bool {
+    fn unversion(&self, guard: &Guard) -> bool {
         !self
             .version_cell
             .swap(Shared::null(), Relaxed, guard)

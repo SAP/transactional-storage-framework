@@ -68,7 +68,7 @@ impl<S: Sequencer> Storage<S> {
     /// let transaction = storage.transaction();
     /// let snapshot = storage.snapshot();
     /// ```
-    pub fn snapshot<'s>(&'s self) -> Snapshot<S> {
+    pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::new(&self.sequencer, None, None)
     }
 
@@ -81,14 +81,16 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// ```
     pub fn create_directory(
         &self,
         path: &str,
+        snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
@@ -96,7 +98,9 @@ impl<S: Sequencer> Storage<S> {
         let mut current_container_ref = self.root_container.get(&guard);
         for name in split {
             if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(directory_handle) = container_ref.create_directory(name, journal) {
+                if let Some(directory_handle) =
+                    container_ref.create_directory(name, snapshot, journal)
+                {
                     current_container_ref = directory_handle.get(&guard);
                 } else {
                     return Err(Error::Fail);
@@ -125,10 +129,12 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
+    /// drop(snapshot);
     ///
     /// transaction.commit();
     ///
@@ -166,8 +172,9 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let transaction = storage.transaction();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// journal.submit();
     ///
     /// let snapshot = transaction.snapshot();
@@ -205,15 +212,17 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
+    /// drop(snapshot);
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &mut journal, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
     /// drop(snapshot);
     ///
@@ -229,14 +238,14 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         container: ContainerHandle<S>,
         name: &str,
-        journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
+        journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
             let guard = crossbeam_epoch::pin();
             let container_directory_ref = container_handle.get(&guard);
             if let Some(container_ref) = container_directory_ref {
-                if container_ref.link(name, container.clone(), journal) {
+                if container_ref.link(name, container.clone(), snapshot, journal) {
                     return Ok(container);
                 }
             }
@@ -253,15 +262,17 @@ impl<S: Sequencer> Storage<S> {
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
     /// let mut transaction = storage.transaction();
     ///
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
+    /// drop(snapshot);
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
     /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &mut journal, &snapshot);
+    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
     /// drop(snapshot);
     ///
@@ -290,8 +301,8 @@ impl<S: Sequencer> Storage<S> {
                 if let Some((name, _)) = Self::name(&path) {
                     let guard = crossbeam_epoch::pin();
                     if let Some(container_ref) = target_directory_container_handle.get(&guard) {
-                        if container_ref.link(name, container_handle.clone(), journal) {
-                            let _result = self.remove(path, journal, snapshot);
+                        if container_ref.link(name, container_handle.clone(), snapshot, journal) {
+                            let _result = self.remove(path, snapshot, journal);
                             return Ok(container_handle);
                         }
                     }
@@ -308,17 +319,20 @@ impl<S: Sequencer> Storage<S> {
     /// use tss::{DefaultSequencer, Storage};
     ///
     /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    ///
     /// let mut transaction = storage.transaction();
+    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &mut journal);
+    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
+    /// drop(snapshot);
     /// transaction.commit();
     ///
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.remove("/thomas/eats/apples", &mut journal, &snapshot);
+    /// let result = storage.remove("/thomas/eats/apples", &snapshot, &mut journal);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -331,8 +345,8 @@ impl<S: Sequencer> Storage<S> {
     pub fn remove(
         &self,
         path: &str,
-        journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
+        journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
         let guard = crossbeam_epoch::pin();
@@ -362,7 +376,7 @@ impl<S: Sequencer> Storage<S> {
             parent_container_ref.take(),
         ) {
             if let Some(container_handle) = current_container_ref.create_handle() {
-                if parent_container_ref.unlink(current_container_name, journal) {
+                if parent_container_ref.unlink(current_container_name, snapshot, journal) {
                     return Ok(container_handle);
                 }
             }

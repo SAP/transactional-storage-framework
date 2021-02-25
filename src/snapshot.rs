@@ -56,7 +56,7 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         self.transaction.as_ref().map_or_else(
             || false,
             |(transaction, transaction_clock)| {
-                let journal_ref = self.journal.as_ref().map(|journal| *journal);
+                let journal_ref = self.journal.as_ref().copied();
                 journal_anchor.predate(transaction, *transaction_clock, journal_ref, guard)
             },
         )

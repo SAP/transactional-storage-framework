@@ -417,7 +417,7 @@ impl<S: Sequencer> JournalAnchor<S> {
         JournalAnchor {
             anchor_ptr,
             wait_queue: (Mutex::new((false, 0)), Condvar::new()),
-            creation_clock: creation_clock,
+            creation_clock,
             submit_clock: usize::MAX,
             _pin: std::marker::PhantomPinned,
         }

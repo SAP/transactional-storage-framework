@@ -70,10 +70,15 @@ tss::Snapshot represents a snapshot of a tss::Storage instance at a certain poin
 use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-let mut transaction = storage.transaction();
+let transaction = storage.transaction();
 
-let result = storage.create_directory("/thomas/eats/apples", &transaction);
+let snapshot = transaction.snapshot();
+let mut journal = transaction.start();
+let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
 assert!(result.is_ok());
+journal.submit();
+drop(snapshot);
+
 transaction.commit();
 
 let snapshot = storage.snapshot();
@@ -90,17 +95,19 @@ use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let mut transaction = storage.transaction();
-let result = transaction.rewind(1);
-assert!(result.is_err());
 
-let journal = transaction.start();
-let clock = journal.submit();
-assert_eq!(clock, 1);
-
-let result = transaction.rewind(0);
+let snapshot = transaction.snapshot();
+let mut journal = transaction.start();
+let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
 assert!(result.is_ok());
+journal.submit();
+drop(snapshot);
 
 transaction.commit();
+
+let snapshot = storage.snapshot();
+let result = storage.get("/thomas/eats/apples", &snapshot);
+assert!(result.is_some());
 ```
 
 ## tss::Logger <a name="logger">
