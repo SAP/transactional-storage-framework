@@ -172,9 +172,10 @@ impl<S: Sequencer> VersionLocker<S> {
 
         let locked_state = Shared::from(version_cell_ref.locked_state());
         let mut current_owner_shared = Shared::null();
-        while let Err(result) = version_cell_ref.owner_ptr.compare_and_set(
+        while let Err(result) = version_cell_ref.owner_ptr.compare_exchange(
             Shared::null(),
             locked_state,
+            Acquire,
             Relaxed,
             &guard,
         ) {
@@ -200,7 +201,7 @@ impl<S: Sequencer> VersionLocker<S> {
                 // Takes ownership.
                 if version_cell_ref
                     .owner_ptr
-                    .compare_and_set(current_owner_shared, locked_state, Relaxed, &guard)
+                    .compare_exchange(current_owner_shared, locked_state, Acquire, Relaxed, &guard)
                     .is_ok()
                 {
                     // Succesfully took ownership.
@@ -219,9 +220,10 @@ impl<S: Sequencer> VersionLocker<S> {
                             //  - The thread is pinned, so there is no possibility of ABA.
                             return version_cell_ref
                                 .owner_ptr
-                                .compare_and_set(
+                                .compare_exchange(
                                     current_owner_shared,
                                     locked_state,
+                                    Acquire,
                                     Relaxed,
                                     &guard,
                                 )
@@ -274,10 +276,11 @@ impl<S: Sequencer> VersionLocker<S> {
         if snapshot != S::invalid() {
             version_cell_ref.time_point.store(snapshot);
         }
-        let result = version_cell_ref.owner_ptr.compare_and_set(
+        let result = version_cell_ref.owner_ptr.compare_exchange(
             journal_anchor_shared,
             self.prev_owner_ptr.load(Relaxed, &guard),
             Release,
+            Relaxed,
             &guard,
         );
         debug_assert!(snapshot == S::invalid() || result.is_ok());

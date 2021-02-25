@@ -6,7 +6,7 @@ use super::{Error, Journal, Sequencer, Snapshot, Transaction, Version, VersionCe
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// A transactional data container.
 ///
@@ -93,9 +93,10 @@ impl<S: Sequencer> Container<S> {
         if let ContainerType::Directory(directory) = &self.container {
             let mut directory_shared_ptr = directory.load(Relaxed, &guard);
             if directory_shared_ptr.is_null() {
-                match directory.compare_and_set(
+                match directory.compare_exchange(
                     Shared::null(),
                     Owned::new(TreeIndex::new()),
+                    Relaxed,
                     Relaxed,
                     &guard,
                 ) {
@@ -195,9 +196,10 @@ impl<S: Sequencer> Container<S> {
                 if let ContainerType::Data(_) = &container.container {
                     let mut directory_shared_ptr = directory.load(Relaxed, &guard);
                     if directory_shared_ptr.is_null() {
-                        match directory.compare_and_set(
+                        match directory.compare_exchange(
                             Shared::null(),
                             Owned::new(TreeIndex::new()),
+                            Relaxed,
                             Relaxed,
                             &guard,
                         ) {
@@ -471,9 +473,10 @@ impl<S: Sequencer> ContainerAnchor<S> {
                 return false;
             }
             version_ref.link.store(current_version_shared, Relaxed);
-            match self.version_link.compare_and_set(
+            match self.version_link.compare_exchange(
                 current_version_shared,
                 version_shared,
+                Release,
                 Relaxed,
                 guard,
             ) {
