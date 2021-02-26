@@ -10,7 +10,7 @@ mod examples {
 
     #[test]
     fn single_threaded() {
-        let storage: Storage<DefaultSequencer> = Storage::new(String::from("farm"));
+        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
         let storage_snapshot = storage.snapshot();
 
         let transaction = storage.transaction();
@@ -57,17 +57,36 @@ mod examples {
 
     #[test]
     fn multi_threaded() {
-        let storage: Arc<Storage<DefaultSequencer>> = Arc::new(Storage::new(String::from("farm")));
+        let storage: Arc<Storage<DefaultSequencer>> = Arc::new(Storage::new(String::from("db")));
         let num_threads = 8;
         let mut thread_handles = Vec::with_capacity(num_threads);
-        let barrier = Arc::new(Barrier::new(num_threads));
+        let barrier = Arc::new(Barrier::new(num_threads + 1));
         for _ in 0..num_threads {
-            let barrier_copied = barrier.clone();
-            let _storage_copied = storage.clone();
+            let barrier_cloned = barrier.clone();
+            let storage_cloned = storage.clone();
             thread_handles.push(thread::spawn(move || {
-                barrier_copied.wait();
+                barrier_cloned.wait();
+                let transaction = storage_cloned.transaction();
+                let transaction_snapshot = transaction.snapshot();
+                let mut journal = transaction.start();
+                assert!(storage_cloned
+                    .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+                    .is_err());
+                journal.submit();
+                barrier_cloned.wait();
             }));
         }
+
+        let transaction = storage.transaction();
+        let transaction_snapshot = transaction.snapshot();
+        let mut journal = transaction.start();
+        assert!(storage
+            .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+            .is_ok());
+        journal.submit();
+        barrier.wait();
+        barrier.wait();
+
         for handle in thread_handles {
             handle.join().unwrap();
         }
