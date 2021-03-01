@@ -34,16 +34,36 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         journal: Option<&'r Journal<'s, 't, S>>,
     ) -> Snapshot<'s, 't, 'r, S> {
         let tracker = sequencer.issue();
-        let snapshot = tracker
-            .as_ref()
-            .map_or_else(S::invalid, |tracker| tracker.derive());
+        let snapshot = tracker.derive();
         Snapshot {
             sequencer,
-            tracker,
+            tracker: Some(tracker),
             transaction: transaction.map(|transaction| (transaction, transaction.clock())),
             journal,
             snapshot,
         }
+    }
+
+    /// Creates a new Snapshot from the given Snapshot.
+    ///
+    /// The clock value that the new Snapshot instance owns is tracked by the given Sequencer.
+    pub fn from(
+        sequencer: &'s S,
+        snapshot: &'s Snapshot<S>,
+        transaction: Option<&'t Transaction<'s, S>>,
+        journal: Option<&'r Journal<'s, 't, S>>,
+    ) -> Option<Snapshot<'s, 't, 'r, S>> {
+        let tracker = sequencer.forge(snapshot.tracker.as_ref().unwrap());
+        if let Some(tracker) = tracker {
+            return Some(Snapshot {
+                sequencer,
+                tracker: Some(tracker),
+                transaction: transaction.map(|transaction| (transaction, transaction.clock())),
+                journal,
+                snapshot: *snapshot.clock(),
+            });
+        }
+        None
     }
 
     /// Returns the clock value of the Snapshot.
@@ -66,8 +86,6 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
 impl<'s, 't, 'r, S: Sequencer> Drop for Snapshot<'s, 't, 'r, S> {
     /// It has a clock value that is tracked by the sequencer, therefore it must be confiscated.
     fn drop(&mut self) {
-        if let Some(tracker) = self.tracker.take() {
-            self.sequencer.confiscate(tracker);
-        }
+        self.sequencer.confiscate(self.tracker.take().unwrap());
     }
 }

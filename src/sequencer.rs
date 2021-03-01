@@ -5,13 +5,6 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 
-/// The DeriveClock trait defines the capability of deriving a clock value out of
-/// an instance of a type implementing the trait.
-pub trait DeriveClock<C> {
-    /// Returns the derived clock value.
-    fn derive(&self) -> C;
-}
-
 /// Sequencer acts as a logical clock for the storage system.
 ///
 /// The logical clock is the most important feature of a transactional storage system as it defines
@@ -51,7 +44,10 @@ pub trait Sequencer {
     fn get(&self) -> Self::Clock;
 
     /// Issues a logical clock value that is tracked by the sequencer.
-    fn issue(&self) -> Option<Self::Tracker>;
+    fn issue(&self) -> Self::Tracker;
+
+    /// Forges the given tracker.
+    fn forge(&self, tracker: &Self::Tracker) -> Option<Self::Tracker>;
 
     /// Confiscates the tracker.
     fn confiscate(&self, tracker: Self::Tracker);
@@ -69,6 +65,13 @@ pub trait Sequencer {
     ///
     /// It returns the advanced value.
     fn advance(&self) -> Self::Clock;
+}
+
+/// The DeriveClock trait defines the capability of deriving a clock value out of
+/// an instance of a type implementing the trait.
+pub trait DeriveClock<C> {
+    /// Returns the derived clock value.
+    fn derive(&self) -> C;
 }
 
 pub struct DefaultTracker {
@@ -114,17 +117,26 @@ impl Sequencer for DefaultSequencer {
     fn get(&self) -> Self::Clock {
         self.clock.load(Relaxed)
     }
-    fn issue(&self) -> Option<Self::Tracker> {
+    fn issue(&self) -> Self::Tracker {
+        let mut min_heap = self.min_heap.lock().unwrap();
+        let current_clock = self.get();
+        if let Some(counter) = min_heap.get_mut(&current_clock) {
+            *counter += 1;
+        } else {
+            min_heap.insert(current_clock, 1);
+        }
+        Self::Tracker {
+            clock: current_clock,
+        }
+    }
+    fn forge(&self, tracker: &Self::Tracker) -> Option<Self::Tracker> {
         if let Ok(mut min_heap) = self.min_heap.lock() {
-            let current_clock = self.get();
-            if let Some(counter) = min_heap.get_mut(&current_clock) {
+            if let Some(counter) = min_heap.get_mut(&tracker.derive()) {
                 *counter += 1;
-            } else {
-                min_heap.insert(current_clock, 1);
+                return Some(Self::Tracker {
+                    clock: tracker.clock,
+                });
             }
-            return Some(Self::Tracker {
-                clock: current_clock,
-            });
         }
         None
     }
