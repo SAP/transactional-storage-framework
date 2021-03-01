@@ -55,7 +55,7 @@ pub trait Sequencer {
     fn min(&self) -> Self::Clock;
     fn get(&self) -> Self::Clock;
     fn issue(&self) -> Self::Tracker;
-	fn forge(&self, tracker: &Self::Tracker) -> Option<Self::Tracker>;
+    fn forge(&self, tracker: &Self::Tracker) -> Option<Self::Tracker>;
     fn confiscate(&self, tracker: Self::Tracker);
     fn fold<F: Fn(&Self::Clock)>(&self, f: F);
     fn set(&self, new_sequence: Self::Clock) -> Result<Self::Clock, Self::Clock>;
