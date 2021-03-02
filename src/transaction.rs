@@ -363,6 +363,8 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// Locks a versioned object.
     ///
     /// The acquired lock is never released until the Journal is dropped.
+    /// If the locked version is released without a valid clock value tagged,
+    /// the version is considered invalid and will be garbage-collected later.
     ///
     /// # Examples
     /// ```
@@ -398,6 +400,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         } else {
             Err(Error::Fail)
         }
+    }
+
+    /// Pushes a log record into the Journal.
+    pub fn log(&mut self, log: Log) {
+        self.record.logs.push(log);
     }
 }
 
@@ -596,11 +603,6 @@ impl<S: Sequencer> RecordData<S> {
         }
         for lock in self.locks.into_iter() {
             lock.release(anchor_shared, snapshot, guard);
-        }
-        if snapshot == S::invalid() {
-            for log in self.logs.into_iter() {
-                log.undo();
-            }
         }
         unsafe {
             // It is safe to destroy the anchor as all the locks are released.

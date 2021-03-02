@@ -281,6 +281,11 @@ impl<S: Sequencer> Container<S> {
         }
         false
     }
+
+    /// Unloads the container from memory.
+    pub fn unload(&self) -> Result<(), Error> {
+        Err(Error::Fail)
+    }
 }
 
 /// A ref-counted handle for Container.

@@ -79,11 +79,6 @@ impl Log {
         }
         Err(Error::Fail)
     }
-
-    /// Invokes the undo hook.
-    pub fn undo(self) {
-        //
-    }
 }
 
 /// The Logger trait defines logging interfaces.
@@ -110,4 +105,9 @@ pub trait Logger<S: Sequencer> {
     ///
     /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
     fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
+
+    /// Loads a specific container.
+    ///
+    /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
+    fn load(&self, path: &str) -> Option<ContainerHandle<S>>;
 }
