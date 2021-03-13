@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DefaultSequencer, JournalAnchor, Sequencer, Snapshot};
+use super::{DefaultSequencer, Error, JournalAnchor, Sequencer, Snapshot};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -70,13 +70,16 @@ impl<S: Sequencer> VersionCell<S> {
 
     /// Assigns the transaction as the owner.
     ///
+    /// It returns a Ok(Some) if the given Journal becomes the owner,
+    /// or it returns Ok(None) if the given Journal has been the owner.
+    ///
     /// The transaction semantics adheres to the two-phase locking protocol.
     /// If the transaction is committed, a new time point is set.
     pub fn lock(
         &self,
         journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
-    ) -> Option<VersionLocker<S>> {
+    ) -> Result<Option<VersionLocker<S>>, Error> {
         VersionLocker::lock(self, journal_anchor_shared, guard)
     }
 
@@ -150,11 +153,13 @@ impl<S: Sequencer> Drop for VersionCell<S> {
 /// VersionLocker owns a VersionCell instance.
 ///
 /// It asserts that VersionCell outlives VersionLocker.
-/// It is not an RAII-style type, and it requires the owner to explicitly call the unlock function.
 pub struct VersionLocker<S: Sequencer> {
     /// The VersionCell is guaranteed to outlive by VersionCell::drop.
     version_cell_ptr: Atomic<VersionCell<S>>,
     /// The previous owner ptr.
+    ///
+    /// There are cases where ownership is transferred from a Journal to another
+    /// when they belong to the same transaction, and the owner predates the one acquiring the lock.
     prev_owner_ptr: Atomic<JournalAnchor<S>>,
 }
 
@@ -164,10 +169,10 @@ impl<S: Sequencer> VersionLocker<S> {
         version_cell_ref: &VersionCell<S>,
         journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
-    ) -> Option<VersionLocker<S>> {
+    ) -> Result<Option<VersionLocker<S>>, Error> {
         if version_cell_ref.time_point.load() != S::invalid() {
             // The VersionCell has been updated by another transaction.
-            return None;
+            return Err(Error::Fail);
         }
 
         let locked_state = Shared::from(version_cell_ref.locked_state());
@@ -185,8 +190,8 @@ impl<S: Sequencer> VersionLocker<S> {
                 continue;
             }
             if current_owner_shared == journal_anchor_shared {
-                // The TransactionRecord has acquired the lock.
-                return None;
+                // The Journal has acquired the lock.
+                return Ok(None);
             }
             let (same_trans, lockable) = unsafe {
                 current_owner_shared
@@ -195,8 +200,10 @@ impl<S: Sequencer> VersionLocker<S> {
             };
             if same_trans {
                 if !lockable {
+                    // The versioned object is locked by the same transaction in an active Journal.
+                    //
                     // In order to prevent deadlock, immediately returns None.
-                    return None;
+                    return Err(Error::Fail);
                 }
                 // Takes ownership.
                 if version_cell_ref
@@ -242,7 +249,7 @@ impl<S: Sequencer> VersionLocker<S> {
 
             if version_cell_ref.time_point.load() != S::invalid() {
                 // The VersionCell has updated its time point.
-                return None;
+                return Err(Error::Fail);
             }
         }
 
@@ -252,17 +259,17 @@ impl<S: Sequencer> VersionLocker<S> {
                 .owner_ptr
                 .swap(Shared::null(), Relaxed, &guard);
             debug_assert_eq!(owner_shared, locked_state);
-            return None;
+            return Err(Error::Fail);
         }
         let owner_shared = version_cell_ref
             .owner_ptr
             .swap(journal_anchor_shared, Relaxed, &guard);
         debug_assert_eq!(owner_shared, locked_state);
 
-        Some(VersionLocker {
+        Ok(Some(VersionLocker {
             version_cell_ptr: Atomic::from(version_cell_ref as *const _),
             prev_owner_ptr: Atomic::from(current_owner_shared),
-        })
+        }))
     }
 
     /// Releases the VersionCell.
@@ -272,7 +279,8 @@ impl<S: Sequencer> VersionLocker<S> {
         snapshot: S::Clock,
         guard: &Guard,
     ) {
-        let version_cell_ref = unsafe { self.version_cell_ptr.load(Relaxed, &guard).deref() };
+        let version_cell_shared = self.version_cell_ptr.swap(Shared::null(), Relaxed, &guard);
+        let version_cell_ref = unsafe { version_cell_shared.deref() };
         if snapshot != S::invalid() {
             version_cell_ref.time_point.store(snapshot);
         }
@@ -284,6 +292,24 @@ impl<S: Sequencer> VersionLocker<S> {
             &guard,
         );
         debug_assert!(snapshot == S::invalid() || result.is_ok());
+    }
+}
+
+impl<S: Sequencer> Drop for VersionLocker<S> {
+    fn drop(&mut self) {
+        let guard = unsafe { crossbeam_epoch::unprotected() };
+        let version_cell_shared = self.version_cell_ptr.swap(Shared::null(), Relaxed, guard);
+        if !version_cell_shared.is_null() {
+            // The VersionLocker is being dropped without the Journal having been submitted.
+            //  - Stack-unwinding entails it; in this case, the wait queue becomes unfair.
+            let version_cell_ref = unsafe { version_cell_shared.deref() };
+            debug_assert!(version_cell_ref.time_point.load() == S::invalid());
+            version_cell_ref.owner_ptr.swap(
+                self.prev_owner_ptr.load(Relaxed, guard),
+                Relaxed,
+                &guard,
+            );
+        }
     }
 }
 

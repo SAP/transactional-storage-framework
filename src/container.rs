@@ -260,6 +260,7 @@ impl<S: Sequencer> Container<S> {
             let name = String::from(name);
             if let Some(result) = directory_ref.read(&name, |_, anchor_ptr| {
                 let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
+                // A ContainerVersion not pointing to a valid container is pushed.
                 let container_version_ptr =
                     Atomic::new(ContainerVersion::new(ContainerHandle::null()));
                 let container_version_shared =
