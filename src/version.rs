@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DefaultSequencer, Error, JournalAnchor, Sequencer, Snapshot};
+use super::{DefaultSequencer, JournalAnchor, Sequencer, Snapshot};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -11,8 +11,32 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 ///
 /// All the versioned objects in a Storage must implement the trait.
 pub trait Version<S: Sequencer> {
+    /// The type of the versioned data.
+    type Data;
+
     /// Returns a reference to the VersionCell that the versioned object owns.
     fn version_cell<'g>(&'g self, guard: &'g Guard) -> Shared<'g, VersionCell<S>>;
+
+    /// Returns a reference to the data.
+    fn read(&self) -> &Self::Data;
+
+    /// Updates the data.
+    ///
+    /// The caller must prove itself as the owner of the versioned object by showing that it owns a VersionLocker.
+    fn update<R, F: FnOnce(&mut Self::Data) -> R>(
+        &self,
+        updater: F,
+        locker: &VersionLocker<S>,
+        guard: &Guard,
+    ) -> Option<R> {
+        if self.version_cell(guard) == locker.version_cell_ptr.load(Relaxed, guard) {
+            // The caller has proved that it is the owner.
+            let data_mut_ref = unsafe { &mut *(self.read() as *const _ as *mut Self::Data) };
+            Some(updater(data_mut_ref))
+        } else {
+            None
+        }
+    }
 
     /// Returns true if the version predates the snapshot.
     fn predate(&self, snapshot: &Snapshot<S>, guard: &Guard) -> bool {
@@ -70,16 +94,13 @@ impl<S: Sequencer> VersionCell<S> {
 
     /// Assigns the transaction as the owner.
     ///
-    /// It returns a Ok(Some) if the given Journal becomes the owner,
-    /// or it returns Ok(None) if the given Journal has been the owner.
-    ///
     /// The transaction semantics adheres to the two-phase locking protocol.
     /// If the transaction is committed, a new time point is set.
     pub fn lock(
         &self,
         journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
-    ) -> Result<Option<VersionLocker<S>>, Error> {
+    ) -> Option<VersionLocker<S>> {
         VersionLocker::lock(self, journal_anchor_shared, guard)
     }
 
@@ -169,10 +190,10 @@ impl<S: Sequencer> VersionLocker<S> {
         version_cell_ref: &VersionCell<S>,
         journal_anchor_shared: Shared<JournalAnchor<S>>,
         guard: &Guard,
-    ) -> Result<Option<VersionLocker<S>>, Error> {
+    ) -> Option<VersionLocker<S>> {
         if version_cell_ref.time_point.load() != S::invalid() {
             // The VersionCell has been updated by another transaction.
-            return Err(Error::Fail);
+            return None;
         }
 
         let locked_state = Shared::from(version_cell_ref.locked_state());
@@ -191,7 +212,10 @@ impl<S: Sequencer> VersionLocker<S> {
             }
             if current_owner_shared == journal_anchor_shared {
                 // The Journal has acquired the lock.
-                return Ok(None);
+                return Some(VersionLocker {
+                    version_cell_ptr: Atomic::from(version_cell_ref as *const _),
+                    prev_owner_ptr: Atomic::from(current_owner_shared),
+                });
             }
             let (same_trans, lockable) = unsafe {
                 current_owner_shared
@@ -203,7 +227,7 @@ impl<S: Sequencer> VersionLocker<S> {
                     // The versioned object is locked by the same transaction in an active Journal.
                     //
                     // In order to prevent deadlock, immediately returns None.
-                    return Err(Error::Fail);
+                    return None;
                 }
                 // Takes ownership.
                 if version_cell_ref
@@ -249,7 +273,7 @@ impl<S: Sequencer> VersionLocker<S> {
 
             if version_cell_ref.time_point.load() != S::invalid() {
                 // The VersionCell has updated its time point.
-                return Err(Error::Fail);
+                return None;
             }
         }
 
@@ -259,17 +283,17 @@ impl<S: Sequencer> VersionLocker<S> {
                 .owner_ptr
                 .swap(Shared::null(), Relaxed, &guard);
             debug_assert_eq!(owner_shared, locked_state);
-            return Err(Error::Fail);
+            return None;
         }
         let owner_shared = version_cell_ref
             .owner_ptr
             .swap(journal_anchor_shared, Relaxed, &guard);
         debug_assert_eq!(owner_shared, locked_state);
 
-        Ok(Some(VersionLocker {
+        Some(VersionLocker {
             version_cell_ptr: Atomic::from(version_cell_ref as *const _),
             prev_owner_ptr: Atomic::from(current_owner_shared),
-        }))
+        })
     }
 
     /// Releases the VersionCell.
@@ -280,13 +304,18 @@ impl<S: Sequencer> VersionLocker<S> {
         guard: &Guard,
     ) {
         let version_cell_shared = self.version_cell_ptr.swap(Shared::null(), Relaxed, &guard);
+        let prev_owner_shared = self.prev_owner_ptr.load(Relaxed, &guard);
+        if prev_owner_shared == journal_anchor_shared {
+            // The versioned object has been locked more than once by the same Journal.
+            return;
+        }
         let version_cell_ref = unsafe { version_cell_shared.deref() };
         if snapshot != S::invalid() {
             version_cell_ref.time_point.store(snapshot);
         }
         let result = version_cell_ref.owner_ptr.compare_exchange(
             journal_anchor_shared,
-            self.prev_owner_ptr.load(Relaxed, &guard),
+            prev_owner_shared,
             Release,
             Relaxed,
             &guard,
@@ -331,8 +360,12 @@ impl DefaultVersionedObject {
 }
 
 impl Version<DefaultSequencer> for DefaultVersionedObject {
+    type Data = DefaultVersionedObject;
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<DefaultSequencer>> {
         self.version_cell.load(Relaxed, guard)
+    }
+    fn read(&self) -> &DefaultVersionedObject {
+        self
     }
     fn unversion(&self, guard: &Guard) -> bool {
         !self

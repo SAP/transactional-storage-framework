@@ -392,12 +392,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
             return Err(Error::Fail);
         }
         let version_cell_ref = unsafe { version_cell_shared.deref() };
-        if let Ok(locker) =
+        if let Some(locker) =
             version_cell_ref.lock(self.record.anchor_ptr.load(Relaxed, &guard), &guard)
         {
-            if let Some(locker) = locker {
-                self.record.locks.push(locker);
-            }
+            self.record.locks.push(locker);
             Ok(())
         } else {
             Err(Error::Fail)

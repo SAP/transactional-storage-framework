@@ -555,8 +555,12 @@ impl<S: Sequencer> ContainerVersion<S> {
 }
 
 impl<S: Sequencer> Version<S> for ContainerVersion<S> {
+    type Data = ContainerVersion<S>;
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
+    }
+    fn read(&self) -> &ContainerVersion<S> {
+        self
     }
     fn unversion(&self, guard: &Guard) -> bool {
         !self
