@@ -20,7 +20,7 @@ mod examples {
             .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
             .is_ok());
 
-        // journal_snapshot includes changes having been made using the journal.
+        // journal_snapshot includes changes pending in the journal.
         let journal_snapshot = journal.snapshot();
         assert!(storage
             .get("/thomas/eats/apples", &journal_snapshot)

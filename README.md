@@ -95,20 +95,48 @@ tss::Transaction represents a set of changes made to a tss::Storage that can be 
 use tss::{DefaultSequencer, Storage};
 
 let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-let mut transaction = storage.transaction();
+let storage_snapshot = storage.snapshot();
 
-let snapshot = transaction.snapshot();
+let transaction = storage.transaction();
+let transaction_snapshot = transaction.snapshot();
 let mut journal = transaction.start();
-let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
-assert!(result.is_ok());
+assert!(storage
+    .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+    .is_ok());
+
+// journal_snapshot includes changes pending in the journal.
+let journal_snapshot = journal.snapshot();
+assert!(storage
+    .get("/thomas/eats/apples", &journal_snapshot)
+    .is_some());
+drop(journal_snapshot);
 journal.submit();
-drop(snapshot);
 
-transaction.commit();
+// storage_snapshot had been taken before the transaction started.
+assert!(storage
+    .get("/thomas/eats/apples", &storage_snapshot)
+    .is_none());
+// transaction_snapshot had been taken before the journal started.
+assert!(storage
+    .get("/thomas/eats/apples", &transaction_snapshot)
+    .is_none());
 
-let snapshot = storage.snapshot();
-let result = storage.get("/thomas/eats/apples", &snapshot);
-assert!(result.is_some());
+let storage_snapshot = storage.snapshot();
+
+drop(transaction_snapshot);
+assert!(transaction.commit().is_ok());
+
+// storage_snapshot had been taken before the transaction was committed.
+assert!(storage
+    .get("/thomas/eats/apples", &storage_snapshot)
+    .is_none());
+
+let storage_snapshot = storage.snapshot();
+
+// storage_snapshot was taken after the transaction had been committed.
+assert!(storage
+    .get("/thomas/eats/apples", &storage_snapshot)
+    .is_some());
 ```
 
 ## tss::Logger <a name="logger">
