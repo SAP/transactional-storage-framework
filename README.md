@@ -18,7 +18,7 @@ The transactional storage framework is a software framework that offers key oper
 
 This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are very useful when it comes to checking if a specific database mechanism scales well as the number of processors increases, because those adverse effects that the paper describes will be hardly detected on a large database instance running on the same hardware.
 
-Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system.
+Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides default types of tss::Container, tss::Logger, and tss::Sequencer, thereby making the framework itself a stand-alone transactional storage system.
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
@@ -42,6 +42,10 @@ let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 let container_handle: Handle = Container::new_default_container();
 ```
 
+### tss::DefaultContainer
+
+The framework provides a row-oriented container that resembles traditional database tables.
+
 ## tss::Sequencer <a name="sequencer">
 
 tss::Sequencer is a logical clock generator that gives an identifier to each storage database change committed by a transaction. The framework allows one to implement the Lamport vector clock as the Sequence trait only assumes PartialOrd for the clock value. It offers a default sequencer that is based on a single atomic counter. It is the most important type in a transactional storage system as it defines the flow of time.
@@ -62,6 +66,10 @@ pub trait Sequencer {
     fn advance(&self) -> Self::Clock;
 }
 ```
+
+### tss::DefaultSequencer
+
+The framework provides an atomic-counter sequencer and a concurrent mean-heap snapshot tracker.
 
 ## tss::Snapshot <a name="snapshot">
 
@@ -154,6 +162,10 @@ pub trait Logger<S: Sequencer> {
     fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
 }
 ```
+
+### tss::DefaultLogger
+
+The framework provides a logger that is capable of lock-free check-pointing and point-in-time recovery.
 
 ## tss::Version <a name="version">
 tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to modify the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
