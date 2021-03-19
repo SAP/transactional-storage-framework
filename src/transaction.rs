@@ -30,9 +30,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// ```
     pub fn new(storage: &'s Storage<S>, sequencer: &'s S) -> Transaction<'s, S> {
@@ -50,9 +50,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// In order to make the changes permanent, the Journal has to be submitted.
     ///
     /// # Examples
-    /// use tss::{DefaultSequencer, Journal, Storage, Transaction};
+    /// use tss::{AtomicCounter, Journal, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// journal.submit();
@@ -65,9 +65,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
     /// ```
@@ -81,9 +81,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Journal, Storage, Transaction};
+    /// use tss::{AtomicCounter, Journal, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// let clock = journal.submit();
@@ -102,9 +102,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Log, Storage, Transaction};
+    /// use tss::{AtomicCounter, Log, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     /// let result = transaction.rewind(1);
     /// assert!(result.is_err());
@@ -138,9 +138,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     /// transaction.commit();
     /// ```
@@ -163,9 +163,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     /// transaction.rollback();
     /// ```
@@ -236,9 +236,9 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
     ///     rubicon.rollback();
@@ -254,12 +254,12 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Sequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Sequencer, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
-    ///     assert!(rubicon.snapshot() != DefaultSequencer::invalid());
+    ///     assert!(rubicon.snapshot() != AtomicCounter::invalid());
     ///     rubicon.rollback();
     /// };
     /// ```
@@ -308,9 +308,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Log, Storage, Transaction};
+    /// use tss::{AtomicCounter, Log, Storage, Transaction};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// assert_eq!(journal.submit(), 1);
@@ -340,10 +340,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, DefaultVersionedObject, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, DefaultVersionedObject, Storage, Transaction, Version};
     ///
     /// let versioned_object = DefaultVersionedObject::new();
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -368,10 +368,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, DefaultVersionedObject, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, DefaultVersionedObject, Storage, Transaction, Version};
     ///
     /// let versioned_object = DefaultVersionedObject::new();
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -614,13 +614,13 @@ impl<S: Sequencer> RecordData<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{DefaultSequencer, DefaultVersionedObject};
+    use crate::{AtomicCounter, DefaultVersionedObject};
     use crossbeam_utils::thread;
     use std::sync::{Arc, Barrier};
 
     #[test]
     fn visibility() {
-        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+        let storage: Storage<AtomicCounter> = Storage::new(None);
         let versioned_object = DefaultVersionedObject::new();
         let transaction = storage.transaction();
         let barrier = Arc::new(Barrier::new(2));
@@ -656,7 +656,7 @@ mod test {
 
     #[test]
     fn wait_queue() {
-        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+        let storage: Storage<AtomicCounter> = Storage::new(None);
         let versioned_object = DefaultVersionedObject::new();
         let num_threads = 64;
         let barrier = Arc::new(Barrier::new(num_threads + 1));

@@ -84,21 +84,21 @@ impl DeriveClock<usize> for DefaultTracker {
     }
 }
 
-/// The default sequencer is an atomic counter with a mutex-protected BTreeMap.
+/// AtomicCounter implements the Sequencer trait by managing a single atomic counter.
 ///
 /// An atomic counter is very inefficient when the system is equipped with a large number of processors.
 /// Furthermore, the mutex-protected BTreeMap does not scale as the number of threads increases.
-pub struct DefaultSequencer {
+pub struct AtomicCounter {
     clock: AtomicUsize,
     min_heap: std::sync::Mutex<std::collections::BTreeMap<usize, usize>>,
 }
 
-impl Sequencer for DefaultSequencer {
+impl Sequencer for AtomicCounter {
     type Clock = usize;
     type Tracker = DefaultTracker;
 
-    fn new() -> DefaultSequencer {
-        DefaultSequencer {
+    fn new() -> AtomicCounter {
+        AtomicCounter {
             clock: AtomicUsize::new(0),
             min_heap: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }

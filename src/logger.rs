@@ -83,9 +83,6 @@ impl Log {
 
 /// The Logger trait defines logging interfaces.
 pub trait Logger<S: Sequencer> {
-    /// Creates a new logger instance.
-    fn new(anchor: &str) -> Self;
-
     /// Submits the given data to the log buffer.
     ///
     /// It returns the start and end log sequence number pair of the submitted data.
@@ -112,18 +109,24 @@ pub trait Logger<S: Sequencer> {
     fn load(&self, path: &str) -> Option<ContainerHandle<S>>;
 }
 
-pub struct DefaultLogger<S: Sequencer> {
+/// FileLogger is a file-based logger that pushes data into files sequentially.
+///
+/// Checkpoint operations entail log file truncation.
+pub struct FileLogger<S: Sequencer> {
     _path: String,
     _invalid_clock: S::Clock,
 }
 
-impl<S: Sequencer> Logger<S> for DefaultLogger<S> {
-    fn new(anchor: &str) -> DefaultLogger<S> {
-        DefaultLogger {
+impl<S: Sequencer> FileLogger<S> {
+    pub fn new(anchor: &str) -> FileLogger<S> {
+        FileLogger {
             _path: String::from(anchor),
             _invalid_clock: S::invalid(),
         }
     }
+}
+
+impl<S: Sequencer> Logger<S> for FileLogger<S> {
     fn submit(
         &self,
         _log_data: Vec<u8>,

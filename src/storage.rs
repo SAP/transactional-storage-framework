@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Container, ContainerHandle, Error, Journal, Sequencer, Snapshot, Transaction};
-use std::string::String;
+use super::{Container, ContainerHandle, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
 /// Storage is a transactional data storage.
 ///
@@ -16,10 +15,10 @@ use std::string::String;
 /// as the storage layer of a huge database management system, while its flexibility allows the
 /// developers and users to develop, or plug-in new features and transaction mechanisms easily.
 pub struct Storage<S: Sequencer> {
-    /// The name of the storage.
-    _name: String,
     /// The logical clock generator of the storage.
     sequencer: S,
+    /// The logger of the storage.
+    _logger: Option<Box<dyn Logger<S> + Send + Sync>>,
     /// The root container of the storage.
     root_container: ContainerHandle<S>,
 }
@@ -29,15 +28,16 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, FileLogger, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let logger = Box::new(FileLogger::new("/home/dba/db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(Some(logger));
     /// ```
-    pub fn new(name: String) -> Storage<S> {
+    pub fn new(logger: Option<Box<dyn Logger<S> + Send + Sync>>) -> Storage<S> {
         let root_container = Container::new_directory();
         Storage {
-            _name: name,
             sequencer: S::new(),
+            _logger: logger,
             root_container,
         }
     }
@@ -46,9 +46,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Snapshot, Storage};
+    /// use tss::{AtomicCounter, Snapshot, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// ```
     pub fn transaction(&self) -> Transaction<S> {
@@ -62,9 +62,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     /// let snapshot = storage.snapshot();
     /// ```
@@ -76,9 +76,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     ///
     /// let snapshot = transaction.snapshot();
@@ -124,9 +124,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let snapshot = transaction.snapshot();
@@ -167,9 +167,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     ///
     /// let snapshot = transaction.snapshot();
@@ -207,9 +207,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Container, Storage, Table};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let snapshot = transaction.snapshot();
@@ -221,7 +221,8 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
+    /// let new_container_data = Box::new(Table::new());
+    /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
     /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
     /// drop(snapshot);
@@ -257,9 +258,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Container, Storage, Table};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let snapshot = transaction.snapshot();
@@ -271,7 +272,8 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let new_data_container = Container::<DefaultSequencer>::new_default_container();
+    /// let new_container_data = Box::new(Table::new());
+    /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
     /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
     /// drop(snapshot);
@@ -316,9 +318,9 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{DefaultSequencer, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
-    /// let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
     ///
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();

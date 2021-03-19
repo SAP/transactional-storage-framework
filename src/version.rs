@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DefaultSequencer, JournalAnchor, Sequencer, Snapshot};
+use super::{AtomicCounter, JournalAnchor, Sequencer, Snapshot};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -343,7 +343,7 @@ impl<S: Sequencer> Drop for VersionLocker<S> {
 }
 
 pub struct DefaultVersionedObject {
-    version_cell: Atomic<VersionCell<DefaultSequencer>>,
+    version_cell: Atomic<VersionCell<AtomicCounter>>,
 }
 
 impl Default for DefaultVersionedObject {
@@ -359,9 +359,9 @@ impl DefaultVersionedObject {
     }
 }
 
-impl Version<DefaultSequencer> for DefaultVersionedObject {
+impl Version<AtomicCounter> for DefaultVersionedObject {
     type Data = DefaultVersionedObject;
-    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<DefaultSequencer>> {
+    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<AtomicCounter>> {
         self.version_cell.load(Relaxed, guard)
     }
     fn read(&self) -> &DefaultVersionedObject {

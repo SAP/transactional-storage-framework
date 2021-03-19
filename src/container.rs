@@ -28,8 +28,8 @@ impl<S: Sequencer> Container<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
+    /// use tss::{AtomicCounter, Container, ContainerHandle};
+    /// type Handle = ContainerHandle<AtomicCounter>;
     ///
     /// let container_handle: Handle = Container::new_directory();
     /// ```
@@ -42,19 +42,22 @@ impl<S: Sequencer> Container<S> {
         }
     }
 
-    /// Creates a new default data container.
+    /// Creates a new data container.
     ///
     /// # Examples
     /// ```
-    /// use tss::{Container, ContainerHandle, DefaultSequencer};
-    /// type Handle = ContainerHandle<DefaultSequencer>;
+    /// use tss::{AtomicCounter, Container, ContainerHandle, Table};
+    /// type Handle = ContainerHandle<AtomicCounter>;
     ///
-    /// let container_handle: Handle = Container::new_default_container();
+    /// let container_data = Box::new(Table::new());
+    /// let container_handle: Handle = Container::new_container(container_data);
     /// ```
-    pub fn new_default_container() -> ContainerHandle<S> {
+    pub fn new_container(
+        container_data: Box<dyn ContainerData<S> + Send + Sync>,
+    ) -> ContainerHandle<S> {
         ContainerHandle {
             container_ptr: Atomic::new(Container {
-                container: ContainerType::Data(Box::new(DefaultContainerData::new())),
+                container: ContainerType::Data(container_data),
                 references: AtomicUsize::new(1),
             }),
         }
@@ -383,18 +386,20 @@ pub trait ContainerData<S: Sequencer> {
     fn size(&self) -> (usize, usize);
 }
 
-/// DefaultContainerData is a two dimensional array of u8.
-pub struct DefaultContainerData {
-    _data: Vec<Vec<u8>>,
+/// Table is a two dimensional array of u8.
+pub struct Table<S: Sequencer> {
+    _version_vector: Option<Vec<S::Clock>>,
 }
 
-impl DefaultContainerData {
-    pub fn new() -> DefaultContainerData {
-        DefaultContainerData { _data: Vec::new() }
+impl<S: Sequencer> Table<S> {
+    pub fn new() -> Table<S> {
+        Table {
+            _version_vector: None,
+        }
     }
 }
 
-impl<S: Sequencer> ContainerData<S> for DefaultContainerData {
+impl<S: Sequencer> ContainerData<S> for Table<S> {
     fn get(
         &self,
         _record_index: usize,

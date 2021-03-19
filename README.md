@@ -18,7 +18,7 @@ The transactional storage framework is a software framework that offers key oper
 
 This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are very useful when it comes to checking if a specific database mechanism scales well as the number of processors increases, because those adverse effects that the paper describes will be hardly detected on a large database instance running on the same hardware.
 
-Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides default types of tss::Container, tss::Logger, and tss::Sequencer, thereby making the framework itself a stand-alone transactional storage system.
+Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides default types of tss::Container, tss::Logger, and tss::Sequencer, thereby making the framework itself a complete transactional storage system for a relational database system.
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
@@ -27,8 +27,8 @@ Therefore, the goal of the project is to provide a transactional storage system 
 tss::Storage is the main module of the whole framework that satisfies atomicity, consistency, isolation, and durability properties. It is analogous to a database in database management software. The underlying storage can either be a file or a large chunk of system memory depending on the actual implementation.
 
 ```rust
-use tss::{DefaultSequencer, Storage};
-let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+use tss::{AtomicCounter, Storage};
+let storage: Storage<AtomicCounter> = Storage::new(None);
 ```
 
 ## tss::Container <a name="container">
@@ -36,15 +36,17 @@ let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
 tss::Container is a transactional data container that is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string.
 
 ```rust
-use tss::{DefaultSequencer, Storage};
+use tss::{AtomicCounter, Storage, Table};
 
-let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
-let container_handle: Handle = Container::new_default_container();
+let storage: Storage<AtomicCounter> = Storage::new(None);
+
+let container_data = Box::new(Table::new());
+let container_handle: Handle = Container::new_container(container_data);
 ```
 
-### tss::DefaultContainer
+### tss::Table
 
-The framework provides a row-oriented container that resembles traditional database tables.
+The framework provides a row-oriented database table container that resembles traditional database tables.
 
 ## tss::Sequencer <a name="sequencer">
 
@@ -67,7 +69,7 @@ pub trait Sequencer {
 }
 ```
 
-### tss::DefaultSequencer
+### tss::AtomicCounter
 
 The framework provides an atomic-counter sequencer and a concurrent mean-heap snapshot tracker.
 
@@ -76,9 +78,9 @@ The framework provides an atomic-counter sequencer and a concurrent mean-heap sn
 tss::Snapshot represents a snapshot of a tss::Storage instance at a certain point of time represented by an identifier issued by tss:Sequencer.
 
 ```rust
-use tss::{DefaultSequencer, Storage};
+use tss::{AtomicCounter, Storage};
 
-let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+let storage: Storage<AtomicCounter> = Storage::new(None);
 let transaction = storage.transaction();
 
 let snapshot = transaction.snapshot();
@@ -100,9 +102,9 @@ assert!(result.is_some());
 tss::Transaction represents a set of changes made to a tss::Storage that can be atomically committed. Developers and researchers are able to add / modify / remove transactional semantics easily as the storage actions are implemented in a highly flexible way. The logging format is not explicitly specified, and therefore developers can freely define the log structure, or even omit logging. The changes made in a transaction can be partially reverted by using the rewinding mechanism. Every change made in a transaction must be submitted, and the submitted change can be discarded without fully rolling back the transaction.
 
 ```rust
-use tss::{DefaultSequencer, Storage};
+use tss::{AtomicCounter, Storage};
 
-let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+let storage: Storage<AtomicCounter> = Storage::new(None);
 let storage_snapshot = storage.snapshot();
 
 let transaction = storage.transaction();
@@ -163,18 +165,18 @@ pub trait Logger<S: Sequencer> {
 }
 ```
 
-### tss::DefaultLogger
+### tss::FileLogger
 
-The framework provides a logger that is capable of lock-free check-pointing and point-in-time recovery.
+The framework provides a file-based logger that is capable of lock-free check-pointing and point-in-time recovery.
 
 ## tss::Version <a name="version">
 tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to modify the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
 
 ```rust
-use tss::{DefaultSequencer, DefaultVersionedObject, Storage};
+use tss::{AtomicCounter, DefaultVersionedObject, Storage};
 
 let versioned_object = DefaultVersionedObject::new();
-let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+let storage: Storage<AtomicCounter> = Storage::new(None);
 let mut transaction = storage.transaction();
 
 let mut journal = transaction.start();

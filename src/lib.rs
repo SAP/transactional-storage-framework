@@ -24,10 +24,10 @@ mod storage;
 mod transaction;
 mod version;
 
-pub use container::{Container, ContainerHandle};
+pub use container::{Container, ContainerHandle, Table};
 pub use error::Error;
-pub use logger::{Log, Logger};
-pub use sequencer::{DefaultSequencer, DeriveClock, Sequencer};
+pub use logger::{FileLogger, Log, Logger};
+pub use sequencer::{AtomicCounter, DeriveClock, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
 pub use transaction::{Journal, JournalAnchor, Transaction};

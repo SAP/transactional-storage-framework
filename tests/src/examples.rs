@@ -6,11 +6,11 @@
 mod examples {
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use tss::{DefaultSequencer, Storage};
+    use tss::{AtomicCounter, Storage};
 
     #[test]
     fn single_threaded() {
-        let storage: Storage<DefaultSequencer> = Storage::new(String::from("db"));
+        let storage: Storage<AtomicCounter> = Storage::new(None);
         let storage_snapshot = storage.snapshot();
 
         let transaction = storage.transaction();
@@ -57,7 +57,7 @@ mod examples {
 
     #[test]
     fn multi_threaded() {
-        let storage: Arc<Storage<DefaultSequencer>> = Arc::new(Storage::new(String::from("db")));
+        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
         let num_threads = 8;
         let mut thread_handles = Vec::with_capacity(num_threads);
         let barrier = Arc::new(Barrier::new(num_threads + 1));
