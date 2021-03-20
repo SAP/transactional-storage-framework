@@ -15,6 +15,7 @@
 //! [`tss::Container`]: container::Container
 //! [`tss::Transaction`]: transaction::Transaction
 
+// Public traits.
 mod container;
 mod error;
 mod logger;
@@ -23,12 +24,17 @@ mod snapshot;
 mod storage;
 mod transaction;
 mod version;
-
-pub use container::{Container, ContainerHandle, Table};
+pub use container::{Container, ContainerData, ContainerHandle};
 pub use error::Error;
-pub use logger::{FileLogger, Log, Logger};
-pub use sequencer::{AtomicCounter, DeriveClock, Sequencer};
+pub use logger::{Log, Logger};
+pub use sequencer::{DeriveClock, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
 pub use transaction::{Journal, JournalAnchor, Transaction};
 pub use version::{DefaultVersionedObject, Version, VersionCell, VersionLocker};
+
+// Implementation.
+mod r#impl;
+pub use r#impl::atomic_counter::AtomicCounter;
+pub use r#impl::file_logger::FileLogger;
+pub use r#impl::relational_table::RelationalTable;

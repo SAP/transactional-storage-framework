@@ -36,15 +36,15 @@ let storage: Storage<AtomicCounter> = Storage::new(None);
 tss::Container is a transactional data container that is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string.
 
 ```rust
-use tss::{AtomicCounter, Storage, Table};
+use tss::{AtomicCounter, RelationalTable, Storage};
 
 let storage: Storage<AtomicCounter> = Storage::new(None);
 
-let container_data = Box::new(Table::new());
+let container_data = Box::new(RelationalTable::new());
 let container_handle: Handle = Container::new_container(container_data);
 ```
 
-### tss::Table
+### tss::RelationalTable
 
 The framework provides a row-oriented database table container that resembles traditional database tables.
 

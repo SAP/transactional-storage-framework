@@ -46,10 +46,10 @@ impl<S: Sequencer> Container<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{AtomicCounter, Container, ContainerHandle, Table};
+    /// use tss::{AtomicCounter, Container, ContainerHandle, RelationalTable};
     /// type Handle = ContainerHandle<AtomicCounter>;
     ///
-    /// let container_data = Box::new(Table::new());
+    /// let container_data = Box::new(RelationalTable::new());
     /// let container_handle: Handle = Container::new_container(container_data);
     /// ```
     pub fn new_container(
@@ -384,60 +384,6 @@ pub trait ContainerData<S: Sequencer> {
 
     /// Returns the size of the container.
     fn size(&self) -> (usize, usize);
-}
-
-/// Table is a two dimensional array of u8.
-pub struct Table<S: Sequencer> {
-    _version_vector: Option<Vec<S::Clock>>,
-}
-
-impl<S: Sequencer> Table<S> {
-    pub fn new() -> Table<S> {
-        Table {
-            _version_vector: None,
-        }
-    }
-}
-
-impl<S: Sequencer> ContainerData<S> for Table<S> {
-    fn get(
-        &self,
-        _record_index: usize,
-        _column_index: usize,
-        _snapshot: &Snapshot<S>,
-    ) -> Option<&[u8]> {
-        None
-    }
-    fn update(
-        &self,
-        _record_index: usize,
-        _column_index: usize,
-        _data: (&[u8], usize),
-        _transaction: &Transaction<S>,
-        _snapshot: &Snapshot<S>,
-    ) -> Result<(usize, usize), Error> {
-        Err(Error::Fail)
-    }
-    fn put(
-        &self,
-        _data: (&[u8], usize),
-        _transaction: &Transaction<S>,
-        _snapshot: &Snapshot<S>,
-    ) -> Result<usize, Error> {
-        Err(Error::Fail)
-    }
-    fn remove(
-        &self,
-        _record_index: usize,
-        _column_index: usize,
-        _transaction: &Transaction<S>,
-        _snapshot: &Snapshot<S>,
-    ) -> Result<(usize, usize), Error> {
-        Err(Error::Fail)
-    }
-    fn size(&self) -> (usize, usize) {
-        (0, 0)
-    }
 }
 
 /// ContainerDirectory is a tree storing versioned handles to sub containers.

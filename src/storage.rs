@@ -207,7 +207,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{AtomicCounter, Container, Storage, Table};
+    /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
@@ -221,7 +221,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let new_container_data = Box::new(Table::new());
+    /// let new_container_data = Box::new(RelationalTable::new());
     /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
     /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
@@ -258,7 +258,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{AtomicCounter, Container, Storage, Table};
+    /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
@@ -272,7 +272,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let new_container_data = Box::new(Table::new());
+    /// let new_container_data = Box::new(RelationalTable::new());
     /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
     /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
     /// journal.submit();
