@@ -31,10 +31,11 @@ pub use sequencer::{DeriveClock, Sequencer};
 pub use snapshot::Snapshot;
 pub use storage::Storage;
 pub use transaction::{Journal, JournalAnchor, Transaction};
-pub use version::{DefaultVersionedObject, Version, VersionCell, VersionLocker};
+pub use version::{Version, VersionCell, VersionLocker};
 
 // Implementation.
 mod r#impl;
 pub use r#impl::atomic_counter::AtomicCounter;
 pub use r#impl::file_logger::FileLogger;
+pub use r#impl::record_version::RecordVersion;
 pub use r#impl::relational_table::RelationalTable;

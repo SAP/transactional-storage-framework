@@ -340,9 +340,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{AtomicCounter, DefaultVersionedObject, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
     ///
-    /// let versioned_object = DefaultVersionedObject::new();
+    /// let versioned_object = RecordVersion::new();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
@@ -368,9 +368,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// # Examples
     /// ```
-    /// use tss::{AtomicCounter, DefaultVersionedObject, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
     ///
-    /// let versioned_object = DefaultVersionedObject::new();
+    /// let versioned_object = RecordVersion::new();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
@@ -614,14 +614,14 @@ impl<S: Sequencer> RecordData<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, DefaultVersionedObject};
+    use crate::{AtomicCounter, RecordVersion};
     use crossbeam_utils::thread;
     use std::sync::{Arc, Barrier};
 
     #[test]
     fn visibility() {
         let storage: Storage<AtomicCounter> = Storage::new(None);
-        let versioned_object = DefaultVersionedObject::new();
+        let versioned_object = RecordVersion::new();
         let transaction = storage.transaction();
         let barrier = Arc::new(Barrier::new(2));
         thread::scope(|s| {
@@ -657,7 +657,7 @@ mod test {
     #[test]
     fn wait_queue() {
         let storage: Storage<AtomicCounter> = Storage::new(None);
-        let versioned_object = DefaultVersionedObject::new();
+        let versioned_object = RecordVersion::new();
         let num_threads = 64;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         thread::scope(|s| {

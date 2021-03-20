@@ -18,7 +18,7 @@ The transactional storage framework is a software framework that offers key oper
 
 This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are very useful when it comes to checking if a specific database mechanism scales well as the number of processors increases, because those adverse effects that the paper describes will be hardly detected on a large database instance running on the same hardware.
 
-Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides default types of tss::Container, tss::Logger, and tss::Sequencer, thereby making the framework itself a complete transactional storage system for a relational database system.
+Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides default types of tss::Container, tss::Logger, tss::Sequencer, and tss::Version, thereby making the framework itself a complete transactional storage system for a relational database system.
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
@@ -173,9 +173,9 @@ The framework provides a file-based logger that is capable of lock-free check-po
 tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to modify the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
 
 ```rust
-use tss::{AtomicCounter, DefaultVersionedObject, Storage};
+use tss::{AtomicCounter, RecordVersion, Storage};
 
-let versioned_object = DefaultVersionedObject::new();
+let versioned_object = RecordVersion::new();
 let storage: Storage<AtomicCounter> = Storage::new(None);
 let mut transaction = storage.transaction();
 
@@ -190,3 +190,6 @@ let guard = crossbeam_epoch::pin();
 assert!(unsafe { versioned_object.version_cell(&guard).deref() }.predate(&snapshot));
 ```
 
+### tss::RecordVersion
+
+The framework provides a traditional record-level versioning mechanism for tss::RelationalTable.
