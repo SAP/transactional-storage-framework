@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2021 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{AtomicCounter, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use std::sync::atomic::Ordering::Relaxed;
