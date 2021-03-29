@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{JournalAnchor, Sequencer, Snapshot};
+use super::{JournalAnchor, Log, Sequencer, Snapshot};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -23,12 +23,12 @@ pub trait Version<S: Sequencer> {
     /// Updates the data.
     ///
     /// The caller must prove itself as the owner of the versioned object by showing that it owns a VersionLocker.
-    fn update<R, F: FnOnce(&mut Self::Data) -> R>(
+    fn update<F: FnOnce(&mut Self::Data) -> Log>(
         &self,
         updater: F,
         locker: &VersionLocker<S>,
         guard: &Guard,
-    ) -> Option<R> {
+    ) -> Option<Log> {
         if self.version_cell(guard) == locker.version_cell_ptr.load(Relaxed, guard) {
             // The caller has proved that it is the owner.
             let data_mut_ref = unsafe { &mut *(self.read() as *const _ as *mut Self::Data) };

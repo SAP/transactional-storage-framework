@@ -395,16 +395,16 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         if let Some(locker) =
             version_cell_ref.lock(self.record.anchor_ptr.load(Relaxed, &guard), &guard)
         {
-            self.record.locks.push(locker);
-            Ok(())
+            if let Some(log_record) = version.update(|_data| Log::new(), &locker, &guard) {
+                self.record.locks.push(locker);
+                self.record.logs.push(log_record);
+                Ok(())
+            } else {
+                Err(Error::Fail)
+            }
         } else {
             Err(Error::Fail)
         }
-    }
-
-    /// Pushes a log record into the Journal.
-    pub fn log(&mut self, log: Log) {
-        self.record.logs.push(log);
     }
 }
 
