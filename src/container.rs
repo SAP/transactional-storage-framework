@@ -109,7 +109,7 @@ impl<S: Sequencer> Container<S> {
                 let directory_ref = unsafe { directory_shared_ptr.deref() };
                 loop {
                     if let Some(Some(existing_container)) =
-                        directory_ref.read(&String::from(name), |_, anchor_ptr| {
+                        directory_ref.read(name, |_, anchor_ptr| {
                             let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                             anchor_ref.get(snapshot, &guard)
                         })
@@ -169,13 +169,12 @@ impl<S: Sequencer> Container<S> {
         if let ContainerType::Directory(directory) = &self.container {
             let directory_shared = directory.load(Relaxed, guard);
             if !directory_shared.is_null() {
-                if let Some(Some(existing_container)) = unsafe { directory_shared.deref() }.read(
-                    &String::from(name),
-                    |_, anchor_ptr| {
+                if let Some(Some(existing_container)) =
+                    unsafe { directory_shared.deref() }.read(name, |_, anchor_ptr| {
                         let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                         anchor_ref.get(snapshot, &guard)
-                    },
-                ) {
+                    })
+                {
                     return Some(existing_container);
                 }
             }
@@ -213,27 +212,24 @@ impl<S: Sequencer> Container<S> {
 
                     let directory_ref = unsafe { directory_shared_ptr.deref() };
                     loop {
-                        if let Some(result) =
-                            directory_ref.read(&String::from(name), |_, anchor_ptr| {
-                                let anchor_ref =
-                                    unsafe { anchor_ptr.load(Acquire, &guard).deref() };
-                                let container_version_ptr =
-                                    Atomic::new(ContainerVersion::new(container_handle.clone()));
-                                let container_version_shared = container_version_ptr
-                                    .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
-                                if anchor_ref.push(container_version_shared, snapshot, &guard) {
-                                    if journal
-                                        .lock(unsafe { container_version_shared.deref() })
-                                        .is_ok()
-                                    {
-                                        return true;
-                                    }
-                                } else {
-                                    drop(unsafe { container_version_shared.into_owned() });
+                        if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
+                            let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
+                            let container_version_ptr =
+                                Atomic::new(ContainerVersion::new(container_handle.clone()));
+                            let container_version_shared = container_version_ptr
+                                .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
+                            if anchor_ref.push(container_version_shared, snapshot, &guard) {
+                                if journal
+                                    .lock(unsafe { container_version_shared.deref() })
+                                    .is_ok()
+                                {
+                                    return true;
                                 }
-                                false
-                            })
-                        {
+                            } else {
+                                drop(unsafe { container_version_shared.into_owned() });
+                            }
+                            false
+                        }) {
                             return result;
                         }
 
@@ -260,8 +256,7 @@ impl<S: Sequencer> Container<S> {
             let guard = crossbeam_epoch::pin();
             let directory_shared_ptr = directory.load(Relaxed, &guard);
             let directory_ref = unsafe { directory_shared_ptr.deref() };
-            let name = String::from(name);
-            if let Some(result) = directory_ref.read(&name, |_, anchor_ptr| {
+            if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
                 let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                 // A ContainerVersion not pointing to a valid container is pushed.
                 let container_version_ptr =
