@@ -422,6 +422,10 @@ impl<S: Sequencer> ContainerAnchor<S> {
             if !current_version_shared.is_null()
                 && !unsafe { current_version_shared.deref().predate(snapshot, guard) }
             {
+                // The latest version is invisible to the given snapshot.
+                //
+                // It is regarded as a serialization failure error, assuming that the majority of transaction are committed,
+                // thus returning an error immediately.
                 return false;
             }
             version_ref.link.store(current_version_shared, Relaxed);

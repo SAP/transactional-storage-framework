@@ -101,6 +101,9 @@ assert!(result.is_some());
 
 tss::Transaction represents a set of changes made to a tss::Storage that can be atomically committed. Developers and researchers are able to add / modify / remove transactional semantics easily as the storage actions are implemented in a highly flexible way. The logging format is not explicitly specified, and therefore developers can freely define the log structure, or even omit logging. The changes made in a transaction can be partially reverted by using the rewinding mechanism. Every change made in a transaction must be submitted, and the submitted change can be discarded without fully rolling back the transaction.
 
+### Locking and versioning semantics
+tss::Storage and tss::Transaction provide a rudimentary, yet versatile locking and versioning mechanism. A versioned object can only be created once, and it can never be modified after the first transaction successfully feeds the contents. To be specific, once a versioned object is initially created, it becomes globally reachable before being filled with contents. There can be multiple transactions attempting to own the versioned object, and the first one who acquires the mutex, and also being able to see the previous version has chance to fill the versioned object. If the transaction is rolled back, the chance is passed to the next transaction queued in the mutex, otherwise, the versioned object is marked with the transaction's commit snapshot time point value. The semantics is slightly different from conventional database systems, but it serves most types of workloads without a problem, because waiting for a lock usually ends up serialization failure errors.
+
 ```rust
 use tss::{AtomicCounter, Storage};
 
