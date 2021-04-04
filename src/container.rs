@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, Journal, Sequencer, Snapshot, Transaction, Version, VersionCell};
+use super::{
+    Error, Journal, Log, Sequencer, Snapshot, Transaction, Version, VersionCell, VersionLocker,
+};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
@@ -143,7 +145,7 @@ impl<S: Sequencer> Container<S> {
                                 &guard,
                             )
                         } && journal
-                            .lock(unsafe { new_directory_version_shared.deref() })
+                            .create(unsafe { new_directory_version_shared.deref() }, None)
                             .is_ok()
                         {
                             // It is safe for the transaction to have a reference to the container, as the container is
@@ -220,7 +222,7 @@ impl<S: Sequencer> Container<S> {
                                 .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                             if anchor_ref.push(container_version_shared, snapshot, &guard) {
                                 if journal
-                                    .lock(unsafe { container_version_shared.deref() })
+                                    .create(unsafe { container_version_shared.deref() }, None)
                                     .is_ok()
                                 {
                                     return true;
@@ -265,7 +267,7 @@ impl<S: Sequencer> Container<S> {
                     container_version_ptr.load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                 if anchor_ref.push(container_version_shared, snapshot, &guard) {
                     if journal
-                        .lock(unsafe { container_version_shared.deref() })
+                        .create(unsafe { container_version_shared.deref() }, None)
                         .is_ok()
                     {
                         return true;
@@ -509,8 +511,16 @@ impl<S: Sequencer> Version<S> for ContainerVersion<S> {
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
     }
-    fn read(&self) -> &ContainerVersion<S> {
-        self
+    fn write(
+        &self,
+        _version_locker: &VersionLocker<S>,
+        _payload: ContainerVersion<S>,
+        _guard: &Guard,
+    ) -> Option<Log> {
+        None
+    }
+    fn read(&self, _snapshot: &Snapshot<S>) -> Option<&ContainerVersion<S>> {
+        None
     }
     fn unversion(&self, guard: &Guard) -> bool {
         !self

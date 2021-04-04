@@ -7,36 +7,25 @@ use crossbeam_epoch::{Atomic, Guard, Shared};
 use crossbeam_utils::atomic::AtomicCell;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
-/// The Version trait enforces versioned objects to embed a VersionCell.
+/// The Version trait stipulates interfaces of versioned objects.
 ///
 /// All the versioned objects in a Storage must implement the trait.
 pub trait Version<S: Sequencer> {
     /// The type of the versioned data.
     type Data;
 
-    /// Returns a reference to the VersionCell that the versioned object owns.
+    /// Returns a reference to the VersionCell that the versioned object is associated with.
     fn version_cell<'g>(&'g self, guard: &'g Guard) -> Shared<'g, VersionCell<S>>;
 
-    /// Returns a reference to the data.
-    fn read(&self) -> &Self::Data;
-
-    /// Updates the data.
+    /// The creator of the Version is eligible to feed data.
     ///
     /// The caller must prove itself as the owner of the versioned object by showing that it owns a VersionLocker.
-    fn update<F: FnOnce(&mut Self::Data) -> Log>(
-        &self,
-        updater: F,
-        locker: &VersionLocker<S>,
-        guard: &Guard,
-    ) -> Option<Log> {
-        if self.version_cell(guard) == locker.version_cell_ptr.load(Relaxed, guard) {
-            // The caller has proved that it is the owner.
-            let data_mut_ref = unsafe { &mut *(self.read() as *const _ as *mut Self::Data) };
-            Some(updater(data_mut_ref))
-        } else {
-            None
-        }
-    }
+    fn write(&self, locker: &VersionLocker<S>, payload: Self::Data, guard: &Guard) -> Option<Log>;
+
+    /// Returns a reference to the data.
+    ///
+    /// It does not return a reference if the snapshot predates the versioned object.
+    fn read(&self, snapshot: &Snapshot<S>) -> Option<&Self::Data>;
 
     /// Returns true if the version predates the snapshot.
     fn predate(&self, snapshot: &Snapshot<S>, guard: &Guard) -> bool {

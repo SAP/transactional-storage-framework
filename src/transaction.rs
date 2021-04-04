@@ -347,7 +347,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.lock(&versioned_object).is_ok());
+    /// assert!(journal.create(&versioned_object, None).is_ok());
     ///
     /// let snapshot = journal.snapshot();
     /// drop(snapshot);
@@ -360,7 +360,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         )
     }
 
-    /// Locks a versioned object.
+    /// Creates a versioned object.
     ///
     /// The acquired lock is never released until the Journal is dropped.
     /// If the locked version is released without a valid clock value tagged,
@@ -375,7 +375,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.lock(&versioned_object).is_ok());
+    /// assert!(journal.create(&versioned_object, None).is_ok());
     /// journal.submit();
     ///
     /// transaction.commit();
@@ -384,7 +384,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let guard = crossbeam_epoch::pin();
     /// assert!(unsafe { versioned_object.version_cell(&guard).deref() }.predate(&snapshot));
     /// ```
-    pub fn lock<V: Version<S>>(&mut self, version: &V) -> Result<(), Error> {
+    pub fn create<V: Version<S>>(
+        &mut self,
+        version: &V,
+        payload: Option<V::Data>,
+    ) -> Result<(), Error> {
         let guard = crossbeam_epoch::pin();
         let version_cell_shared = version.version_cell(&guard);
         if version_cell_shared.is_null() {
@@ -395,16 +399,18 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         if let Some(locker) =
             version_cell_ref.lock(self.record.anchor_ptr.load(Relaxed, &guard), &guard)
         {
-            if let Some(log_record) = version.update(|_data| Log::new(), &locker, &guard) {
-                self.record.locks.push(locker);
-                self.record.logs.push(log_record);
-                Ok(())
+            if let Some(payload) = payload {
+                if let Some(log_record) = version.write(&locker, payload, &guard) {
+                    self.record.locks.push(locker);
+                    self.record.logs.push(log_record);
+                    return Ok(());
+                }
             } else {
-                Err(Error::Fail)
+                self.record.locks.push(locker);
+                return Ok(());
             }
-        } else {
-            Err(Error::Fail)
         }
+        return Err(Error::Fail);
     }
 }
 
@@ -632,19 +638,19 @@ mod test {
                 // Step 1. Tries to acquire lock acquired by an active transaction record.
                 barrier_cloned.wait();
                 let mut journal = transaction_ref.start();
-                assert!(journal.lock(versioned_object_ref).is_err());
+                assert!(journal.create(versioned_object_ref, None).is_err());
                 drop(journal);
 
                 // Step 2. Tries to acquire lock acquired by a submitted transaction record.
                 barrier_cloned.wait();
                 barrier_cloned.wait();
                 let mut journal = transaction_ref.start();
-                assert!(journal.lock(versioned_object_ref).is_ok());
+                assert!(journal.create(versioned_object_ref, None).is_ok());
                 journal.submit();
             });
 
             let mut journal = transaction.start();
-            assert!(journal.lock(&versioned_object).is_ok());
+            assert!(journal.create(&versioned_object, None).is_ok());
             barrier.wait();
             barrier.wait();
             journal.submit();
@@ -682,7 +688,7 @@ mod test {
             }
             barrier.wait();
             let mut journal = transaction.start();
-            let result = journal.lock(&versioned_object);
+            let result = journal.create(&versioned_object, None);
             assert!(result.is_ok());
             journal.submit();
             std::thread::sleep(std::time::Duration::from_millis(30));

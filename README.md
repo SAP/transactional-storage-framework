@@ -173,7 +173,7 @@ pub trait Logger<S: Sequencer> {
 The framework provides a file-based logger that is capable of lock-free check-pointing and point-in-time recovery.
 
 ## tss::Version <a name="version">
-tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to modify the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
+tss::Version is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to create the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism.
 
 ```rust
 use tss::{AtomicCounter, RecordVersion, Storage};
@@ -183,7 +183,7 @@ let storage: Storage<AtomicCounter> = Storage::new(None);
 let mut transaction = storage.transaction();
 
 let mut journal = transaction.start();
-assert!(journal.lock(&versioned_object).is_ok());
+assert!(journal.create(&versioned_object, None).is_ok());
 journal.submit();
 
 transaction.commit();
