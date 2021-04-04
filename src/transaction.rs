@@ -410,7 +410,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
                 return Ok(());
             }
         }
-        return Err(Error::Fail);
+        Err(Error::Fail)
     }
 }
 

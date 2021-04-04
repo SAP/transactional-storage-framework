@@ -200,6 +200,7 @@ impl<S: Sequencer> Container<S> {
                 if let ContainerType::Data(_) = &container.container {
                     let mut directory_shared_ptr = directory.load(Relaxed, &guard);
                     if directory_shared_ptr.is_null() {
+                        // Creates a new directory structure.
                         match directory.compare_exchange(
                             Shared::null(),
                             Owned::new(TreeIndex::new()),
@@ -212,24 +213,36 @@ impl<S: Sequencer> Container<S> {
                         }
                     }
 
+                    // Makes a link to the given container.
                     let directory_ref = unsafe { directory_shared_ptr.deref() };
                     loop {
                         if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
+                            // A container anchor under the same name exists.
                             let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
+                            // Creates a new ContainerVersion for the given container.
                             let container_version_ptr =
                                 Atomic::new(ContainerVersion::new(container_handle.clone()));
                             let container_version_shared = container_version_ptr
                                 .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
+                            // Pushes the new ContainerVersion into the version chain.
                             if anchor_ref.push(container_version_shared, snapshot, &guard) {
+                                // Successfully pushed the new ContainerVersion.
+                                //
+                                // The new ContainerVersion is now owned by the transaction,
+                                // and therefore the transaction tries to take ownership.
                                 if journal
                                     .create(unsafe { container_version_shared.deref() }, None)
                                     .is_ok()
                                 {
+                                    // The transaction took ownership.
                                     return true;
                                 }
                             } else {
                                 drop(unsafe { container_version_shared.into_owned() });
                             }
+                            // Failed to push the new ContainerVersion.
+                            //
+                            // It can be regarded as a serialization failure.
                             false
                         }) {
                             return result;
