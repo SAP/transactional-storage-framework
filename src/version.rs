@@ -15,12 +15,45 @@ pub trait Version<S: Sequencer> {
     type Data;
 
     /// Returns a reference to the VersionCell that the versioned object is associated with.
+    ///
+    /// A versioned object may not own a VersionCell, instead there can be an array of VersionCells,
+    /// and the versioned object points to one of the entries.
+    ///
+    /// VersionCell has no public interfaces, and the purpose of having this method is to enforce that
+    /// the versioned object is associated with a VersionCell.
     fn version_cell<'g>(&'g self, guard: &'g Guard) -> Shared<'g, VersionCell<S>>;
+
+    /// Creates a new version.
+    ///
+    /// A versioned object becomes reachable before its contents are ready.
+    /// The transaction that acquires the lock is eligible to fill the contents.
+    /// Once the transaction is committed, its contents will never get modified.
+    fn create<'g>(
+        &'g self,
+        journal_anchor_shared: Shared<JournalAnchor<S>>,
+        guard: &'g Guard,
+    ) -> Option<VersionLocker<S>> {
+        let version_cell_shared = self.version_cell(guard);
+        if !version_cell_shared.is_null() {
+            VersionLocker::lock(
+                unsafe { version_cell_shared.deref() },
+                journal_anchor_shared,
+                guard,
+            )
+        } else {
+            None
+        }
+    }
 
     /// The creator of the Version is eligible to feed data.
     ///
     /// The caller must prove itself as the owner of the versioned object by showing that it owns a VersionLocker.
-    fn write(&self, locker: &VersionLocker<S>, payload: Self::Data, guard: &Guard) -> Option<Log>;
+    fn write(
+        &self,
+        version_locker: &VersionLocker<S>,
+        payload: Self::Data,
+        guard: &Guard,
+    ) -> Option<Log>;
 
     /// Returns a reference to the data.
     ///
@@ -42,15 +75,9 @@ pub trait Version<S: Sequencer> {
     fn unversion(&self, guard: &Guard) -> bool;
 }
 
-/// VersionCell is a piece of data that is embedded in a versioned object.
+/// VersionCell is a piece of data that is associated with a versioned object.
 ///
-/// VersionCell represents the time point when the version is created or deleted. It represents a single point of time,
-/// therefore a versioned object that needs a pair of time points, usually, creation and deletion time points,
-/// requires to embed two instances of VersionCell.
-///
-/// A VersionCell can be locked by a transaction when the transaction creates or deletes the versioned object.
-/// The transaction status change is synchronously proprated to readers of the versioned object.
-///
+/// VersionCell represents the time point when the version is created.
 /// A VersionCell is !Unpin as references to a VersionCell must stay valid throughout its lifetime.
 pub struct VersionCell<S: Sequencer> {
     /// owner_ptr points to the owner of the VersionCell.
@@ -66,6 +93,7 @@ pub struct VersionCell<S: Sequencer> {
 }
 
 impl<S: Sequencer> Default for VersionCell<S> {
+    /// Creates an empty VersionCell.
     fn default() -> VersionCell<S> {
         VersionCell {
             owner_ptr: Atomic::null(),
@@ -76,25 +104,13 @@ impl<S: Sequencer> Default for VersionCell<S> {
 }
 
 impl<S: Sequencer> VersionCell<S> {
-    /// Creates a new VersionCell that is globally invisible.
+    /// Creates an empty VersionCell.
     pub fn new() -> VersionCell<S> {
         Default::default()
     }
 
-    /// Assigns the transaction as the owner.
-    ///
-    /// The transaction semantics adheres to the two-phase locking protocol.
-    /// If the transaction is committed, a new time point is set.
-    pub fn lock(
-        &self,
-        journal_anchor_shared: Shared<JournalAnchor<S>>,
-        guard: &Guard,
-    ) -> Option<VersionLocker<S>> {
-        VersionLocker::lock(self, journal_anchor_shared, guard)
-    }
-
     /// Checks if the VersionCell predates the snapshot.
-    pub fn predate(&self, snapshot: &Snapshot<S>) -> bool {
+    fn predate(&self, snapshot: &Snapshot<S>) -> bool {
         // Checks the time point.
         let time_point = self.time_point.load();
         if time_point != S::invalid() {
@@ -102,6 +118,9 @@ impl<S: Sequencer> VersionCell<S> {
         }
 
         // Checks the owner.
+        //
+        // It assumes that the changes made in a transaction is synchronized in the sequencer,
+        // therefore a snapshot older than the transaction sees everything happened in the transactions.
         if !self
             .owner_ptr
             .load(Relaxed, unsafe { crossbeam_epoch::unprotected() })
@@ -112,7 +131,7 @@ impl<S: Sequencer> VersionCell<S> {
             if owner_shared.as_raw() != self.locked_state() && !owner_shared.is_null() {
                 let journal_anchor_ref = unsafe { owner_shared.deref() };
                 if snapshot.visible(journal_anchor_ref, &guard) {
-                    // The change has been made by a TransactionSession that predates the snapshot.
+                    // The change has been made by the transaction that predates the snapshot.
                     return true;
                 }
                 let visible = journal_anchor_ref.visible(snapshot.clock(), &guard).0;
@@ -128,11 +147,6 @@ impl<S: Sequencer> VersionCell<S> {
         time_point != S::invalid() && time_point <= *snapshot.clock()
     }
 
-    /// The memory address is used as its identifier.
-    pub fn id(&self) -> usize {
-        self.locked_state() as usize
-    }
-
     /// VersionCell having owner_ptr == locked_state() is currently being locked.
     fn locked_state(&self) -> *const JournalAnchor<S> {
         self as *const _ as *const JournalAnchor<S>
@@ -142,7 +156,7 @@ impl<S: Sequencer> VersionCell<S> {
 impl<S: Sequencer> Drop for VersionCell<S> {
     /// VersionCell cannot be dropped when it is locked.
     ///
-    /// self.owner_ptr == Shared::null() partially proves the assertion that VersionCell outlives the TransactionCell.
+    /// self.owner_ptr == Shared::null() partially proves the assertion that VersionCell outlives Journal.
     /// Dropping a VersionCell is usually triggered by the garbage collector of the storage system,
     /// and the garbage collector must ensure to consolidate versioned objects after the transactions are post-processed.
     fn drop(&mut self) {
@@ -164,17 +178,23 @@ impl<S: Sequencer> Drop for VersionCell<S> {
 ///
 /// It asserts that VersionCell outlives VersionLocker.
 pub struct VersionLocker<S: Sequencer> {
-    /// The VersionCell is guaranteed to outlive by VersionCell::drop.
+    /// VersionCell is guaranteed to outlive VersionLocker by VersionCell::drop.
     version_cell_ptr: Atomic<VersionCell<S>>,
-    /// The previous owner ptr.
+    /// The previous owner pointer.
     ///
-    /// There are cases where ownership is transferred from a Journal to another
-    /// when they belong to the same transaction, and the owner predates the one acquiring the lock.
+    /// There are cases where ownership is transferred from a Journal to another when
+    /// they belong to the same transaction, and the owner predates the one acquiring the lock.
     prev_owner_ptr: Atomic<JournalAnchor<S>>,
 }
 
 impl<S: Sequencer> VersionLocker<S> {
-    /// Locks the VersionCell.
+    /// Assigns a creation time point.
+    ///
+    /// If the VersionCell has a valid time point assigned, it returns None.
+    ///
+    /// It practically locks the versioned object, blocking all other transactions.
+    /// The transaction semantics adheres to the two-phase locking protocol.
+    /// If the transaction is committed, a new time point is set.
     fn lock(
         version_cell_ref: &VersionCell<S>,
         journal_anchor_shared: Shared<JournalAnchor<S>>,
@@ -234,10 +254,10 @@ impl<S: Sequencer> VersionLocker<S> {
                 .wait(
                     |snapshot| {
                         if *snapshot == S::invalid() {
-                            // The transaction has been rolled back, or the transaction record has been discarded.
-                            //  - Tries to overtake ownership.
-                            //  - CAS returning false means that another transaction overtook ownership.
-                            //  - The thread is pinned, so there is no possibility of ABA.
+                            // The transaction has been rolled back, or the Journal has been discarded,
+                            // it tries to overtake ownership.
+                            //
+                            // The following CAS returning false means that another transaction overtook ownership.
                             return version_cell_ref
                                 .owner_ptr
                                 .compare_exchange(
@@ -319,7 +339,8 @@ impl<S: Sequencer> Drop for VersionLocker<S> {
         let version_cell_shared = self.version_cell_ptr.swap(Shared::null(), Relaxed, guard);
         if !version_cell_shared.is_null() {
             // The VersionLocker is being dropped without the Journal having been submitted.
-            //  - Stack-unwinding entails it; in this case, the wait queue becomes unfair.
+            //
+            // Stack-unwinding entails it; in this case, the wait queue becomes unfair.
             let version_cell_ref = unsafe { version_cell_shared.deref() };
             debug_assert!(version_cell_ref.time_point.load() == S::invalid());
             version_cell_ref.owner_ptr.swap(

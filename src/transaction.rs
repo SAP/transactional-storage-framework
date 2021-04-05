@@ -382,7 +382,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// let snapshot = storage.snapshot();
     /// let guard = crossbeam_epoch::pin();
-    /// assert!(unsafe { versioned_object.version_cell(&guard).deref() }.predate(&snapshot));
+    /// assert!(versioned_object.predate(&snapshot, &guard));
     /// ```
     pub fn create<V: Version<S>>(
         &mut self,
@@ -395,10 +395,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
             // The versioned object is not ready for versioning.
             return Err(Error::Fail);
         }
-        let version_cell_ref = unsafe { version_cell_shared.deref() };
-        if let Some(locker) =
-            version_cell_ref.lock(self.record.anchor_ptr.load(Relaxed, &guard), &guard)
-        {
+        if let Some(locker) = version.create(self.record.anchor_ptr.load(Relaxed, &guard), &guard) {
             if let Some(payload) = payload {
                 if let Some(log_record) = version.write(&locker, payload, &guard) {
                     self.record.locks.push(locker);
@@ -676,14 +673,10 @@ mod test {
                     let guard = crossbeam_epoch::pin();
                     barrier_cloned.wait();
                     let snapshot = storage_ref.snapshot();
-                    assert!(
-                        !unsafe { versioned_object_ref.version_cell(&guard).deref() }
-                            .predate(&snapshot)
-                    );
+                    assert!(!versioned_object_ref.predate(&snapshot, &guard));
                     barrier_cloned.wait();
                     let snapshot = storage_ref.snapshot();
-                    assert!(unsafe { versioned_object_ref.version_cell(&guard).deref() }
-                        .predate(&snapshot));
+                    assert!(versioned_object_ref.predate(&snapshot, &guard));
                 });
             }
             barrier.wait();
