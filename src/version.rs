@@ -47,18 +47,13 @@ pub trait Version<S: Sequencer> {
 
     /// The creator of the Version is eligible to feed data.
     ///
-    /// The caller must prove itself as the owner of the versioned object by showing that it owns a VersionLocker.
-    fn write(
-        &self,
-        version_locker: &VersionLocker<S>,
-        payload: Self::Data,
-        guard: &Guard,
-    ) -> Option<Log>;
+    /// The caller must own the versioned object, or a VersionLocker that owns it.
+    fn write(&mut self, payload: Self::Data) -> Option<Log>;
 
     /// Returns a reference to the data.
     ///
     /// It does not return a reference if the snapshot predates the versioned object.
-    fn read(&self, snapshot: &Snapshot<S>) -> Option<&Self::Data>;
+    fn read(&self, snapshot: &Snapshot<S>, guard: &Guard) -> Option<&Self::Data>;
 
     /// Returns true if the version predates the snapshot.
     fn predate(&self, snapshot: &Snapshot<S>, guard: &Guard) -> bool {
@@ -303,6 +298,21 @@ impl<S: Sequencer> VersionLocker<S> {
             version_cell_ptr: Atomic::from(version_cell_ref as *const _),
             prev_owner_ptr: Atomic::from(current_owner_shared),
         })
+    }
+
+    /// Converts the given Version reference into a mutable reference, and updates it.
+    pub fn write<V: Version<S>>(
+        &self,
+        version: &V,
+        payload: V::Data,
+        guard: &Guard,
+    ) -> Result<Option<Log>, ()> {
+        let version_cell_shared = version.version_cell(guard);
+        if self.version_cell_ptr.load(Relaxed, guard) == version_cell_shared {
+            let version_mut_ref = unsafe { &mut *(version as *const _ as *mut V) };
+            return Ok(version_mut_ref.write(payload));
+        }
+        Err(())
     }
 
     /// Releases the VersionCell.

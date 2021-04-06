@@ -397,9 +397,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         }
         if let Some(locker) = version.create(self.record.anchor_ptr.load(Relaxed, &guard), &guard) {
             if let Some(payload) = payload {
-                if let Some(log_record) = version.write(&locker, payload, &guard) {
+                if let Ok(log_record) = locker.write(version, payload, &guard) {
                     self.record.locks.push(locker);
-                    self.record.logs.push(log_record);
+                    if let Some(log_record) = log_record {
+                        self.record.logs.push(log_record);
+                    }
                     return Ok(());
                 }
             } else {

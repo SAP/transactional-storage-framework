@@ -2,9 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    Error, Journal, Log, Sequencer, Snapshot, Transaction, Version, VersionCell, VersionLocker,
-};
+use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use scc::TreeIndex;
 use std::sync::atomic::AtomicUsize;
@@ -129,8 +127,7 @@ impl<S: Sequencer> Container<S> {
                     } else {
                         // The directory version has not become reachable.
                         let new_directory = Self::new_directory();
-                        let new_directory_version_ptr =
-                            Atomic::new(ContainerVersion::new(new_directory.clone()));
+                        let new_directory_version_ptr = Atomic::new(ContainerVersion::new());
                         let new_directory_version_shared = new_directory_version_ptr
                             .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                         // The anchor is reachable by other threads, therefore a memory fence is required.
@@ -145,7 +142,10 @@ impl<S: Sequencer> Container<S> {
                                 &guard,
                             )
                         } && journal
-                            .create(unsafe { new_directory_version_shared.deref() }, None)
+                            .create(
+                                unsafe { new_directory_version_shared.deref() },
+                                Some(new_directory.clone()),
+                            )
                             .is_ok()
                         {
                             // It is safe for the transaction to have a reference to the container, as the container is
@@ -220,8 +220,7 @@ impl<S: Sequencer> Container<S> {
                             // A container anchor under the same name exists.
                             let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                             // Creates a new ContainerVersion for the given container.
-                            let container_version_ptr =
-                                Atomic::new(ContainerVersion::new(container_handle.clone()));
+                            let container_version_ptr = Atomic::new(ContainerVersion::new());
                             let container_version_shared = container_version_ptr
                                 .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                             // Pushes the new ContainerVersion into the version chain.
@@ -231,7 +230,10 @@ impl<S: Sequencer> Container<S> {
                                 // The new ContainerVersion is now owned by the transaction,
                                 // and therefore the transaction tries to take ownership.
                                 if journal
-                                    .create(unsafe { container_version_shared.deref() }, None)
+                                    .create(
+                                        unsafe { container_version_shared.deref() },
+                                        Some(container_handle.clone()),
+                                    )
                                     .is_ok()
                                 {
                                     // The transaction took ownership.
@@ -274,13 +276,15 @@ impl<S: Sequencer> Container<S> {
             if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
                 let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                 // A ContainerVersion not pointing to a valid container is pushed.
-                let container_version_ptr =
-                    Atomic::new(ContainerVersion::new(ContainerHandle::null()));
+                let container_version_ptr = Atomic::new(ContainerVersion::new());
                 let container_version_shared =
                     container_version_ptr.load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                 if anchor_ref.push(container_version_shared, snapshot, &guard) {
                     if journal
-                        .create(unsafe { container_version_shared.deref() }, None)
+                        .create(
+                            unsafe { container_version_shared.deref() },
+                            Some(ContainerHandle::null()),
+                        )
                         .is_ok()
                     {
                         return true;
@@ -510,30 +514,30 @@ struct ContainerVersion<S: Sequencer> {
 }
 
 impl<S: Sequencer> ContainerVersion<S> {
-    fn new(container_handle: ContainerHandle<S>) -> ContainerVersion<S> {
+    fn new() -> ContainerVersion<S> {
         ContainerVersion {
             version_cell: Atomic::new(VersionCell::new()),
-            container_handle,
+            container_handle: ContainerHandle::null(),
             link: Atomic::null(),
         }
     }
 }
 
 impl<S: Sequencer> Version<S> for ContainerVersion<S> {
-    type Data = ContainerVersion<S>;
+    type Data = ContainerHandle<S>;
     fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
     }
-    fn write(
-        &self,
-        _version_locker: &VersionLocker<S>,
-        _payload: ContainerVersion<S>,
-        _guard: &Guard,
-    ) -> Option<Log> {
+    fn write(&mut self, payload: ContainerHandle<S>) -> Option<Log> {
+        self.container_handle = payload;
         None
     }
-    fn read(&self, _snapshot: &Snapshot<S>) -> Option<&ContainerVersion<S>> {
-        None
+    fn read(&self, snapshot: &Snapshot<S>, guard: &Guard) -> Option<&ContainerHandle<S>> {
+        if self.predate(snapshot, guard) {
+            Some(&self.container_handle)
+        } else {
+            None
+        }
     }
     fn unversion(&self, guard: &Guard) -> bool {
         !self
