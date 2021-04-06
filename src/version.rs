@@ -67,6 +67,8 @@ pub trait Version<S: Sequencer> {
     }
 
     /// Unversions the versioned object to make it visible to all the present and future readers.
+    ///
+    /// Returns true if it has successfully detached the versioning information.
     fn unversion(&self, guard: &Guard) -> bool;
 }
 

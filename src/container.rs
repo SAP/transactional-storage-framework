@@ -540,9 +540,12 @@ impl<S: Sequencer> Version<S> for ContainerVersion<S> {
         }
     }
     fn unversion(&self, guard: &Guard) -> bool {
-        !self
-            .version_cell
-            .swap(Shared::null(), Relaxed, guard)
-            .is_null()
+        let version_cell_shared = self.version_cell.swap(Shared::null(), Relaxed, guard);
+        if version_cell_shared.is_null() {
+            false
+        } else {
+            unsafe { guard.defer_destroy(version_cell_shared) };
+            true
+        }
     }
 }
