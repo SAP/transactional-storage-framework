@@ -3,7 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{DeriveClock, Journal, JournalAnchor, Sequencer, Transaction};
-use crossbeam_epoch::Guard;
+
+use std::sync::atomic::Ordering::Acquire;
+
+use scc::ebr;
 
 /// Snapshot represents the state of the entire storage system at a point of time.
 ///
@@ -33,8 +36,8 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         transaction: Option<&'t Transaction<'s, S>>,
         journal: Option<&'r Journal<'s, 't, S>>,
     ) -> Snapshot<'s, 't, 'r, S> {
-        let tracker = sequencer.issue();
-        let snapshot = tracker.derive();
+        let tracker = sequencer.issue(Acquire);
+        let snapshot = tracker.clock();
         Snapshot {
             sequencer,
             tracker: Some(tracker),
@@ -52,18 +55,15 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         snapshot: &'s Snapshot<S>,
         transaction: Option<&'t Transaction<'s, S>>,
         journal: Option<&'r Journal<'s, 't, S>>,
-    ) -> Option<Snapshot<'s, 't, 'r, S>> {
-        let tracker = sequencer.forge(snapshot.tracker.as_ref().unwrap());
-        if let Some(tracker) = tracker {
-            return Some(Snapshot {
-                sequencer,
-                tracker: Some(tracker),
-                transaction: transaction.map(|transaction| (transaction, transaction.clock())),
-                journal,
-                snapshot: *snapshot.clock(),
-            });
+    ) -> Snapshot<'s, 't, 'r, S> {
+        let tracker = snapshot.tracker.clone();
+        Snapshot {
+            sequencer,
+            tracker,
+            transaction: transaction.map(|transaction| (transaction, transaction.clock())),
+            journal,
+            snapshot: *snapshot.clock(),
         }
-        None
     }
 
     /// Returns the clock value of the Snapshot.
@@ -72,20 +72,13 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
     }
 
     /// Returns true if the given transaction record is visible.
-    pub fn visible(&self, journal_anchor: &JournalAnchor<S>, guard: &Guard) -> bool {
+    pub fn visible(&self, journal_anchor: &JournalAnchor<S>, barrier: &ebr::Barrier) -> bool {
         self.transaction.as_ref().map_or_else(
             || false,
             |(transaction, transaction_clock)| {
                 let journal_ref = self.journal.as_ref().copied();
-                journal_anchor.predate(transaction, *transaction_clock, journal_ref, guard)
+                journal_anchor.predate(transaction, *transaction_clock, journal_ref, barrier)
             },
         )
-    }
-}
-
-impl<'s, 't, 'r, S: Sequencer> Drop for Snapshot<'s, 't, 'r, S> {
-    /// It has a clock value that is tracked by the sequencer, therefore it must be confiscated.
-    fn drop(&mut self) {
-        self.sequencer.confiscate(self.tracker.take().unwrap());
     }
 }

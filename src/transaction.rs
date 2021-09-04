@@ -3,10 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Error, Log, Sequencer, Snapshot, Storage, Version, VersionLocker};
-use crossbeam_epoch::{Atomic, Guard, Shared};
+
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::{Condvar, Mutex};
+
+use scc::ebr;
 
 /// Transaction is the atomic unit of work for all types of the storage operations.
 ///
@@ -18,7 +20,7 @@ pub struct Transaction<'s, S: Sequencer> {
     /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
     sequencer: &'s S,
     /// A piece of data that is shared by Journal instances, and may outlive the transaction.
-    anchor_ptr: Atomic<TransactionAnchor<S>>,
+    anchor_ptr: ebr::Arc<TransactionAnchor<S>>,
     /// A transaction-local clock generator.
     ///
     /// The clock value is updated whenever a Journal is submitted.
@@ -26,9 +28,10 @@ pub struct Transaction<'s, S: Sequencer> {
 }
 
 impl<'s, S: Sequencer> Transaction<'s, S> {
-    /// Creates a new Transaction.
+    /// Creates a new [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage, Transaction};
     ///
@@ -39,7 +42,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            anchor_ptr: Atomic::new(TransactionAnchor::new()),
+            anchor_ptr: ebr::Arc::new(TransactionAnchor::new()),
             clock: AtomicUsize::new(0),
         }
     }
@@ -390,7 +393,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         payload: Option<V::Data>,
     ) -> Result<(), Error> {
         let guard = crossbeam_epoch::pin();
-        let version_cell_shared = version.version_cell(&guard);
+        let version_cell_shared = version.version_cell_ptr(&guard);
         if version_cell_shared.is_null() {
             // The versioned object is not ready for versioning.
             return Err(Error::Fail);
@@ -417,7 +420,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
 ///
 /// VersionCell may point to a JournalAnchor.
 pub struct JournalAnchor<S: Sequencer> {
-    anchor_ptr: Atomic<TransactionAnchor<S>>,
+    anchor_ptr: ebr::Arc<TransactionAnchor<S>>,
     wait_queue: (Mutex<(bool, usize)>, Condvar),
     creation_clock: usize,
     submit_clock: usize,
@@ -435,10 +438,18 @@ impl<S: Sequencer> JournalAnchor<S> {
         }
     }
 
+    pub fn final_snapshot(&self) -> S::Clock {
+        todo!()
+    }
+
     /// Checks if the lock it has acquired can be transferred to the Journal associated with the given JournalAnchor.
     ///
     /// It returns (true, true) if the given record has started after its data was submitted to the transaction.
-    pub fn lockable(&self, journal_anchor: &JournalAnchor<S>, guard: &Guard) -> (bool, bool) {
+    pub fn lockable(
+        &self,
+        journal_anchor: &JournalAnchor<S>,
+        barrier: &ebr::Barrier,
+    ) -> (bool, bool) {
         if self.anchor_ptr.load(Relaxed, guard) != journal_anchor.anchor_ptr.load(Relaxed, guard) {
             // Different transactions.
             return (false, false);
@@ -521,21 +532,21 @@ impl<S: Sequencer> JournalAnchor<S> {
     }
 
     /// Returns true if the transaction is visible to the reader.
-    pub fn visible(&self, snapshot: &S::Clock, guard: &Guard) -> (bool, S::Clock) {
-        let anchor_ref = unsafe { self.anchor_ptr.load(Acquire, guard).deref() };
-        if anchor_ref.preliminary_snapshot == S::invalid()
+    pub fn visible(&self, snapshot: &S::Clock, barrier: &ebr::Barrier) -> (bool, S::Clock) {
+        let anchor_ref = unsafe { self.anchor_ptr.load(Acquire, barrier).deref() };
+        if anchor_ref.preliminary_snapshot == S::Clock::default()
             || anchor_ref.preliminary_snapshot >= *snapshot
         {
-            return (false, S::invalid());
+            return (false, S::Clock::default());
         }
         // The transaction will either be committed or rolled back soon.
-        if anchor_ref.final_snapshot == S::invalid() {
-            self.wait(|_| (), guard);
+        if anchor_ref.final_snapshot == S::Clock::default() {
+            self.wait(|_| (), barrier);
         }
         // Checks the final snapshot.
         let final_snapshot = anchor_ref.final_snapshot;
         (
-            final_snapshot != S::invalid() && final_snapshot <= *snapshot,
+            final_snapshot != S::Clock::default() && final_snapshot <= *snapshot,
             final_snapshot,
         )
     }
@@ -619,13 +630,13 @@ impl<S: Sequencer> RecordData<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, RecordVersion};
+    use crate::{AtomicSequencer, RecordVersion};
     use crossbeam_utils::thread;
     use std::sync::{Arc, Barrier};
 
     #[test]
     fn visibility() {
-        let storage: Storage<AtomicCounter> = Storage::new(None);
+        let storage: Storage<AtomicSequencer> = Storage::new(None);
         let versioned_object = RecordVersion::new();
         let transaction = storage.transaction();
         let barrier = Arc::new(Barrier::new(2));
@@ -661,7 +672,7 @@ mod test {
 
     #[test]
     fn wait_queue() {
-        let storage: Storage<AtomicCounter> = Storage::new(None);
+        let storage: Storage<AtomicSequencer> = Storage::new(None);
         let versioned_object = RecordVersion::new();
         let num_threads = 64;
         let barrier = Arc::new(Barrier::new(num_threads + 1));

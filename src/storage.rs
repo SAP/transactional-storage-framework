@@ -4,18 +4,19 @@
 
 use super::{Container, ContainerHandle, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
-/// Storage is a transactional data storage.
+use scc::ebr;
+
+/// [Storage] is a transactional database.
 ///
-/// Storage is a collection of internal containers that are hierarchically organized.
-/// The organization of containers resembles that of a POSIX file system as it allows symbolic linking
-/// and offers basic access control mechanisms.
+/// [Storage] is a collection of hierarchically organized [Container] instances. The [Container]
+/// organization resembles that of a `POSIX` file system as a [Container] may
+/// act as a directory of other [Container] instances, and it allows symbolic linking.
 ///
-/// Apart from containers being organized like a file system, every piece of data that a Storage
-/// manages is multi-versioned, and transactionally updated. Therefore, a Storage can be viewed
-/// as the storage layer of a huge database management system, while its flexibility allows the
-/// developers and users to develop, or plug-in new features and transaction mechanisms easily.
+/// Apart from [Container] instances being organized like a file system, every piece of data
+/// that a [Storage] manages is multi-versioned, and atomically updated. This property makes it
+/// suitable for being the underlying storage layer of a database system.
 pub struct Storage<S: Sequencer> {
-    /// The logical clock generator of the storage.
+    /// The logical clock generator of the [Storage].
     sequencer: S,
     /// The logger of the storage.
     _logger: Option<Box<dyn Logger<S> + Send + Sync>>,
@@ -24,9 +25,10 @@ pub struct Storage<S: Sequencer> {
 }
 
 impl<S: Sequencer> Storage<S> {
-    /// Creates a new Storage.
+    /// Creates a new [Storage].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, FileLogger, Storage};
     ///
@@ -42,9 +44,10 @@ impl<S: Sequencer> Storage<S> {
         }
     }
 
-    /// Starts a storage transaction.
+    /// Starts a storage [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Snapshot, Storage};
     ///
@@ -55,12 +58,13 @@ impl<S: Sequencer> Storage<S> {
         Transaction::new(self, &self.sequencer)
     }
 
-    /// Takes a snapshot of the storage.
+    /// Takes a [Snapshot] of the [Storage].
     ///
-    /// If a Transaction is given, the snapshot includes changes that have been made by the
-    /// transaction.
+    /// If a [Transaction] is given, the returned [Snapshot] includes changes that have been
+    /// made by the [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -72,9 +76,10 @@ impl<S: Sequencer> Storage<S> {
         Snapshot::new(&self.sequencer, None, None)
     }
 
-    /// Creates a new container directory.
+    /// Creates a new [Container] directory.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -94,14 +99,14 @@ impl<S: Sequencer> Storage<S> {
         journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ref = self.root_container.get(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ref.as_ref() {
                 if let Some(directory_handle) =
                     container_ref.create_directory(name, snapshot, journal)
                 {
-                    current_container_ref = directory_handle.get(&guard);
+                    current_container_ref = directory_handle.get(&barrier);
                 } else {
                     return Err(Error::Fail);
                 }
@@ -117,12 +122,13 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Gets the Container located at the given path.
+    /// Gets the [Container] located at the given path.
     ///
-    /// When a Transaction is given, and the Container at the given path is created by the
-    /// Transaction, the Container is returned.
+    /// When a [Transaction] is given, and the [Container] at the given path is created by the
+    /// [Transaction], the [Container] is returned.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -144,11 +150,11 @@ impl<S: Sequencer> Storage<S> {
     /// ```
     pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ref = self.root_container.get(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &guard);
+                current_container_ref = container_ref.search(name, &snapshot, &barrier);
             } else {
                 return None;
             }
@@ -161,11 +167,12 @@ impl<S: Sequencer> Storage<S> {
         None
     }
 
-    /// Reads the Container at the given path.
+    /// Reads the [Container] at the given path.
     ///
-    /// Getting a reference to a Container requires zero write operations on the storage.
+    /// Getting a reference to a [Container] requires zero write operations on the storage.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -188,11 +195,11 @@ impl<S: Sequencer> Storage<S> {
         snapshot: &Snapshot<S>,
     ) -> Option<R> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ref = self.root_container.get(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &guard);
+                current_container_ref = container_ref.search(name, &snapshot, &barrier);
             } else {
                 return None;
             }
@@ -203,9 +210,10 @@ impl<S: Sequencer> Storage<S> {
         None
     }
 
-    /// Links a data container to the given directory.
+    /// Links a data [Container] to the given directory.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
@@ -243,8 +251,8 @@ impl<S: Sequencer> Storage<S> {
         journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         if let Some(container_handle) = self.get(path, snapshot) {
-            let guard = crossbeam_epoch::pin();
-            let container_directory_ref = container_handle.get(&guard);
+            let barrier = ebr::Barrier::new();
+            let container_directory_ref = container_handle.get(&barrier);
             if let Some(container_ref) = container_directory_ref {
                 if container_ref.link(name, container.clone(), snapshot, journal) {
                     return Ok(container);
@@ -254,9 +262,10 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Relocates a data container.
+    /// Relocates a data [Container].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
@@ -301,8 +310,8 @@ impl<S: Sequencer> Storage<S> {
         if let Some(container_handle) = self.get(path, snapshot) {
             if let Some(target_directory_container_handle) = self.get(target_path, snapshot) {
                 if let Some((name, _)) = Self::name(&path) {
-                    let guard = crossbeam_epoch::pin();
-                    if let Some(container_ref) = target_directory_container_handle.get(&guard) {
+                    let barrier = ebr::Barrier::new();
+                    if let Some(container_ref) = target_directory_container_handle.get(&barrier) {
                         if container_ref.link(name, container_handle.clone(), snapshot, journal) {
                             let _result = self.remove(path, snapshot, journal);
                             return Ok(container_handle);
@@ -314,9 +323,10 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Removes the Container at the given path.
+    /// Removes the [Container] at the given path.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -351,13 +361,13 @@ impl<S: Sequencer> Storage<S> {
         journal: &mut Journal<S>,
     ) -> Result<ContainerHandle<S>, Error> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ref = self.root_container.get(&barrier);
         let mut current_container_name: Option<&str> = None;
         let mut parent_container_ref: Option<&Container<S>> = None;
         for name in split {
             if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(child_container_ref) = container_ref.search(name, &snapshot, &guard) {
+                if let Some(child_container_ref) = container_ref.search(name, &snapshot, &barrier) {
                     parent_container_ref.replace(container_ref);
                     current_container_name.replace(name);
                     current_container_ref.replace(child_container_ref);

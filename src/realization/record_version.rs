@@ -2,12 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AtomicCounter, Log, Snapshot, Version, VersionCell};
+use crate::{AtomicSequencer, Log, Snapshot, Version, VersionCell};
 use crossbeam_epoch::{Atomic, Guard, Shared};
 use std::sync::atomic::Ordering::Relaxed;
 
 pub struct RecordVersion {
-    version_cell: Atomic<VersionCell<AtomicCounter>>,
+    version_cell: Atomic<VersionCell<AtomicSequencer>>,
 }
 
 impl Default for RecordVersion {
@@ -23,15 +23,15 @@ impl RecordVersion {
     }
 }
 
-impl Version<AtomicCounter> for RecordVersion {
+impl Version<AtomicSequencer> for RecordVersion {
     type Data = RecordVersion;
-    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<AtomicCounter>> {
+    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<AtomicSequencer>> {
         self.version_cell.load(Relaxed, guard)
     }
     fn write(&mut self, _payload: RecordVersion) -> Option<Log> {
         None
     }
-    fn read(&self, _snapshot: &Snapshot<AtomicCounter>, _guard: &Guard) -> Option<&RecordVersion> {
+    fn read(&self, _snapshot: &Snapshot<AtomicSequencer>, _guard: &Guard) -> Option<&RecordVersion> {
         None
     }
     fn unversion(&self, guard: &Guard) -> bool {
