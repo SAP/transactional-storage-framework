@@ -2,28 +2,34 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, Log, Sequencer, Snapshot, Storage, Version, VersionLocker};
+use super::journal::Anchor as JournalAnchor;
+use super::{Error, Journal, Log, Sequencer, Snapshot, Storage, Version, VersionLocker};
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 
 use scc::ebr;
 
-/// Transaction is the atomic unit of work for all types of the storage operations.
+/// [Transaction] is the atomic unit of work for all types of the storage operations.
 ///
-/// A single strand of Journal instances constitutes a single transaction.
-/// An on-going transaction can be rewound to a certain point of time by reverting submitted Journal instances.
+/// A single strand of [Journal] constitutes a [Transaction]. An on-going transaction can be
+/// rewound to a certain point of time by reverting submitted [Journal] instances.
 pub struct Transaction<'s, S: Sequencer> {
-    /// The transaction refers to a Storage instance to persist pending changes at commit.
+    /// The transaction refers to a [Storage] to persist pending changes at commit.
     _storage: &'s Storage<S>,
-    /// The transaction refers to a Sequencer instance in order to assign a clock value for commit.
+
+    /// The transaction refers to a [Sequencer] in order to assign a [Clock](Sequencer::Clock).
     sequencer: &'s S,
-    /// A piece of data that is shared by Journal instances, and may outlive the transaction.
-    anchor_ptr: ebr::Arc<TransactionAnchor<S>>,
+
+    /// A piece of data that is shared among [Journal] instances in the [Transaction].
+    ///
+    /// It outlives the [Transaction].
+    anchor: ebr::Arc<Anchor<S>>,
+
     /// A transaction-local clock generator.
     ///
-    /// The clock value is updated whenever a Journal is submitted.
+    /// The clock value is updated whenever a [Journal] is submitted.
     clock: AtomicUsize,
 }
 
@@ -42,18 +48,20 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            anchor_ptr: ebr::Arc::new(TransactionAnchor::new()),
+            anchor: ebr::Arc::new(Anchor::new()),
             clock: AtomicUsize::new(0),
         }
     }
 
-    /// Starts a new journal, returning a new Journal instance.
+    /// Starts a new [Journal].
     ///
-    /// A Journal keeps storage changes until it is dropped.
-    /// In order to make the changes permanent, the Journal has to be submitted.
+    /// A [Journal] keeps storage changes until it is dropped. In order to make the changes
+    /// permanent, the [Journal] has to be submitted.
     ///
     /// # Examples
-    /// use tss::{AtomicCounter, Journal, Storage, Transaction};
+    ///
+    /// ```
+    /// use tss::{AtomicCounter, Storage, Transaction};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
@@ -64,9 +72,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Journal::new(self)
     }
 
-    /// Takes a snapshot of the storage including changes pending in the submitted Journals.
+    /// Takes a snapshot of the [Storage] including changes pending in the submitted [Journal]
+    /// instances.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage, Transaction};
     ///
@@ -78,11 +88,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Snapshot::new(&self.sequencer, Some(self), None)
     }
 
-    /// Gets the current local clock value of the Transaction.
+    /// Gets the current local clock value of the [Transaction].
     ///
     /// It returns the number of submitted Journal instances.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Journal, Storage, Transaction};
     ///
@@ -98,12 +109,13 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         self.clock.load(Acquire)
     }
 
-    /// Rewinds the Transaction to the given point of time.
+    /// Rewinds the [Transaction] to the given point of time.
     ///
-    /// All the changes made between the latest transaction clock and the given one are reverted.
-    /// It requires a mutable reference, thus ensuring exclusivity.
+    /// All the changes made between the latest transaction clock and the given one are
+    /// reverted. It requires a mutable reference, thus ensuring exclusivity.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Log, Storage, Transaction};
     ///
@@ -123,11 +135,8 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         if change_records.len() <= clock {
             Err(Error::Fail)
         } else {
-            let guard = crossbeam_epoch::pin();
             while change_records.len() > clock {
-                if let Some(record) = change_records.pop() {
-                    record.end(S::invalid(), &guard);
-                }
+                drop(change_records.pop());
             }
             let new_clock = change_records.len();
             self.clock.store(new_clock, Release);
@@ -135,11 +144,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
-    /// Commits the changes made by the Transaction.
+    /// Commits the changes made by the [Transaction].
     ///
-    /// It returns a Rubicon instance, giving one last chance to roll back the transaction.
+    /// It returns a [Rubicon], giving one last chance to roll back the transaction.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage, Transaction};
     ///
@@ -149,22 +159,19 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
-        let anchor_mut_ref = unsafe {
-            self.anchor_ptr
-                .load(Relaxed, crossbeam_epoch::unprotected())
-                .deref_mut()
-        };
-        anchor_mut_ref.preliminary_snapshot = self.sequencer.get();
+        let anchor_mut_ref = unsafe { &mut *(&*self.anchor as *const Anchor<S> as *mut Anchor<S>) };
+        anchor_mut_ref.preliminary_snapshot = self.sequencer.get(Relaxed);
         std::sync::atomic::fence(Release);
-        anchor_mut_ref.final_snapshot = self.sequencer.advance();
+        anchor_mut_ref.final_snapshot = self.sequencer.advance(Acquire);
         Ok(Rubicon {
             transaction: Some(self),
         })
     }
 
-    /// Rolls back the changes made by the Transaction.
+    /// Rolls back the changes made by the [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage, Transaction};
     ///
@@ -177,25 +184,30 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         drop(self);
     }
 
-    /// Post-processes transaction commit.
+    /// Returns a reference to its associated [Sequencer].
+    pub(super) fn sequencer(&self) -> &'s S {
+        self.sequencer
+    }
+
+    /// Takes a [RecordData], and records it.
+    pub(super) fn record(&self, record: RecordData<S>) -> usize {
+        let mut change_records = self.anchor.submitted_journals.lock().unwrap();
+        change_records.push(record);
+        let new_clock = change_records.len();
+        // submit_clock is updated after the contents are moved to the anchor.
+        change_records[new_clock - 1].anchor.submit_clock = new_clock;
+        self.clock.store(new_clock, Release);
+        new_clock
+    }
+
+    /// Post-processes its transaction commit.
     ///
     /// Only a Rubicon instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) {
-        let guard = crossbeam_epoch::pin();
-        let anchor_shared = self.anchor_ptr.swap(Shared::null(), Relaxed, &guard);
-        let anchor_ref = unsafe { anchor_shared.deref() };
-        anchor_ref.end(&guard);
-        unsafe { guard.defer_destroy(anchor_shared) };
-    }
-
-    /// Returns a reference to the TransactionAnchor instance.
-    fn anchor_ref(&self) -> &TransactionAnchor<S> {
-        unsafe {
-            self.anchor_ptr
-                .load(Relaxed, crossbeam_epoch::unprotected())
-                .deref()
-        }
+        let barrier = ebr::Barrier::new();
+        self.anchor.end(&barrier);
+        std::mem::forget(self);
     }
 }
 
@@ -203,7 +215,7 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     fn drop(&mut self) {
         // Rolls back the Transaction if not committed.
         if self
-            .anchor_ptr
+            .anchor
             .load(Relaxed, unsafe { crossbeam_epoch::unprotected() })
             .is_null()
         {
@@ -211,7 +223,7 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
             return;
         }
         let guard = crossbeam_epoch::pin();
-        let mut anchor_shared = self.anchor_ptr.load(Relaxed, &guard);
+        let mut anchor_shared = self.anchor.load(Relaxed, &guard);
         if !anchor_shared.is_null() {
             let anchor_ref = unsafe { anchor_shared.deref_mut() };
             anchor_ref.preliminary_snapshot = S::invalid();
@@ -271,7 +283,7 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
             self.transaction
                 .as_ref()
                 .unwrap()
-                .anchor_ptr
+                .anchor
                 .load(Relaxed, crossbeam_epoch::unprotected())
                 .deref()
                 .final_snapshot
@@ -288,284 +300,20 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
     }
 }
 
-/// Journal keeps the change history.
-///
-/// Locks and log records are accumulated in a Journal.
-pub struct Journal<'s, 't, S: Sequencer> {
-    transaction: &'t Transaction<'s, S>,
-    record: RecordData<S>,
-}
-
-impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
-    /// Creates a new Journal.
-    fn new(transaction: &'t Transaction<'s, S>) -> Journal<'s, 't, S> {
-        Journal {
-            transaction,
-            record: RecordData::new(transaction),
-        }
-    }
-
-    /// Submits a Journal, thereby advancing the logical clock of the transaction.
-    ///
-    /// This operation can be mapped to completion of statement execution in terms of database management software.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{AtomicCounter, Log, Storage, Transaction};
-    ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let transaction = storage.transaction();
-    /// let journal = transaction.start();
-    /// assert_eq!(journal.submit(), 1);
-    /// ```
-    pub fn submit(self) -> usize {
-        let mut change_records = self
-            .transaction
-            .anchor_ref()
-            .submitted_journals
-            .lock()
-            .unwrap();
-        change_records.push(self.record);
-        let new_clock = change_records.len();
-        unsafe {
-            // submit_clock is updated after the contents are moved to the anchor.
-            change_records[new_clock - 1]
-                .anchor_ptr
-                .load(Relaxed, crossbeam_epoch::unprotected())
-                .deref_mut()
-                .submit_clock = new_clock
-        };
-        self.transaction.clock.store(new_clock, Release);
-        new_clock
-    }
-
-    /// Takes a snapshot including changes in the Journal.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
-    ///
-    /// let versioned_object = RecordVersion::new();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let mut transaction = storage.transaction();
-    ///
-    /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None).is_ok());
-    ///
-    /// let snapshot = journal.snapshot();
-    /// drop(snapshot);
-    /// ```
-    pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
-        Snapshot::new(
-            self.transaction.sequencer,
-            Some(self.transaction),
-            Some(self),
-        )
-    }
-
-    /// Creates a versioned object.
-    ///
-    /// The acquired lock is never released until the Journal is dropped.
-    /// If the locked version is released without a valid clock value tagged,
-    /// the version is considered invalid and will be garbage-collected later.
-    ///
-    /// # Examples
-    /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
-    ///
-    /// let versioned_object = RecordVersion::new();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let mut transaction = storage.transaction();
-    ///
-    /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None).is_ok());
-    /// journal.submit();
-    ///
-    /// transaction.commit();
-    ///
-    /// let snapshot = storage.snapshot();
-    /// let guard = crossbeam_epoch::pin();
-    /// assert!(versioned_object.predate(&snapshot, &guard));
-    /// ```
-    pub fn create<V: Version<S>>(
-        &mut self,
-        version: &V,
-        payload: Option<V::Data>,
-    ) -> Result<(), Error> {
-        let guard = crossbeam_epoch::pin();
-        let version_cell_shared = version.version_cell_ptr(&guard);
-        if version_cell_shared.is_null() {
-            // The versioned object is not ready for versioning.
-            return Err(Error::Fail);
-        }
-        if let Some(locker) = version.create(self.record.anchor_ptr.load(Relaxed, &guard), &guard) {
-            if let Some(payload) = payload {
-                if let Ok(log_record) = locker.write(version, payload, &guard) {
-                    self.record.locks.push(locker);
-                    if let Some(log_record) = log_record {
-                        self.record.logs.push(log_record);
-                    }
-                    return Ok(());
-                }
-            } else {
-                self.record.locks.push(locker);
-                return Ok(());
-            }
-        }
-        Err(Error::Fail)
-    }
-}
-
-/// JournalAnchor is a piece of data that outlives its associated Journal.
-///
-/// VersionCell may point to a JournalAnchor.
-pub struct JournalAnchor<S: Sequencer> {
-    anchor_ptr: ebr::Arc<TransactionAnchor<S>>,
-    wait_queue: (Mutex<(bool, usize)>, Condvar),
-    creation_clock: usize,
-    submit_clock: usize,
-    _pin: std::marker::PhantomPinned,
-}
-
-impl<S: Sequencer> JournalAnchor<S> {
-    fn new(anchor_ptr: Atomic<TransactionAnchor<S>>, creation_clock: usize) -> JournalAnchor<S> {
-        JournalAnchor {
-            anchor_ptr,
-            wait_queue: (Mutex::new((false, 0)), Condvar::new()),
-            creation_clock,
-            submit_clock: usize::MAX,
-            _pin: std::marker::PhantomPinned,
-        }
-    }
-
-    pub fn final_snapshot(&self) -> S::Clock {
-        todo!()
-    }
-
-    /// Checks if the lock it has acquired can be transferred to the Journal associated with the given JournalAnchor.
-    ///
-    /// It returns (true, true) if the given record has started after its data was submitted to the transaction.
-    pub fn lockable(
-        &self,
-        journal_anchor: &JournalAnchor<S>,
-        barrier: &ebr::Barrier,
-    ) -> (bool, bool) {
-        if self.anchor_ptr.load(Relaxed, guard) != journal_anchor.anchor_ptr.load(Relaxed, guard) {
-            // Different transactions.
-            return (false, false);
-        }
-        (true, self.submit_clock <= journal_anchor.creation_clock)
-    }
-
-    /// Checks whether the transaction clock or record anchor predates self.
-    pub fn predate(
-        &self,
-        transaction: &Transaction<S>,
-        transaction_clock: usize,
-        journal: Option<&Journal<S>>,
-        guard: &Guard,
-    ) -> bool {
-        if self.anchor_ptr.load(Relaxed, guard) != transaction.anchor_ptr.load(Relaxed, guard) {
-            // Different transactions.
-            return false;
-        }
-        let submit_clock = self.submit_clock;
-        if submit_clock != usize::MAX && submit_clock <= transaction_clock {
-            // It was submitted and predates the given transaction local clock.
-            return true;
-        }
-        // The given anchor is itself.
-        journal.map_or_else(
-            || false,
-            |journal| journal.record.anchor_ptr.load(Relaxed, guard).as_raw() == self as *const _,
-        )
-    }
-
-    /// The transaction record has either been committed or rolled back.
-    fn end(&self) {
-        if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
-            if !wait_queue.0 {
-                // Setting the flag true has an immediate effect on all the versioned owned by the RecordData.
-                //  - It allows all the other transaction to have a chance to take ownership of the versioned objects.
-                wait_queue.0 = true;
-                self.wait_queue.1.notify_one();
-            }
-        }
-
-        // Asynchronously post-processes with the mutex acquired.
-        //
-        // Still, the RecordData is holding all the VersionLock instances.
-        // therefore, it firstly wakes all the waiting threads up before releasing the locks.
-        while let Ok(wait_queue) = self.wait_queue.0.lock() {
-            if wait_queue.1 == 0 {
-                break;
-            }
-            drop(wait_queue);
-        }
-    }
-
-    /// Returns the submit-time clock value.
-    pub fn submit_clock(&self) -> usize {
-        self.submit_clock
-    }
-
-    /// Waits for the final state of the RecordData to be determined.
-    pub fn wait<R, F: FnOnce(&S::Clock) -> R>(&self, f: F, guard: &Guard) -> Option<R> {
-        if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
-            while !wait_queue.0 {
-                wait_queue.1 += 1;
-                wait_queue = self.wait_queue.1.wait(wait_queue).unwrap();
-                wait_queue.1 -= 1;
-            }
-            // Before waking up the next waiting thread, call the given function with the mutex acquired.
-            //  - For instance, if the version is owned by the transaction, ownership can be transferred.
-            let result = f(unsafe { &self.anchor_ptr.load(Acquire, guard).deref().snapshot() });
-
-            // Once the thread wakes up, it is mandated to wake the next thread up.
-            if wait_queue.1 > 0 {
-                self.wait_queue.1.notify_one();
-            }
-
-            return Some(result);
-        }
-        None
-    }
-
-    /// Returns true if the transaction is visible to the reader.
-    pub fn visible(&self, snapshot: &S::Clock, barrier: &ebr::Barrier) -> (bool, S::Clock) {
-        let anchor_ref = unsafe { self.anchor_ptr.load(Acquire, barrier).deref() };
-        if anchor_ref.preliminary_snapshot == S::Clock::default()
-            || anchor_ref.preliminary_snapshot >= *snapshot
-        {
-            return (false, S::Clock::default());
-        }
-        // The transaction will either be committed or rolled back soon.
-        if anchor_ref.final_snapshot == S::Clock::default() {
-            self.wait(|_| (), barrier);
-        }
-        // Checks the final snapshot.
-        let final_snapshot = anchor_ref.final_snapshot;
-        (
-            final_snapshot != S::Clock::default() && final_snapshot <= *snapshot,
-            final_snapshot,
-        )
-    }
-}
-
 /// TransactionAnchor contains data that is required to outlive the Transaction instance.
-struct TransactionAnchor<S: Sequencer> {
+pub(super) struct Anchor<S: Sequencer> {
     /// The changes made by the transaction.
-    submitted_journals: std::sync::Mutex<Vec<RecordData<S>>>,
+    submitted_journals: Mutex<Vec<RecordData<S>>>,
     /// The clock value at the beginning of commit.
     preliminary_snapshot: S::Clock,
     /// The clock value at the end of commit.
     final_snapshot: S::Clock,
 }
 
-impl<S: Sequencer> TransactionAnchor<S> {
-    fn new() -> TransactionAnchor<S> {
-        TransactionAnchor {
-            submitted_journals: std::sync::Mutex::new(Vec::new()),
+impl<S: Sequencer> Anchor<S> {
+    fn new() -> Anchor<S> {
+        Anchor {
+            submitted_journals: Mutex::new(Vec::new()),
             /// A valid clock value is assigned when the transaction starts to commit.
             preliminary_snapshot: S::invalid(),
             /// A valid clock value is assigned while the transaction is committed.
@@ -574,10 +322,10 @@ impl<S: Sequencer> TransactionAnchor<S> {
     }
 
     /// Post-processes the logs and locks after the transaction is terminated.
-    fn end(&self, guard: &Guard) {
+    fn end(&self, barrier: &ebr::Barrier) {
         let mut change_records = self.submitted_journals.lock().unwrap();
         while let Some(record) = change_records.pop() {
-            record.end(self.final_snapshot, guard);
+            record.end(self.final_snapshot, barrier);
         }
     }
 
@@ -590,17 +338,42 @@ impl<S: Sequencer> TransactionAnchor<S> {
 /// RecordData consists of locks acquired and logs generated with the Journal.
 ///
 /// The data structure is not exposed publicly, and its internal state can indirectly be shown through JournalAnchor.
-struct RecordData<S: Sequencer> {
-    anchor_ptr: Atomic<JournalAnchor<S>>,
+pub(super) struct RecordData<S: Sequencer> {
+    anchor: ebr::Arc<JournalAnchor<S>>,
     locks: Vec<VersionLocker<S>>,
     logs: Vec<Log>,
 }
 
 impl<S: Sequencer> RecordData<S> {
+    /// Returns an [ebr::Ptr] of its [JournalAnchor].
+    pub(super) fn anchor<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, JournalAnchor<S>> {
+        self.anchor.ptr(barrier)
+    }
+
+    /// Appends a version creation change log record.
+    pub(super) fn record<V: Version<S>>(
+        &mut self,
+        version: &V,
+        locker: VersionLocker<S>,
+        payload: Option<V::Data>,
+        barrier: &ebr::Barrier,
+    ) {
+        if let Some(payload) = payload {
+            if let Ok(log_record) = locker.write(version, payload, barrier) {
+                self.locks.push(locker);
+                if let Some(log_record) = log_record {
+                    self.logs.push(log_record);
+                }
+            }
+        } else {
+            self.locks.push(locker);
+        }
+    }
+
     fn new(transaction: &Transaction<S>) -> RecordData<S> {
         RecordData {
-            anchor_ptr: Atomic::new(JournalAnchor::new(
-                transaction.anchor_ptr.clone(),
+            anchor: ebr::Arc::new(JournalAnchor::new(
+                transaction.anchor.clone(),
                 transaction.clock(),
             )),
             locks: Vec::new(),
@@ -611,18 +384,18 @@ impl<S: Sequencer> RecordData<S> {
     /// Terminates the RecordData.
     ///
     /// S::invalid() passed to this function is regarded as a revert request.
-    fn end(self, snapshot: S::Clock, guard: &Guard) {
-        let anchor_shared = self.anchor_ptr.swap(Shared::null(), Relaxed, guard);
+    fn end(self, snapshot: S::Clock, barrier: &ebr::Barrier) {
+        let anchor_shared = self.anchor.swap(Shared::null(), Relaxed, barrier);
         unsafe {
             // Marks the record terminated.
             anchor_shared.deref().end();
         }
         for lock in self.locks.into_iter() {
-            lock.release(anchor_shared, snapshot, guard);
+            lock.release(anchor_shared, snapshot, barrier);
         }
         unsafe {
             // It is safe to destroy the anchor as all the locks are released.
-            guard.defer_destroy(anchor_shared);
+            barrier.defer_destroy(anchor_shared);
         }
     }
 }

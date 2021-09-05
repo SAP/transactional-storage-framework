@@ -21,6 +21,9 @@ pub use container::{Container, ContainerData, ContainerHandle};
 mod error;
 pub use error::Error;
 
+mod journal;
+pub use journal::Journal;
+
 mod logger;
 pub use logger::{Log, Logger};
 
@@ -34,7 +37,7 @@ mod storage;
 pub use storage::Storage;
 
 mod transaction;
-pub use transaction::{Journal, JournalAnchor, Transaction};
+pub use transaction::Transaction;
 
 mod version;
 pub use version::{Version, VersionCell, VersionLocker};

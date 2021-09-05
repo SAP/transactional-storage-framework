@@ -525,7 +525,7 @@ impl<S: Sequencer> ContainerVersion<S> {
 
 impl<S: Sequencer> Version<S> for ContainerVersion<S> {
     type Data = ContainerHandle<S>;
-    fn version_cell<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
+    fn version_cell_ptr<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
     }
     fn write(&mut self, payload: ContainerHandle<S>) -> Option<Log> {
@@ -539,7 +539,7 @@ impl<S: Sequencer> Version<S> for ContainerVersion<S> {
             None
         }
     }
-    fn unversion(&self, guard: &Guard) -> bool {
+    fn consolidate(&self, guard: &Guard) -> bool {
         let version_cell_shared = self.version_cell.swap(Shared::null(), Relaxed, guard);
         if version_cell_shared.is_null() {
             false

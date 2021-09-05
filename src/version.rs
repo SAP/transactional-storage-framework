@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{JournalAnchor, Log, Sequencer, Snapshot};
+use super::journal::Anchor as JournalAnchor;
+use super::{Log, Sequencer, Snapshot};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
@@ -120,6 +121,9 @@ pub struct VersionLocker<S: Sequencer> {
     /// [VersionCell] holds a strong reference to [VersionCell].
     version_cell: ebr::Arc<VersionCell<S>>,
 
+    /// The current owner of the [VersionLocker].
+    current_owner: *const JournalAnchor<S>,
+
     /// The previous owner.
     ///
     /// There are cases where ownership is transferred from a [Journal](super::Journal) to
@@ -166,6 +170,7 @@ impl<S: Sequencer> VersionLocker<S> {
                 debug_assert_eq!(version_cell.time_point, S::Clock::default());
                 return Some(VersionLocker {
                     version_cell,
+                    current_owner: new_owner_ptr.as_raw(),
                     prev_owner: new_owner,
                 });
             }
@@ -198,6 +203,7 @@ impl<S: Sequencer> VersionLocker<S> {
                         debug_assert_eq!(version_cell.time_point, S::Clock::default());
                         return Some(VersionLocker {
                             version_cell,
+                            current_owner: new_owner_ptr.as_raw(),
                             prev_owner: old,
                         });
                     }
@@ -249,6 +255,7 @@ impl<S: Sequencer> VersionLocker<S> {
 
         Some(VersionLocker {
             version_cell,
+            current_owner: new_owner_ptr.as_raw(),
             prev_owner: None,
         })
     }
@@ -278,9 +285,19 @@ impl<S: Sequencer> Drop for VersionLocker<S> {
                 .as_ref()
                 .unwrap()
                 .final_snapshot();
-        // It must be a release-store.
-        self.version_cell
-            .owner
-            .swap((self.prev_owner.take(), ebr::Tag::None), Release);
+        let mut current_owner = self.version_cell.owner.load(Relaxed, &barrier);
+        while current_owner.as_raw() == self.current_owner {
+            // It must be a release-store.
+            if let Err((_, actual)) = self.version_cell.owner.compare_exchange(
+                current_owner,
+                (self.prev_owner.take(), ebr::Tag::None),
+                Release,
+                Relaxed,
+            ) {
+                current_owner = actual;
+            } else {
+                break;
+            }
+        }
     }
 }

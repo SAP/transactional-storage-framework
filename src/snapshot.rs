@@ -2,36 +2,40 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{DeriveClock, Journal, JournalAnchor, Sequencer, Transaction};
+use super::journal::Anchor;
+use super::{DeriveClock, Journal, Sequencer, Transaction};
 
 use std::sync::atomic::Ordering::Acquire;
 
 use scc::ebr;
 
-/// Snapshot represents the state of the entire storage system at a point of time.
+/// [Snapshot] represents the state of the entire storage system at a point of time.
 ///
-/// There are three ways of taking a snapshot.
-///  1. Storage::snapshot.
+/// There are three ways of taking a [Snapshot].
+///  1. The `snapshot` method of [Storage](super::Storage).
 ///     The snapshot consists of globally committed data at the moment.
-///  2. Transaction::snapshot.
-///     The snapshot additionally includes changes in the submitted Journal instances in the Transaction.
-///     The changes can be rolled back, therefore the snapshot cannot outlive the Transaction.
-///  3. Journal::snapshot.
-///     The snapshot additionally includes changes in a Journal that has yet to be submitted.
-///     The changes can be discarded if the Journal is not submitted, therefore the snapshot cannot outlive the Journal.
+///  2. The `snapshot` method in [Transaction].
+///     The snapshot additionally includes changes in submitted [Journal] instances in the
+///     [Transaction]. Since the changes can be rolled back, therefore the snapshot cannot
+///     outlive the [Transaction].
+///  3. The `snapshot` method in [Journal].
+///     The snapshot additionally includes changes in a [Journal] that has yet to be submitted.
+///     The changes can be discarded if the [Journal] is not submitted, therefore the snapshot
+///     cannot outlive it.
+#[derive(Clone)]
 pub struct Snapshot<'s, 't, 'r, S: Sequencer> {
     sequencer: &'s S,
-    tracker: Option<S::Tracker>,
+    tracker: S::Tracker,
     transaction: Option<(&'t Transaction<'s, S>, usize)>,
     journal: Option<&'r Journal<'s, 't, S>>,
     snapshot: S::Clock,
 }
 
 impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
-    /// Creates a new Snapshot.
+    /// Creates a new [Snapshot].
     ///
-    /// The clock value that the new Snapshot instance owns is tracked by the given Sequencer.
-    pub fn new(
+    /// The clock value that the [Snapshot] owns is tracked by the given [Sequencer].
+    pub(super) fn new(
         sequencer: &'s S,
         transaction: Option<&'t Transaction<'s, S>>,
         journal: Option<&'r Journal<'s, 't, S>>,
@@ -40,17 +44,16 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         let snapshot = tracker.clock();
         Snapshot {
             sequencer,
-            tracker: Some(tracker),
+            tracker,
             transaction: transaction.map(|transaction| (transaction, transaction.clock())),
             journal,
             snapshot,
         }
     }
 
-    /// Creates a new Snapshot from the given Snapshot.
-    ///
-    /// The clock value that the new Snapshot instance owns is tracked by the given Sequencer.
-    pub fn from(
+    /// Creates a new [Snapshot] using the [Clock](super::Sequencer::Clock) value stored in the
+    /// supplied [Snapshot].
+    pub(super) fn from(
         sequencer: &'s S,
         snapshot: &'s Snapshot<S>,
         transaction: Option<&'t Transaction<'s, S>>,
@@ -66,13 +69,13 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         }
     }
 
-    /// Returns the clock value of the Snapshot.
-    pub fn clock(&self) -> &S::Clock {
+    /// Returns the clock value of the [Snapshot].
+    pub(super) fn clock(&self) -> &S::Clock {
         &self.snapshot
     }
 
-    /// Returns true if the given transaction record is visible.
-    pub fn visible(&self, journal_anchor: &JournalAnchor<S>, barrier: &ebr::Barrier) -> bool {
+    /// Returns `true` if the given transaction record is visible.
+    pub(super) fn visible(&self, journal_anchor: &Anchor<S>, barrier: &ebr::Barrier) -> bool {
         self.transaction.as_ref().map_or_else(
             || false,
             |(transaction, transaction_clock)| {
