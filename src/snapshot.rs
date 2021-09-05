@@ -76,12 +76,6 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
 
     /// Returns `true` if the given transaction record is visible.
     pub(super) fn visible(&self, journal_anchor: &Anchor<S>, barrier: &ebr::Barrier) -> bool {
-        self.transaction.as_ref().map_or_else(
-            || false,
-            |(transaction, transaction_clock)| {
-                let journal_ref = self.journal.as_ref().copied();
-                journal_anchor.predate(transaction, *transaction_clock, journal_ref, barrier)
-            },
-        )
+        journal_anchor.visible(self.snapshot, self.transaction, self.journal, barrier)
     }
 }

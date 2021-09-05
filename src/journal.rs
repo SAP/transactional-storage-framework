@@ -91,7 +91,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         let barrier = ebr::Barrier::new();
         let version_cell_ptr = version.version_cell_ptr(&barrier);
         if let Some(version_ref) = version_cell_ptr.as_ref() {
-            if let Some(locker) = version.create(self.records.anchor(&barrier), &barrier) {
+            if let Some(locker) = version.create(self.records.anchor_ptr(&barrier), &barrier) {
                 self.records.record(version, locker, payload, &barrier);
                 return Ok(());
             }
@@ -122,10 +122,10 @@ pub(super) struct Anchor<S: Sequencer> {
     wait_queue: (Mutex<(bool, usize)>, Condvar),
     creation_clock: usize,
     submit_clock: usize,
-    _pin: std::marker::PhantomPinned,
 }
 
 impl<S: Sequencer> Anchor<S> {
+    /// Creates a new [Anchor].
     pub(super) fn new(
         transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
         creation_clock: usize,
@@ -135,73 +135,90 @@ impl<S: Sequencer> Anchor<S> {
             wait_queue: (Mutex::new((false, 0)), Condvar::new()),
             creation_clock,
             submit_clock: usize::MAX,
-            _pin: std::marker::PhantomPinned,
         }
     }
 
-    pub(super) fn final_snapshot(&self) -> S::Clock {
+    /// Returns the clock of the transaction snapshot.
+    pub(super) fn transaction_snapshot(&self) -> S::Clock {
         self.transaction_anchor.snapshot()
     }
 
-    /// Checks if the lock it has acquired can be transferred to the Journal associated with the given JournalAnchor.
+    /// Checks if the lock it has acquired can be transferred to the [Journal].
     ///
     /// It returns (true, true) if the given record has started after its data was submitted to the transaction.
     pub fn lockable(&self, journal_anchor: &Anchor<S>, barrier: &ebr::Barrier) -> (bool, bool) {
-        if self.transaction_anchor.load(Relaxed, guard)
-            != journal_anchor.transaction_anchor.load(Relaxed, guard)
-        {
+        if self.transaction_anchor.ptr(barrier) != journal_anchor.transaction_anchor.ptr(barrier) {
             // Different transactions.
             return (false, false);
         }
+        // `self` predates the given one.
         (true, self.submit_clock <= journal_anchor.creation_clock)
     }
 
-    /// Checks whether the transaction clock or record anchor predates self.
-    pub fn predate(
+    /// Checks whether the [Journal] is visible to the given [Snapshot].
+    pub fn visible(
         &self,
-        transaction: &Transaction<S>,
-        transaction_clock: usize,
+        snapshot: S::Clock,
+        transaction: Option<(&Transaction<S>, usize)>,
         journal: Option<&Journal<S>>,
-        guard: &Guard,
+        barrier: &ebr::Barrier,
     ) -> bool {
-        if self.transaction_anchor.load(Relaxed, guard)
-            != transaction.anchor_ptr.load(Relaxed, guard)
-        {
-            // Different transactions.
-            return false;
-        }
-        let submit_clock = self.submit_clock;
-        if submit_clock != usize::MAX && submit_clock <= transaction_clock {
-            // It was submitted and predates the given transaction local clock.
+        // The given anchor is itself.
+        if journal.map_or_else(
+            || false,
+            |journal| journal.records.anchor_ptr(barrier).as_raw() == self as *const _,
+        ) {
             return true;
         }
-        // The given anchor is itself.
-        journal.map_or_else(
-            || false,
-            |journal| journal.records.anchor_ptr.load(Relaxed, guard).as_raw() == self as *const _,
-        )
+
+        // The given transaction journal is ordered after `self`.
+        if let Some((transaction, transaction_clock)) = transaction {
+            if self.transaction_anchor.ptr(barrier) == transaction.anchor_ptr(barrier)
+                && self.submit_clock != usize::MAX
+                && self.submit_clock <= transaction_clock
+            {
+                // It was submitted and it predates the given transaction local clock.
+                return true;
+            }
+        }
+
+        let anchor_ref = &*self.transaction_anchor;
+        if anchor_ref.preliminary_snapshot() == S::Clock::default()
+            || anchor_ref.preliminary_snapshot() >= snapshot
+        {
+            return false;
+        }
+
+        // The transaction will either be committed or rolled back soon.
+        if anchor_ref.snapshot() == S::Clock::default() {
+            self.wait(|_| (), barrier);
+        }
+        // Checks the final snapshot.
+        anchor_ref.snapshot() != S::Clock::default() && anchor_ref.snapshot() <= snapshot
     }
 
     /// The transaction record has either been committed or rolled back.
     fn end(&self) {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
             if !wait_queue.0 {
-                // Setting the flag true has an immediate effect on all the versioned owned by the RecordData.
-                //  - It allows all the other transaction to have a chance to take ownership of the versioned objects.
+                // Setting the flag `true` has an immediate effect on all the versioned
+                // database objects owned by the `RecordData`.
+                //
+                // It allows all the other transaction to have a chance to take ownership of
+                // the versioned objects.
                 wait_queue.0 = true;
                 self.wait_queue.1.notify_one();
             }
         }
 
-        // Asynchronously post-processes with the mutex acquired.
+        // Post-processes with the mutex acquired.
         //
-        // Still, the RecordData is holding all the VersionLock instances.
-        // therefore, it firstly wakes all the waiting threads up before releasing the locks.
+        // Still, the `RecordData` is holding all the `VersionLock` instances, therefore, it
+        // firstly wakes all the waiting threads up before releasing the locks.
         while let Ok(wait_queue) = self.wait_queue.0.lock() {
             if wait_queue.1 == 0 {
                 break;
             }
-            drop(wait_queue);
         }
     }
 
@@ -210,23 +227,21 @@ impl<S: Sequencer> Anchor<S> {
         self.submit_clock
     }
 
-    /// Waits for the final state of the RecordData to be determined.
-    pub fn wait<R, F: FnOnce(&S::Clock) -> R>(&self, f: F, guard: &Guard) -> Option<R> {
+    /// Waits for the final state of the [RecordData] to be determined.
+    pub fn wait<R, F: FnOnce(S::Clock) -> R>(&self, f: F, barrier: &ebr::Barrier) -> Option<R> {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
             while !wait_queue.0 {
                 wait_queue.1 += 1;
-                wait_queue = self.wait_queue.1.wait(wait_queue).unwrap();
-                wait_queue.1 -= 1;
+                if let Ok(wait_queue) = self.wait_queue.1.wait(wait_queue) {
+                    wait_queue.1 -= 1;
+                }
             }
-            // Before waking up the next waiting thread, call the given function with the mutex acquired.
-            //  - For instance, if the version is owned by the transaction, ownership can be transferred.
-            let result = f(unsafe {
-                &self
-                    .transaction_anchor
-                    .load(Acquire, guard)
-                    .deref()
-                    .snapshot()
-            });
+            // Before waking up the next waiting thread, calls the supplied closure with the
+            // mutex acquired.
+            //
+            // For instance, if the version is owned by the transaction, ownership can be
+            // transferred.
+            let result = f(self.transaction_anchor.snapshot());
 
             // Once the thread wakes up, it is mandated to wake the next thread up.
             if wait_queue.1 > 0 {
@@ -236,25 +251,5 @@ impl<S: Sequencer> Anchor<S> {
             return Some(result);
         }
         None
-    }
-
-    /// Returns true if the transaction is visible to the reader.
-    pub fn visible(&self, snapshot: &S::Clock, barrier: &ebr::Barrier) -> (bool, S::Clock) {
-        let anchor_ref = unsafe { self.transaction_anchor.load(Acquire, barrier).deref() };
-        if anchor_ref.preliminary_snapshot == S::Clock::default()
-            || anchor_ref.preliminary_snapshot >= *snapshot
-        {
-            return (false, S::Clock::default());
-        }
-        // The transaction will either be committed or rolled back soon.
-        if anchor_ref.final_snapshot == S::Clock::default() {
-            self.wait(|_| (), barrier);
-        }
-        // Checks the final snapshot.
-        let final_snapshot = anchor_ref.final_snapshot;
-        (
-            final_snapshot != S::Clock::default() && final_snapshot <= *snapshot,
-            final_snapshot,
-        )
     }
 }

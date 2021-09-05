@@ -200,6 +200,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         new_clock
     }
 
+    /// Returns a reference to its [Anchor].
+    pub(super) fn anchor_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Anchor<S>> {
+        self.anchor.ptr(barrier)
+    }
+
     /// Post-processes its transaction commit.
     ///
     /// Only a Rubicon instance is allowed to call this function.
@@ -333,6 +338,10 @@ impl<S: Sequencer> Anchor<S> {
     pub fn snapshot(&self) -> S::Clock {
         self.final_snapshot
     }
+
+    pub(super) fn preliminary_snapshot(&self) -> S::Clock {
+        self.preliminary_snapshot
+    }
 }
 
 /// RecordData consists of locks acquired and logs generated with the Journal.
@@ -346,7 +355,10 @@ pub(super) struct RecordData<S: Sequencer> {
 
 impl<S: Sequencer> RecordData<S> {
     /// Returns an [ebr::Ptr] of its [JournalAnchor].
-    pub(super) fn anchor<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, JournalAnchor<S>> {
+    pub(super) fn anchor_ptr<'b>(
+        &self,
+        barrier: &'b ebr::Barrier,
+    ) -> ebr::Ptr<'b, JournalAnchor<S>> {
         self.anchor.ptr(barrier)
     }
 

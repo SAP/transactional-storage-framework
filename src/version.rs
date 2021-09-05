@@ -97,11 +97,6 @@ impl<S: Sequencer> VersionCell<S> {
                 // The change has been made by the transaction that predates the snapshot.
                 return true;
             }
-            if owner_ref.visible(snapshot.clock(), &barrier).0 {
-                // The owner may be committing its changes, and if so, it waits for it to
-                // finish committing.
-                return true;
-            }
         }
 
         // Checks the time point again.
@@ -152,7 +147,6 @@ impl<S: Sequencer> VersionLocker<S> {
             return None;
         }
 
-        let mut prev_owner = None;
         while let Err((passed, actual)) = version_cell.owner.compare_exchange(
             ebr::Ptr::null(),
             (new_owner_ptr.try_into_arc(), ebr::Tag::None),
@@ -284,7 +278,7 @@ impl<S: Sequencer> Drop for VersionLocker<S> {
                 .load(Relaxed, &barrier)
                 .as_ref()
                 .unwrap()
-                .final_snapshot();
+                .transaction_snapshot();
         let mut current_owner = self.version_cell.owner.load(Relaxed, &barrier);
         while current_owner.as_raw() == self.current_owner {
             // It must be a release-store.
