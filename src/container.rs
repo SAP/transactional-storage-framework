@@ -74,11 +74,18 @@ impl<S: Sequencer> Container<S> {
                     }
                     let new_directory = Self::new_directory();
                     let new_version = ebr::Arc::new(Version::new());
-                    new_version
-                        .container
-                        .swap((Some(new_directory.clone()), ebr::Tag::None), Relaxed);
                     if anchor.push(new_version, snapshot, &barrier) {
-                        return Some(new_directory);
+                        if journal
+                            .create(
+                                &*new_version,
+                                Some(ebr::AtomicArc::from(new_directory.clone())),
+                            )
+                            .is_ok()
+                        {
+                            // The transaction took ownership.
+                            return Some(new_directory);
+                        }
+                        continue;
                     }
                     return None;
                 }
@@ -88,7 +95,7 @@ impl<S: Sequencer> Container<S> {
         None
     }
 
-    /// Searches for a container associated with the given name.
+    /// Searches for a [Container] associated with the given name.
     pub fn search<'b>(
         &self,
         name: &str,
@@ -96,19 +103,13 @@ impl<S: Sequencer> Container<S> {
         barrier: &'b ebr::Barrier,
     ) -> ebr::Ptr<'b, Container<S>> {
         if let Type::Directory(directory) = &self.container {
-            let directory_shared = directory.load(Relaxed, barrier);
-            if !directory_shared.is_null() {
-                if let Some(Some(existing_container)) =
-                    unsafe { directory_shared.deref() }.read(name, |_, anchor_ptr| {
-                        let anchor_ref = unsafe { anchor_ptr.load(Acquire, &barrier).deref() };
-                        anchor_ref.get(snapshot, &barrier)
-                    })
-                {
-                    return Some(existing_container);
-                }
+            if let Some(container_ptr) =
+                directory.read(name, |_, anchor| anchor.get(snapshot, &barrier))
+            {
+                return container_ptr;
             }
         }
-        None
+        ebr::Ptr::null()
     }
 
     /// Makes a link to the given data container if the current container is a directory.
@@ -117,57 +118,34 @@ impl<S: Sequencer> Container<S> {
     pub fn link(
         &self,
         name: &str,
-        container_handle: ContainerHandle<S>,
+        container: ebr::Arc<Container<S>>,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
     ) -> bool {
-        let guard = crossbeam_epoch::pin();
-        match (&self.container, container_handle.get(&guard)) {
-            (Type::Directory(directory), Some(container)) => {
+        let barrier = ebr::Barrier::new();
+        match &self.container {
+            Type::Directory(directory) => {
                 if let Type::Data(_) = &container.container {
-                    let mut directory_shared_ptr = directory.load(Relaxed, &guard);
-                    if directory_shared_ptr.is_null() {
-                        // Creates a new directory structure.
-                        match directory.compare_exchange(
-                            Shared::null(),
-                            Owned::new(TreeIndex::new()),
-                            Relaxed,
-                            Relaxed,
-                            &guard,
-                        ) {
-                            Ok(result) => directory_shared_ptr = result,
-                            Err(result) => directory_shared_ptr = result.current,
-                        }
-                    }
-
-                    // Makes a link to the given container.
-                    let directory_ref = unsafe { directory_shared_ptr.deref() };
                     loop {
-                        if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
-                            // A container anchor under the same name exists.
-                            let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
+                        if let Some(result) = directory.read(name, |_, anchor| {
                             // Creates a new ContainerVersion for the given container.
-                            let container_version_ptr = Atomic::new(Version::new());
-                            let container_version_shared = container_version_ptr
-                                .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
+                            let new_version = ebr::Arc::new(Version::new());
                             // Pushes the new ContainerVersion into the version chain.
-                            if anchor_ref.push(container_version_shared, snapshot, &guard) {
+                            if anchor.push(new_version, snapshot, &barrier) {
                                 // Successfully pushed the new ContainerVersion.
                                 //
                                 // The new ContainerVersion is now owned by the transaction,
                                 // and therefore the transaction tries to take ownership.
                                 if journal
                                     .create(
-                                        unsafe { container_version_shared.deref() },
-                                        Some(container_handle.clone()),
+                                        &*new_version,
+                                        Some(ebr::AtomicArc::from(container.clone())),
                                     )
                                     .is_ok()
                                 {
                                     // The transaction took ownership.
                                     return true;
                                 }
-                            } else {
-                                drop(unsafe { container_version_shared.into_owned() });
                             }
                             // Failed to push the new ContainerVersion.
                             //
@@ -197,16 +175,13 @@ impl<S: Sequencer> Container<S> {
     /// Unlinks a container associated with the given name.
     pub fn unlink(&self, name: &str, snapshot: &Snapshot<S>, journal: &mut Journal<S>) -> bool {
         if let Type::Directory(directory) = &self.container {
-            let guard = crossbeam_epoch::pin();
-            let directory_shared_ptr = directory.load(Relaxed, &guard);
-            let directory_ref = unsafe { directory_shared_ptr.deref() };
-            if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
-                let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
+            let barrier = ebr::Barrier::new();
+            if let Some(result) = directory.read(name, |_, anchor| {
                 // A ContainerVersion not pointing to a valid container is pushed.
                 let container_version_ptr = Atomic::new(Version::new());
                 let container_version_shared =
                     container_version_ptr.load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
-                if anchor_ref.push(container_version_shared, snapshot, &guard) {
+                if anchor.push(container_version_shared, snapshot, &barrier) {
                     if journal
                         .create(
                             unsafe { container_version_shared.deref() },
