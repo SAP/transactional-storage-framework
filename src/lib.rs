@@ -16,7 +16,7 @@
 //! [`Transaction`] represents a storage transaction.
 
 mod container;
-pub use container::{Container, ContainerData, ContainerHandle};
+pub use container::Container;
 
 mod error;
 pub use error::Error;

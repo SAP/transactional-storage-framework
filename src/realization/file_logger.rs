@@ -2,9 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ContainerHandle, Error, Logger, Sequencer, Transaction};
+use crate::{Container, Error, Logger, Sequencer, Transaction};
 
-/// FileLogger is a file-based logger that pushes data into files sequentially.
+use scc::ebr;
+
+/// [FileLogger] is a file-based logger that pushes data into files sequentially.
 ///
 /// Checkpoint operations entail log file truncation.
 pub struct FileLogger<S: Sequencer> {
@@ -32,10 +34,10 @@ impl<S: Sequencer> Logger<S> for FileLogger<S> {
     fn persist(&self, _position: usize) -> Result<usize, Error> {
         Err(Error::Fail)
     }
-    fn recover(&self, _until: Option<S::Clock>) -> Option<ContainerHandle<S>> {
+    fn recover(&self, _until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>> {
         None
     }
-    fn load(&self, _path: &str) -> Option<ContainerHandle<S>> {
+    fn load(&self, _path: &str) -> Option<ebr::Arc<Container<S>>> {
         None
     }
 }

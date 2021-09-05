@@ -45,7 +45,7 @@ pub trait Version<S: Sequencer> {
     /// Returns a reference to the data.
     ///
     /// It does not return a reference if the [Snapshot] predates the versioned object.
-    fn read(&self, snapshot: &Snapshot<S>) -> Option<&Self::Data>;
+    fn read(&self, snapshot: &Snapshot<S>, barrier: &ebr::Barrier) -> Option<&Self::Data>;
 
     /// Returns `true` if the [Version] predates the [Snapshot].
     fn predate(&self, snapshot: &Snapshot<S>, barrier: &ebr::Barrier) -> bool {

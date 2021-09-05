@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ContainerData, Error, Sequencer, Snapshot, Transaction};
+use crate::container::DataPlane;
+use crate::{Error, Sequencer, Snapshot, Transaction};
 
 /// Table is a two dimensional array of u8.
 pub struct RelationalTable<S: Sequencer> {
@@ -17,7 +18,7 @@ impl<S: Sequencer> RelationalTable<S> {
     }
 }
 
-impl<S: Sequencer> ContainerData<S> for RelationalTable<S> {
+impl<S: Sequencer> DataPlane<S> for RelationalTable<S> {
     fn get(
         &self,
         _record_index: usize,

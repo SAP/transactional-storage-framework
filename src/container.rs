@@ -5,7 +5,6 @@
 use super::Version as VersionTrait;
 use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction, VersionCell};
 
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
 
@@ -51,7 +50,7 @@ impl<S: Sequencer> Container<S> {
     /// let container_handle: Handle = Container::new_container(container_data);
     /// ```
     pub fn new_container(
-        container_data: Box<dyn ContainerData<S> + Send + Sync>,
+        container_data: Box<dyn DataPlane<S> + Send + Sync>,
     ) -> ebr::Arc<Container<S>> {
         ebr::Arc::new(Container {
             container: Type::Data(container_data),
@@ -65,70 +64,25 @@ impl<S: Sequencer> Container<S> {
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
     ) -> Option<ebr::Arc<Container<S>>> {
-        let guard = crossbeam_epoch::pin();
+        let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
-            let mut directory_shared_ptr = directory.load(Relaxed, &guard);
-            if directory_shared_ptr.is_null() {
-                match directory.compare_exchange(
-                    Shared::null(),
-                    Owned::new(TreeIndex::new()),
-                    Relaxed,
-                    Relaxed,
-                    &guard,
-                ) {
-                    Ok(result) => directory_shared_ptr = result,
-                    Err(result) => directory_shared_ptr = result.current,
-                }
-                let directory_ref = unsafe { directory_shared_ptr.deref() };
-                loop {
-                    if let Some(Some(existing_container)) =
-                        directory_ref.read(name, |_, anchor_ptr| {
-                            let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
-                            anchor_ref.get(snapshot, &guard)
-                        })
-                    {
-                        return existing_container.create_handle();
+            loop {
+                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
+                    let container_ptr = anchor.get(snapshot, &barrier);
+                    if let Some(container) = container_ptr.try_into_arc() {
+                        return Some(container);
                     }
-
-                    let new_container_anchor_ptr = Atomic::new(ContainerAnchor::new());
-                    if let Err((_, value)) =
-                        directory_ref.insert(String::from(name), new_container_anchor_ptr.clone())
-                    {
-                        // Insertion failed.
-                        let new_container_shared = value.swap(Shared::null(), Relaxed, &guard);
-                        drop(unsafe { new_container_shared.into_owned() });
-                    } else {
-                        // The directory version has not become reachable.
-                        let new_directory = Self::new_directory();
-                        let new_directory_version_ptr = Atomic::new(Version::new());
-                        let new_directory_version_shared = new_directory_version_ptr
-                            .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
-                        // The anchor is reachable by other threads, therefore a memory fence is required.
-                        //  - It is possible that the anchor has been defer-destroyed.
-                        let new_container_anchor_shared =
-                            new_container_anchor_ptr.load(Acquire, &guard);
-                        debug_assert!(!new_container_anchor_shared.is_null());
-                        if unsafe {
-                            new_container_anchor_shared.deref().push(
-                                new_directory_version_shared,
-                                snapshot,
-                                &guard,
-                            )
-                        } && journal
-                            .create(
-                                unsafe { new_directory_version_shared.deref() },
-                                Some(new_directory.clone()),
-                            )
-                            .is_ok()
-                        {
-                            // It is safe for the transaction to have a reference to the container, as the container is
-                            // to stay intact as long as it is locked or its creation clock is not set.
-                            return Some(new_directory);
-                        }
-                        // Versioning failed.
-                        drop(unsafe { new_directory_version_shared.into_owned() });
+                    let new_directory = Self::new_directory();
+                    let new_version = ebr::Arc::new(Version::new());
+                    new_version
+                        .container
+                        .swap((Some(new_directory.clone()), ebr::Tag::None), Relaxed);
+                    if anchor.push(new_version, snapshot, &barrier) {
+                        return Some(new_directory);
                     }
+                    return None;
                 }
+                directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
         }
         None
@@ -224,7 +178,7 @@ impl<S: Sequencer> Container<S> {
                         }
 
                         // Needs to insert a new container anchor.
-                        let new_container_anchor_ptr = Atomic::new(ContainerAnchor::new());
+                        let new_container_anchor_ptr = Atomic::new(Anchor::new());
                         if let Err((_, value)) = directory_ref
                             .insert(String::from(name), new_container_anchor_ptr.clone())
                         {
@@ -273,16 +227,16 @@ impl<S: Sequencer> Container<S> {
         false
     }
 
-    /// Unloads the container from memory.
+    /// Unloads the [Container] from memory.
     pub fn unload(&self) -> Result<(), Error> {
         Err(Error::Fail)
     }
 }
 
-/// ContainerData defines the data container interfaces.
+/// [DataPlane] defines the data container interfaces.
 ///
 /// A container is a two-dimensional plane of data.
-pub trait ContainerData<S: Sequencer> {
+pub trait DataPlane<S: Sequencer> {
     /// Gets the data located at the given position.
     fn get(
         &self,
@@ -327,97 +281,77 @@ pub trait ContainerData<S: Sequencer> {
 /// [Container] can either be [Data](Type::Data) or [Directory](Type::Directory).
 enum Type<S: Sequencer> {
     /// A two dimensional data plane.
-    Data(Box<dyn ContainerData<S> + Send + Sync>),
+    Data(Box<dyn DataPlane<S> + Send + Sync>),
 
     /// A directory has links to child containers.
-    Directory(TreeIndex<String, Arc<ContainerAnchor<S>>>),
+    Directory(TreeIndex<String, Arc<Anchor<S>>>),
 }
 
-/// ContainerAnchor is the only access path to Container instances.
-struct ContainerAnchor<S: Sequencer> {
-    version_link: Atomic<Version<S>>,
+/// [Anchor] is the only access path to [Container] instances.
+struct Anchor<S: Sequencer> {
+    version_link: ebr::AtomicArc<Version<S>>,
 }
 
-impl<S: Sequencer> ContainerAnchor<S> {
-    fn new() -> ContainerAnchor<S> {
-        ContainerAnchor {
-            version_link: Atomic::null(),
+impl<S: Sequencer> Anchor<S> {
+    fn new() -> Anchor<S> {
+        Anchor {
+            version_link: ebr::AtomicArc::null(),
         }
     }
 
     /// Pushes a new version into the version chain.
     ///
-    /// Pushes the version only if the previous version is visible to the given snapshot.
-    fn push<'g>(
+    /// Pushes the version only if the previous version is visible to the given [Snapshot].
+    fn push<'b>(
         &self,
-        version_shared: Shared<'g, Version<S>>,
+        mut new_version: ebr::Arc<Version<S>>,
         snapshot: &Snapshot<S>,
-        guard: &'g Guard,
+        barrier: &'b ebr::Barrier,
     ) -> bool {
-        let version_ref = unsafe { version_shared.deref() };
-        debug_assert!(!version_ref.predate(snapshot, guard));
-        let mut current_version_shared = self.version_link.load(Relaxed, guard);
+        debug_assert!(!new_version.predate(snapshot, barrier));
+        let mut current_version_ptr = self.version_link.load(Relaxed, barrier);
         loop {
-            if !current_version_shared.is_null()
-                && !unsafe { current_version_shared.deref().predate(snapshot, guard) }
-            {
-                // The latest version is invisible to the given snapshot.
-                //
-                // It is regarded as a serialization failure error, assuming that the majority of transaction are committed,
-                // thus returning an error immediately.
-                return false;
+            if let Some(current_version_ref) = current_version_ptr.as_ref() {
+                if !current_version_ref.predate(snapshot, barrier) {
+                    // The latest version is invisible to the given snapshot.
+                    //
+                    // It is regarded as a serialization failure error.
+                    return false;
+                }
             }
-            version_ref.link.store(current_version_shared, Relaxed);
+            new_version.link.swap(
+                (current_version_ptr.try_into_arc(), ebr::Tag::None),
+                Relaxed,
+            );
             match self.version_link.compare_exchange(
-                current_version_shared,
-                version_shared,
+                current_version_ptr,
+                (Some(new_version), ebr::Tag::None),
                 Release,
                 Relaxed,
-                guard,
             ) {
                 Ok(_) => return true,
-                Err(current) => current_version_shared = current.current,
+                Err((passed, actual)) => {
+                    new_version = passed.unwrap();
+                    current_version_ptr = actual;
+                }
             }
         }
     }
 
-    /// Returns a reference to the latest Container among those predate the given snapshot.
-    fn get<'g>(&self, snapshot: &Snapshot<S>, guard: &'g Guard) -> Option<&'g Container<S>> {
-        let mut current_version_shared = self.version_link.load(Acquire, guard);
-        while !current_version_shared.is_null() {
-            let current_version_ref = unsafe { current_version_shared.deref() };
-            if current_version_ref.predate(snapshot, guard) {
-                return current_version_ref.container_handle.get(&guard);
+    /// Returns a reference to the latest [Container] among those predate the given snapshot.
+    fn get<'b>(
+        &self,
+        snapshot: &Snapshot<S>,
+        barrier: &'b ebr::Barrier,
+    ) -> ebr::Ptr<'b, Container<S>> {
+        let mut current_version_ptr = self.version_link.load(Acquire, barrier);
+        while let Some(current_version_ref) = current_version_ptr.as_ref() {
+            if current_version_ref.predate(snapshot, barrier) {
+                return current_version_ref.container.load(Relaxed, barrier);
             }
-            current_version_shared = current_version_ref.link.load(Acquire, guard);
+            current_version_ptr = current_version_ref.link.load(Acquire, barrier);
         }
-        None
-    }
-}
-
-impl<S: Sequencer> Drop for ContainerAnchor<S> {
-    fn drop(&mut self) {
-        // The anchor becomes unreachable, so does the linked list.
-        //
-        // ContainerAnchor is subject to the epoch reclamation mechanism, hence the fact that it has become unreachable,
-        // implies that there is no reader referencing a ContainerVersion attached to it.
-        let guard = unsafe { crossbeam_epoch::unprotected() };
-        let mut current_version_shared = self.version_link.load(Acquire, guard);
-        while !current_version_shared.is_null() {
-            let current_version_ref = unsafe { current_version_shared.deref() };
-            let current_version_cell_shared =
-                current_version_ref
-                    .version_cell
-                    .swap(Shared::null(), Relaxed, guard);
-            if !current_version_cell_shared.is_null() {
-                drop(unsafe { current_version_cell_shared.into_owned() });
-            }
-            let next_version_shared = current_version_ref
-                .link
-                .swap(Shared::null(), Relaxed, guard);
-            drop(unsafe { current_version_shared.into_owned() });
-            current_version_shared = next_version_shared;
-        }
+        ebr::Ptr::null()
     }
 }
 
@@ -426,42 +360,44 @@ impl<S: Sequencer> Drop for ContainerAnchor<S> {
 struct Version<S: Sequencer> {
     version_cell: ebr::AtomicArc<VersionCell<S>>,
     container: ebr::AtomicArc<Container<S>>,
-    link: ebr::AtomicArc<Container<S>>,
+    link: ebr::AtomicArc<Version<S>>,
 }
 
 impl<S: Sequencer> Version<S> {
     fn new() -> Version<S> {
         Version {
-            version_cell: Atomic::new(VersionCell::new()),
-            container: ContainerHandle::null(),
-            link: Atomic::null(),
+            version_cell: ebr::AtomicArc::new(VersionCell::default()),
+            container: ebr::AtomicArc::null(),
+            link: ebr::AtomicArc::null(),
         }
     }
 }
 
 impl<S: Sequencer> VersionTrait<S> for Version<S> {
-    type Data = ContainerHandle<S>;
-    fn version_cell_ptr<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
-        self.version_cell.load(Acquire, guard)
+    type Data = ebr::AtomicArc<Container<S>>;
+
+    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, VersionCell<S>> {
+        self.version_cell.load(Acquire, barrier)
     }
-    fn write(&mut self, payload: ContainerHandle<S>) -> Option<Log> {
+
+    fn write(&mut self, payload: Self::Data) -> Option<Log> {
         self.container = payload;
         None
     }
-    fn read(&self, snapshot: &Snapshot<S>, guard: &Guard) -> Option<&ContainerHandle<S>> {
-        if self.predate(snapshot, guard) {
+
+    fn read(&self, snapshot: &Snapshot<S>, barrier: &ebr::Barrier) -> Option<&Self::Data> {
+        if self.predate(snapshot, barrier) {
             Some(&self.container)
         } else {
             None
         }
     }
-    fn consolidate(&self, guard: &Guard) -> bool {
-        let version_cell_shared = self.version_cell.swap(Shared::null(), Relaxed, guard);
-        if version_cell_shared.is_null() {
-            false
-        } else {
-            unsafe { guard.defer_destroy(version_cell_shared) };
-            true
+
+    fn consolidate(&self, barrier: &ebr::Barrier) -> bool {
+        if let Some(version_cell) = self.version_cell.swap((None, ebr::Tag::None), Relaxed) {
+            barrier.reclaim(version_cell);
+            return true;
         }
+        false
     }
 }

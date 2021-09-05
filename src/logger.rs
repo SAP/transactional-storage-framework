@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ContainerHandle, Error, Sequencer, Transaction};
+use super::{Container, Error, Sequencer, Transaction};
+
+use scc::ebr;
 
 /// LogState denotes the location of the log data.
 pub enum LogState {
@@ -101,10 +103,10 @@ pub trait Logger<S: Sequencer> {
     /// Recovers the storage.
     ///
     /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
-    fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
+    fn recover(&self, until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>>;
 
     /// Loads a specific container.
     ///
     /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
-    fn load(&self, path: &str) -> Option<ContainerHandle<S>>;
+    fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
 }
