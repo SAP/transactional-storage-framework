@@ -68,13 +68,9 @@ impl<S: Sequencer> Container<S> {
         if let Type::Directory(directory) = &self.container {
             loop {
                 if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
-                    let container_ptr = anchor.get(snapshot, &barrier);
-                    if let Some(container) = container_ptr.try_into_arc() {
-                        return Some(container);
-                    }
-                    let new_directory = Self::new_directory();
-                    let new_version = ebr::Arc::new(Version::new());
-                    if anchor.push(new_version, snapshot, &barrier) {
+                    let new_version_ptr = anchor.install(snapshot, &barrier);
+                    if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        let new_directory = Container::new_directory();
                         if journal
                             .create(
                                 &*new_version,
@@ -83,11 +79,10 @@ impl<S: Sequencer> Container<S> {
                             .is_ok()
                         {
                             // The transaction took ownership.
-                            return Some(new_directory);
+                            return Some(new_directory.clone());
                         }
-                        continue;
                     }
-                    return None;
+                    break;
                 }
                 directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
@@ -123,80 +118,45 @@ impl<S: Sequencer> Container<S> {
         journal: &mut Journal<S>,
     ) -> bool {
         let barrier = ebr::Barrier::new();
-        match &self.container {
-            Type::Directory(directory) => {
-                if let Type::Data(_) = &container.container {
-                    loop {
-                        if let Some(result) = directory.read(name, |_, anchor| {
-                            // Creates a new ContainerVersion for the given container.
-                            let new_version = ebr::Arc::new(Version::new());
-                            // Pushes the new ContainerVersion into the version chain.
-                            if anchor.push(new_version, snapshot, &barrier) {
-                                // Successfully pushed the new ContainerVersion.
-                                //
-                                // The new ContainerVersion is now owned by the transaction,
-                                // and therefore the transaction tries to take ownership.
-                                if journal
-                                    .create(
-                                        &*new_version,
-                                        Some(ebr::AtomicArc::from(container.clone())),
-                                    )
-                                    .is_ok()
-                                {
-                                    // The transaction took ownership.
-                                    return true;
-                                }
-                            }
-                            // Failed to push the new ContainerVersion.
-                            //
-                            // It can be regarded as a serialization failure.
-                            false
-                        }) {
-                            return result;
-                        }
-
-                        // Needs to insert a new container anchor.
-                        let new_container_anchor_ptr = Atomic::new(Anchor::new());
-                        if let Err((_, value)) = directory_ref
-                            .insert(String::from(name), new_container_anchor_ptr.clone())
+        if let Type::Directory(directory) = &self.container {
+            loop {
+                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
+                    let new_version_ptr = anchor.install(snapshot, &barrier);
+                    if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        if journal
+                            .create(&*new_version, Some(ebr::AtomicArc::from(container.clone())))
+                            .is_ok()
                         {
-                            // Insertion failed.
-                            let new_container_shared = value.swap(Shared::null(), Relaxed, &guard);
-                            drop(unsafe { new_container_shared.into_owned() });
+                            // The transaction took ownership.
+                            return true;
                         }
                     }
+                    break;
                 }
-                false
+                directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
-            (_, _) => false,
         }
+        false
     }
 
     /// Unlinks a container associated with the given name.
     pub fn unlink(&self, name: &str, snapshot: &Snapshot<S>, journal: &mut Journal<S>) -> bool {
+        let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
-            let barrier = ebr::Barrier::new();
-            if let Some(result) = directory.read(name, |_, anchor| {
-                // A ContainerVersion not pointing to a valid container is pushed.
-                let container_version_ptr = Atomic::new(Version::new());
-                let container_version_shared =
-                    container_version_ptr.load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
-                if anchor.push(container_version_shared, snapshot, &barrier) {
-                    if journal
-                        .create(
-                            unsafe { container_version_shared.deref() },
-                            Some(ContainerHandle::null()),
-                        )
-                        .is_ok()
-                    {
-                        return true;
+            loop {
+                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
+                    let new_version_ptr = anchor.install(snapshot, &barrier);
+                    if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        let deleted_version = ebr::AtomicArc::null();
+                        deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
+                        if journal.create(&*new_version, Some(deleted_version)).is_ok() {
+                            // The transaction successfully deleted it.
+                            return true;
+                        }
                     }
-                } else {
-                    drop(unsafe { container_version_shared.into_owned() });
+                    break;
                 }
-                false
-            }) {
-                return result;
+                return true;
             }
         }
         false
@@ -274,43 +234,53 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
-    /// Pushes a new version into the version chain.
+    /// Installs a new unowned version into the version chain.
     ///
-    /// Pushes the version only if the previous version is visible to the given [Snapshot].
-    fn push<'b>(
+    /// It returns a pointer to the newest unowned version. It pushes the version only if
+    /// the previous version is visible to the given [Snapshot], and if not, it returns a null
+    /// pointer.
+    fn install<'b>(
         &self,
-        mut new_version: ebr::Arc<Version<S>>,
         snapshot: &Snapshot<S>,
         barrier: &'b ebr::Barrier,
-    ) -> bool {
-        debug_assert!(!new_version.predate(snapshot, barrier));
+    ) -> ebr::Ptr<'b, Version<S>> {
+        let mut new_version: Option<ebr::Arc<Version<S>>> = None;
         let mut current_version_ptr = self.version_link.load(Relaxed, barrier);
         loop {
             if let Some(current_version_ref) = current_version_ptr.as_ref() {
-                if !current_version_ref.predate(snapshot, barrier) {
+                if current_version_ref.unowned(barrier) {
+                    // An unowned version is at the head of the linked list.
+                    return current_version_ptr;
+                } else if !current_version_ref.predate(snapshot, barrier) {
                     // The latest version is invisible to the given snapshot.
                     //
                     // It is regarded as a serialization failure error.
-                    return false;
+                    break;
                 }
             }
-            new_version.link.swap(
-                (current_version_ptr.try_into_arc(), ebr::Tag::None),
-                Relaxed,
-            );
+            new_version
+                .get_or_insert(ebr::Arc::new(Version::new()))
+                .link
+                .swap(
+                    (current_version_ptr.try_into_arc(), ebr::Tag::None),
+                    Relaxed,
+                );
             match self.version_link.compare_exchange(
                 current_version_ptr,
-                (Some(new_version), ebr::Tag::None),
+                (new_version.take(), ebr::Tag::None),
                 Release,
                 Relaxed,
             ) {
-                Ok(_) => return true,
+                Ok((_, current_ptr)) => return current_ptr,
                 Err((passed, actual)) => {
-                    new_version = passed.unwrap();
+                    if let Some(passed) = passed {
+                        new_version.replace(passed);
+                    }
                     current_version_ptr = actual;
                 }
             }
         }
+        ebr::Ptr::null()
     }
 
     /// Returns a reference to the latest [Container] among those predate the given snapshot.
@@ -321,7 +291,9 @@ impl<S: Sequencer> Anchor<S> {
     ) -> ebr::Ptr<'b, Container<S>> {
         let mut current_version_ptr = self.version_link.load(Acquire, barrier);
         while let Some(current_version_ref) = current_version_ptr.as_ref() {
-            if current_version_ref.predate(snapshot, barrier) {
+            if !current_version_ref.unowned(barrier)
+                && current_version_ref.predate(snapshot, barrier)
+            {
                 return current_version_ref.container.load(Relaxed, barrier);
             }
             current_version_ptr = current_version_ref.link.load(Acquire, barrier);
@@ -333,8 +305,13 @@ impl<S: Sequencer> Anchor<S> {
 /// [Version] implements the [Version](super::Version) trait, by implementing a linked list of
 /// [Container] instance.
 struct Version<S: Sequencer> {
+    /// Its [VersionCell].
     version_cell: ebr::AtomicArc<VersionCell<S>>,
+
+    /// `container` being tagged indicates that the [Container] is deleted.
     container: ebr::AtomicArc<Container<S>>,
+
+    /// A link to its predecessor.
     link: ebr::AtomicArc<Version<S>>,
 }
 
@@ -345,6 +322,11 @@ impl<S: Sequencer> Version<S> {
             container: ebr::AtomicArc::null(),
             link: ebr::AtomicArc::null(),
         }
+    }
+
+    fn unowned(&self, barrier: &ebr::Barrier) -> bool {
+        let container_ptr = self.container.load(Relaxed, &barrier);
+        container_ptr.is_null() && container_ptr.tag() == ebr::Tag::None
     }
 }
 
