@@ -9,22 +9,22 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Relaxed};
 use std::sync::{Arc, Mutex};
 
-/// [AtomicSequencer] implements [Sequencer] by managing a single atomic counter.
+/// [AtomicCounter] implements [Sequencer] by managing a single atomic counter.
 ///
 /// An atomic counter is inefficient when the system is equipped with a large number of
 /// processors. Furthermore, the mutex-protected [BTreeMap] does not scale as the number of
 /// threads increases.
-pub struct AtomicSequencer {
+pub struct AtomicCounter {
     clock: AtomicUsize,
     min_heap: Arc<Mutex<BTreeMap<usize, usize>>>,
 }
 
-impl Sequencer for AtomicSequencer {
+impl Sequencer for AtomicCounter {
     type Clock = usize;
     type Tracker = UsizeTracker;
 
-    fn new() -> AtomicSequencer {
-        AtomicSequencer {
+    fn new() -> AtomicCounter {
+        AtomicCounter {
             clock: AtomicUsize::new(0),
             min_heap: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -89,7 +89,7 @@ impl Sequencer for AtomicSequencer {
     }
 }
 
-/// [UsizeTracker] keeps its associated [AtomicSequencer] from becoming oblivious of its clock.
+/// [UsizeTracker] keeps its associated [AtomicCounter] from becoming oblivious of its clock.
 pub struct UsizeTracker {
     clock: usize,
     min_heap: Arc<Mutex<BTreeMap<usize, usize>>>,

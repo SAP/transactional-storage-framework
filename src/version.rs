@@ -66,7 +66,6 @@ pub trait Version<S: Sequencer> {
 ///
 /// [VersionCell] store the owner of the [Version] and the time point when the version is
 /// created.
-#[derive(Default)]
 pub struct VersionCell<S: Sequencer> {
     /// The current owner of the [VersionCell].
     ///
@@ -101,6 +100,15 @@ impl<S: Sequencer> VersionCell<S> {
 
         // Checks the time point again.
         self.time_point != S::Clock::default() && self.time_point <= *snapshot.clock()
+    }
+}
+
+impl<S: Sequencer> Default for VersionCell<S> {
+    fn default() -> Self {
+        Self {
+            owner: ebr::AtomicArc::default(),
+            time_point: S::Clock::default(),
+        }
     }
 }
 
@@ -208,7 +216,7 @@ impl<S: Sequencer> VersionLocker<S> {
             if actual_owner
                 .wait(
                     |snapshot| {
-                        if *snapshot == S::Clock::default() {
+                        if snapshot == S::Clock::default() {
                             // The transaction has been rolled back, or the `Journal` has been
                             // discarded, it will try to overtake ownership.
                             //
@@ -278,7 +286,7 @@ impl<S: Sequencer> Drop for VersionLocker<S> {
                 .load(Relaxed, &barrier)
                 .as_ref()
                 .unwrap()
-                .transaction_snapshot();
+                .commit_snapshot();
         let mut current_owner = self.version_cell.owner.load(Relaxed, &barrier);
         while current_owner.as_raw() == self.current_owner {
             // It must be a release-store.

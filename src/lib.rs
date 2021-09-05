@@ -43,7 +43,7 @@ mod version;
 pub use version::{Version, VersionCell, VersionLocker};
 
 mod realization;
-pub use realization::atomic_counter::AtomicSequencer;
+pub use realization::atomic_counter::AtomicCounter;
 pub use realization::file_logger::FileLogger;
 pub use realization::record_version::RecordVersion;
 pub use realization::relational_table::RelationalTable;

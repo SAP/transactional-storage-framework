@@ -2,87 +2,60 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction, Version, VersionCell};
-use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
-use scc::TreeIndex;
+use super::Version as VersionTrait;
+use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction, VersionCell};
+
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::Arc;
 
-/// A transactional data container.
+use scc::ebr;
+use scc::TreeIndex;
+
+/// [Container] is a organized data container that is transactionally updated.
 ///
-/// Container is a container of organized data. The data organization is specified in the
-/// metadata of the container. A container may point to external data sources, or embed all the
-/// data inside it.
-///
-/// A Container may hold references to other Container instances, and those holding Container
-/// references are called a directory.
+/// A [Container] may hold references to other [Container] instances, and those holding
+/// [Container] references are called a directory.
 pub struct Container<S: Sequencer> {
-    /// It is either a Data or Directory container.
-    container: ContainerType<S>,
-    /// Container is reference counted.
-    references: AtomicUsize,
+    /// It is either a [Data](Type::Data) or [Directory](Type::Directory) container.
+    container: Type<S>,
 }
 
 impl<S: Sequencer> Container<S> {
-    /// Creates a new directory container.
+    /// Creates a new directory [Container].
     ///
     /// # Examples
+    ///
     /// ```
+    ///
     /// use tss::{AtomicCounter, Container, ContainerHandle};
-    /// type Handle = ContainerHandle<AtomicCounter>;
+    /// type Handle = scc::ebr::Arc<Container<AtomicCounter>>;
     ///
     /// let container_handle: Handle = Container::new_directory();
     /// ```
-    pub fn new_directory() -> ContainerHandle<S> {
-        ContainerHandle {
-            container_ptr: Atomic::new(Container {
-                container: ContainerType::Directory(Atomic::null()),
-                references: AtomicUsize::new(1),
-            }),
-        }
+    pub fn new_directory() -> ebr::Arc<Container<S>> {
+        ebr::Arc::new(Container {
+            container: Type::Directory(TreeIndex::default()),
+        })
     }
 
-    /// Creates a new data container.
+    /// Creates a new data [Container].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Container, ContainerHandle, RelationalTable};
-    /// type Handle = ContainerHandle<AtomicCounter>;
+    /// type Handle = scc::ebr::Arc<Container<AtomicCounter>>;
     ///
     /// let container_data = Box::new(RelationalTable::new());
     /// let container_handle: Handle = Container::new_container(container_data);
     /// ```
     pub fn new_container(
         container_data: Box<dyn ContainerData<S> + Send + Sync>,
-    ) -> ContainerHandle<S> {
-        ContainerHandle {
-            container_ptr: Atomic::new(Container {
-                container: ContainerType::Data(container_data),
-                references: AtomicUsize::new(1),
-            }),
-        }
-    }
-
-    /// Creates a new container handle out of self.
-    pub fn create_handle(&self) -> Option<ContainerHandle<S>> {
-        // Tries to increment the reference count by one.
-        let mut prev_ref = self.references.load(Relaxed);
-        loop {
-            if prev_ref == 0 {
-                return None;
-            }
-            match self
-                .references
-                .compare_exchange(prev_ref, prev_ref + 1, Relaxed, Relaxed)
-            {
-                Ok(_) => {
-                    return Some(ContainerHandle {
-                        container_ptr: Atomic::from(self as *const _),
-                    })
-                }
-                Err(value) => prev_ref = value,
-            }
-        }
+    ) -> ebr::Arc<Container<S>> {
+        ebr::Arc::new(Container {
+            container: Type::Data(container_data),
+        })
     }
 
     /// Creates a new container directory under the given name.
@@ -91,9 +64,9 @@ impl<S: Sequencer> Container<S> {
         name: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Option<ContainerHandle<S>> {
+    ) -> Option<ebr::Arc<Container<S>>> {
         let guard = crossbeam_epoch::pin();
-        if let ContainerType::Directory(directory) = &self.container {
+        if let Type::Directory(directory) = &self.container {
             let mut directory_shared_ptr = directory.load(Relaxed, &guard);
             if directory_shared_ptr.is_null() {
                 match directory.compare_exchange(
@@ -127,7 +100,7 @@ impl<S: Sequencer> Container<S> {
                     } else {
                         // The directory version has not become reachable.
                         let new_directory = Self::new_directory();
-                        let new_directory_version_ptr = Atomic::new(ContainerVersion::new());
+                        let new_directory_version_ptr = Atomic::new(Version::new());
                         let new_directory_version_shared = new_directory_version_ptr
                             .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                         // The anchor is reachable by other threads, therefore a memory fence is required.
@@ -162,19 +135,19 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Searches for a container associated with the given name.
-    pub fn search<'g>(
+    pub fn search<'b>(
         &self,
         name: &str,
         snapshot: &Snapshot<S>,
-        guard: &'g Guard,
-    ) -> Option<&'g Container<S>> {
-        if let ContainerType::Directory(directory) = &self.container {
-            let directory_shared = directory.load(Relaxed, guard);
+        barrier: &'b ebr::Barrier,
+    ) -> ebr::Ptr<'b, Container<S>> {
+        if let Type::Directory(directory) = &self.container {
+            let directory_shared = directory.load(Relaxed, barrier);
             if !directory_shared.is_null() {
                 if let Some(Some(existing_container)) =
                     unsafe { directory_shared.deref() }.read(name, |_, anchor_ptr| {
-                        let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
-                        anchor_ref.get(snapshot, &guard)
+                        let anchor_ref = unsafe { anchor_ptr.load(Acquire, &barrier).deref() };
+                        anchor_ref.get(snapshot, &barrier)
                     })
                 {
                     return Some(existing_container);
@@ -196,8 +169,8 @@ impl<S: Sequencer> Container<S> {
     ) -> bool {
         let guard = crossbeam_epoch::pin();
         match (&self.container, container_handle.get(&guard)) {
-            (ContainerType::Directory(directory), Some(container)) => {
-                if let ContainerType::Data(_) = &container.container {
+            (Type::Directory(directory), Some(container)) => {
+                if let Type::Data(_) = &container.container {
                     let mut directory_shared_ptr = directory.load(Relaxed, &guard);
                     if directory_shared_ptr.is_null() {
                         // Creates a new directory structure.
@@ -220,7 +193,7 @@ impl<S: Sequencer> Container<S> {
                             // A container anchor under the same name exists.
                             let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                             // Creates a new ContainerVersion for the given container.
-                            let container_version_ptr = Atomic::new(ContainerVersion::new());
+                            let container_version_ptr = Atomic::new(Version::new());
                             let container_version_shared = container_version_ptr
                                 .load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                             // Pushes the new ContainerVersion into the version chain.
@@ -269,14 +242,14 @@ impl<S: Sequencer> Container<S> {
 
     /// Unlinks a container associated with the given name.
     pub fn unlink(&self, name: &str, snapshot: &Snapshot<S>, journal: &mut Journal<S>) -> bool {
-        if let ContainerType::Directory(directory) = &self.container {
+        if let Type::Directory(directory) = &self.container {
             let guard = crossbeam_epoch::pin();
             let directory_shared_ptr = directory.load(Relaxed, &guard);
             let directory_ref = unsafe { directory_shared_ptr.deref() };
             if let Some(result) = directory_ref.read(name, |_, anchor_ptr| {
                 let anchor_ref = unsafe { anchor_ptr.load(Acquire, &guard).deref() };
                 // A ContainerVersion not pointing to a valid container is pushed.
-                let container_version_ptr = Atomic::new(ContainerVersion::new());
+                let container_version_ptr = Atomic::new(Version::new());
                 let container_version_shared =
                     container_version_ptr.load(Relaxed, unsafe { crossbeam_epoch::unprotected() });
                 if anchor_ref.push(container_version_shared, snapshot, &guard) {
@@ -303,55 +276,6 @@ impl<S: Sequencer> Container<S> {
     /// Unloads the container from memory.
     pub fn unload(&self) -> Result<(), Error> {
         Err(Error::Fail)
-    }
-}
-
-/// A ref-counted handle for Container.
-pub struct ContainerHandle<S: Sequencer> {
-    container_ptr: Atomic<Container<S>>,
-}
-
-impl<S: Sequencer> ContainerHandle<S> {
-    /// Creates a null handle.
-    fn null() -> ContainerHandle<S> {
-        ContainerHandle {
-            container_ptr: Atomic::null(),
-        }
-    }
-
-    /// Gets a reference to the container.
-    pub fn get<'g>(&self, guard: &'g Guard) -> Option<&'g Container<S>> {
-        let container_shared = self.container_ptr.load(Relaxed, guard);
-        if container_shared.is_null() {
-            None
-        } else {
-            Some(unsafe { container_shared.deref() })
-        }
-    }
-}
-
-impl<S: Sequencer> Clone for ContainerHandle<S> {
-    fn clone(&self) -> Self {
-        // The Container instance is protected by a positive reference count.
-        self.get(unsafe { crossbeam_epoch::unprotected() })
-            .map(|container| container.references.fetch_add(1, Relaxed));
-        ContainerHandle {
-            container_ptr: self.container_ptr.clone(),
-        }
-    }
-}
-
-impl<S: Sequencer> Drop for ContainerHandle<S> {
-    fn drop(&mut self) {
-        let guard = crossbeam_epoch::pin();
-        let container_shared = self.container_ptr.load(Relaxed, &guard);
-        if !container_shared.is_null() {
-            unsafe {
-                if container_shared.deref().references.fetch_sub(1, Relaxed) == 1 {
-                    guard.defer_destroy(container_shared);
-                }
-            }
-        }
     }
 }
 
@@ -400,22 +324,18 @@ pub trait ContainerData<S: Sequencer> {
     fn size(&self) -> (usize, usize);
 }
 
-/// ContainerDirectory is a tree storing versioned handles to sub containers.
-///
-/// Traversing a container path requires a Snapshot.
-type ContainerDirectory<S> = TreeIndex<String, Atomic<ContainerAnchor<S>>>;
-
-/// Container can either be Data or Directory.
-enum ContainerType<S: Sequencer> {
+/// [Container] can either be [Data](Type::Data) or [Directory](Type::Directory).
+enum Type<S: Sequencer> {
     /// A two dimensional data plane.
     Data(Box<dyn ContainerData<S> + Send + Sync>),
-    /// Directory has child containers without managing data.
-    Directory(Atomic<ContainerDirectory<S>>),
+
+    /// A directory has links to child containers.
+    Directory(TreeIndex<String, Arc<ContainerAnchor<S>>>),
 }
 
 /// ContainerAnchor is the only access path to Container instances.
 struct ContainerAnchor<S: Sequencer> {
-    version_link: Atomic<ContainerVersion<S>>,
+    version_link: Atomic<Version<S>>,
 }
 
 impl<S: Sequencer> ContainerAnchor<S> {
@@ -430,7 +350,7 @@ impl<S: Sequencer> ContainerAnchor<S> {
     /// Pushes the version only if the previous version is visible to the given snapshot.
     fn push<'g>(
         &self,
-        version_shared: Shared<'g, ContainerVersion<S>>,
+        version_shared: Shared<'g, Version<S>>,
         snapshot: &Snapshot<S>,
         guard: &'g Guard,
     ) -> bool {
@@ -501,40 +421,36 @@ impl<S: Sequencer> Drop for ContainerAnchor<S> {
     }
 }
 
-/// ContainerVersion implements the Version trait, embeding a Container.
-///
-/// ContainerVersion forms a linked list of containers under the same path.
-struct ContainerVersion<S: Sequencer> {
-    /// version_cell represents the creation time point.
-    version_cell: Atomic<VersionCell<S>>,
-    /// container_handle pointing to nothing represents a state where the container has been removed.
-    container_handle: ContainerHandle<S>,
-    /// link points to the immediate adjacent version of the Container.
-    link: Atomic<ContainerVersion<S>>,
+/// [Version] implements the [Version](super::Version) trait, by implementing a linked list of
+/// [Container] instance.
+struct Version<S: Sequencer> {
+    version_cell: ebr::AtomicArc<VersionCell<S>>,
+    container: ebr::AtomicArc<Container<S>>,
+    link: ebr::AtomicArc<Container<S>>,
 }
 
-impl<S: Sequencer> ContainerVersion<S> {
-    fn new() -> ContainerVersion<S> {
-        ContainerVersion {
+impl<S: Sequencer> Version<S> {
+    fn new() -> Version<S> {
+        Version {
             version_cell: Atomic::new(VersionCell::new()),
-            container_handle: ContainerHandle::null(),
+            container: ContainerHandle::null(),
             link: Atomic::null(),
         }
     }
 }
 
-impl<S: Sequencer> Version<S> for ContainerVersion<S> {
+impl<S: Sequencer> VersionTrait<S> for Version<S> {
     type Data = ContainerHandle<S>;
     fn version_cell_ptr<'g>(&self, guard: &'g Guard) -> Shared<'g, VersionCell<S>> {
         self.version_cell.load(Acquire, guard)
     }
     fn write(&mut self, payload: ContainerHandle<S>) -> Option<Log> {
-        self.container_handle = payload;
+        self.container = payload;
         None
     }
     fn read(&self, snapshot: &Snapshot<S>, guard: &Guard) -> Option<&ContainerHandle<S>> {
         if self.predate(snapshot, guard) {
-            Some(&self.container_handle)
+            Some(&self.container)
         } else {
             None
         }

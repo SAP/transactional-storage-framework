@@ -16,7 +16,7 @@ impl<S: Sequencer> FileLogger<S> {
     pub fn new(anchor: &str) -> FileLogger<S> {
         FileLogger {
             _path: String::from(anchor),
-            _invalid_clock: S::invalid(),
+            _invalid_clock: S::Clock::default(),
         }
     }
 }

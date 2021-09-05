@@ -6,7 +6,9 @@
 mod examples {
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use tss::{AtomicCounter, Storage};
+
+    use crate::AtomicCounter;
+    use crate::Storage;
 
     #[test]
     fn single_threaded() {

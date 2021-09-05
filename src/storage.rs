@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Container, ContainerHandle, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
+use super::{Container, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
 use scc::ebr;
 
@@ -21,7 +21,7 @@ pub struct Storage<S: Sequencer> {
     /// The logger of the storage.
     _logger: Option<Box<dyn Logger<S> + Send + Sync>>,
     /// The root container of the storage.
-    root_container: ContainerHandle<S>,
+    root_container: ebr::Arc<Container<S>>,
 }
 
 impl<S: Sequencer> Storage<S> {
