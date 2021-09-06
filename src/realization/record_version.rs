@@ -39,7 +39,11 @@ impl Version<AtomicCounter> for RecordVersion {
         None
     }
 
-    fn read(&self, _snapshot: &Snapshot<AtomicCounter>) -> Option<&RecordVersion> {
+    fn read(
+        &self,
+        _snapshot: &Snapshot<AtomicCounter>,
+        _barrier: &ebr::Barrier,
+    ) -> Option<&RecordVersion> {
         None
     }
 

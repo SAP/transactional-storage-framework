@@ -69,7 +69,7 @@ impl Sequencer for AtomicCounter {
     }
 
     fn update(&self, new_value: Self::Clock, order: Ordering) -> Result<Self::Clock, Self::Clock> {
-        let mut current = self.clock.load(Relaxed);
+        let current = self.clock.load(Relaxed);
         loop {
             if current >= new_value {
                 return Err(current);

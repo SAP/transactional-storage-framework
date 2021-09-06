@@ -97,27 +97,21 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
-        let mut current_container_ref = self.root_container.get(&barrier);
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(directory_handle) =
-                    container_ref.create_directory(name, snapshot, journal)
-                {
-                    current_container_ref = directory_handle.get(&barrier);
-                } else {
-                    return Err(Error::Fail);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                if let Some(directory) = container_ref.create_directory(name, snapshot, journal) {
+                    current_container_ptr = directory.ptr(&barrier);
+                    continue;
                 }
-            } else {
-                return Err(Error::Fail);
             }
+            return Err(Error::Fail);
         }
-        if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_handle() {
-                return Ok(container_handle);
-            }
+        if let Some(container) = current_container_ptr.try_into_arc() {
+            return Ok(container);
         }
         Err(Error::Fail)
     }
@@ -148,28 +142,26 @@ impl<S: Sequencer> Storage<S> {
     /// let result = storage.get("/thomas/eats/apples", &snapshot);
     /// assert!(result.is_some());
     /// ```
-    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
+    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ebr::Arc<Container<S>>> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
-        let mut current_container_ref = self.root_container.get(&barrier);
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &barrier);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                current_container_ptr = container_ref.search(name, &snapshot, &barrier);
             } else {
                 return None;
             }
         }
-        if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_handle() {
-                return Some(container_handle);
-            }
+        if let Some(container) = current_container_ptr.try_into_arc() {
+            return Some(container);
         }
         None
     }
 
     /// Reads the [Container] at the given path.
     ///
-    /// Getting a reference to a [Container] requires zero write operations on the storage.
+    /// Getting a reference to a [Container] requires zero write operations on the [Storage].
     ///
     /// # Examples
     ///
@@ -196,15 +188,15 @@ impl<S: Sequencer> Storage<S> {
     ) -> Option<R> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
-        let mut current_container_ref = self.root_container.get(&barrier);
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &barrier);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                current_container_ptr = container_ref.search(name, &snapshot, &barrier);
             } else {
                 return None;
             }
         }
-        if let Some(container_ref) = current_container_ref.take() {
+        if let Some(container_ref) = current_container_ptr.as_ref() {
             return Some(reader(container_ref));
         }
         None
@@ -245,18 +237,14 @@ impl<S: Sequencer> Storage<S> {
     pub fn link(
         &self,
         path: &str,
-        container: ContainerHandle<S>,
+        container: ebr::Arc<Container<S>>,
         name: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
-        if let Some(container_handle) = self.get(path, snapshot) {
-            let barrier = ebr::Barrier::new();
-            let container_directory_ref = container_handle.get(&barrier);
-            if let Some(container_ref) = container_directory_ref {
-                if container_ref.link(name, container.clone(), snapshot, journal) {
-                    return Ok(container);
-                }
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        if let Some(target_directory) = self.get(path, snapshot) {
+            if target_directory.link(name, container.clone(), snapshot, journal) {
+                return Ok(container);
             }
         }
         Err(Error::Fail)
@@ -306,16 +294,13 @@ impl<S: Sequencer> Storage<S> {
         target_path: &str,
         journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
-        if let Some(container_handle) = self.get(path, snapshot) {
-            if let Some(target_directory_container_handle) = self.get(target_path, snapshot) {
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        if let Some(container) = self.get(path, snapshot) {
+            if let Some(target_directory) = self.get(target_path, snapshot) {
                 if let Some((name, _)) = Self::name(&path) {
-                    let barrier = ebr::Barrier::new();
-                    if let Some(container_ref) = target_directory_container_handle.get(&barrier) {
-                        if container_ref.link(name, container_handle.clone(), snapshot, journal) {
-                            let _result = self.remove(path, snapshot, journal);
-                            return Ok(container_handle);
-                        }
+                    if target_directory.link(name, container.clone(), snapshot, journal) {
+                        let _result = self.remove(path, snapshot, journal);
+                        return Ok(container);
                     }
                 }
             }
@@ -323,7 +308,7 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Removes the [Container] at the given path.
+    /// Removes the [Container] from the given directory.
     ///
     /// # Examples
     ///
@@ -359,38 +344,31 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
-        let mut current_container_ref = self.root_container.get(&barrier);
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         let mut current_container_name: Option<&str> = None;
-        let mut parent_container_ref: Option<&Container<S>> = None;
+        let mut parent_container_ptr = ebr::Ptr::null();
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(child_container_ref) = container_ref.search(name, &snapshot, &barrier) {
-                    parent_container_ref.replace(container_ref);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                let child_container_ptr = container_ref.search(name, &snapshot, &barrier);
+                if !child_container_ptr.is_null() {
+                    parent_container_ptr = current_container_ptr;
                     current_container_name.replace(name);
-                    current_container_ref.replace(child_container_ref);
-                } else {
-                    return Err(Error::Fail);
+                    current_container_ptr = child_container_ptr;
+                    continue;
                 }
-            } else {
-                return Err(Error::Fail);
             }
+            return Err(Error::Fail);
         }
-        if let (
-            Some(current_container_ref),
-            Some(current_container_name),
-            Some(parent_container_ref),
-        ) = (
-            current_container_ref.take(),
+        if let (Some(current_container), Some(current_container_name), Some(parent_container_ref)) = (
+            current_container_ptr.try_into_arc(),
             current_container_name.take(),
-            parent_container_ref.take(),
+            parent_container_ptr.as_ref(),
         ) {
-            if let Some(container_handle) = current_container_ref.create_handle() {
-                if parent_container_ref.unlink(current_container_name, snapshot, journal) {
-                    return Ok(container_handle);
-                }
+            if parent_container_ref.unlink(current_container_name, snapshot, journal) {
+                return Ok(current_container);
             }
         }
         Err(Error::Fail)

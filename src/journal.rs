@@ -95,12 +95,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         payload: Option<V::Data>,
     ) -> Result<(), Error> {
         let barrier = ebr::Barrier::new();
-        let version_cell_ptr = version.version_cell_ptr(&barrier);
-        if let Some(version_ref) = version_cell_ptr.as_ref() {
-            if let Some(locker) = version.create(self.record.anchor_ptr(&barrier), &barrier) {
-                self.record.append(version, locker, payload, &barrier);
-                return Ok(());
-            }
+        if let Some(locker) = version.create(self.record.anchor_ptr(&barrier), &barrier) {
+            self.record.append(version, locker, payload, &barrier);
+            return Ok(());
         }
 
         // The versioned object is not ready for versioning.
@@ -283,7 +280,7 @@ impl<S: Sequencer> Anchor<S> {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
             while !wait_queue.0 {
                 wait_queue.1 += 1;
-                if let Ok(wait_queue) = self.wait_queue.1.wait(wait_queue) {
+                if let Ok(mut wait_queue) = self.wait_queue.1.wait(wait_queue) {
                     wait_queue.1 -= 1;
                 }
             }

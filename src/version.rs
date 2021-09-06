@@ -157,7 +157,7 @@ impl<S: Sequencer> VersionLocker<S> {
 
         while let Err((passed, actual)) = version_cell.owner.compare_exchange(
             ebr::Ptr::null(),
-            (new_owner_ptr.try_into_arc(), ebr::Tag::None),
+            (new_owner.take(), ebr::Tag::None),
             Relaxed,
             Relaxed,
         ) {
@@ -224,11 +224,13 @@ impl<S: Sequencer> VersionLocker<S> {
                             // transaction overtook ownership.
                             if let Err((passed, _)) = version_cell.owner.compare_exchange(
                                 actual,
-                                (new_owner, ebr::Tag::None),
+                                (new_owner.take(), ebr::Tag::None),
                                 Acquire,
                                 Relaxed,
                             ) {
-                                new_owner = passed;
+                                if let Some(passed) = passed {
+                                    new_owner.replace(passed);
+                                }
                                 return false;
                             }
                             return true;
