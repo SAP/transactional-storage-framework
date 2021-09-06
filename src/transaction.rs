@@ -323,14 +323,21 @@ impl<S: Sequencer> Anchor<S> {
 mod test {
     use super::*;
     use crate::{AtomicCounter, RecordVersion, Version};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Once};
     use std::thread;
 
     #[test]
     fn visibility() {
-        let storage: Storage<AtomicCounter> = Storage::new(None);
+        static mut STORAGE: Option<Storage<AtomicCounter>> = None;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| unsafe {
+            STORAGE.replace(Storage::new(None));
+        });
+
+        let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
         let versioned_object = Arc::new(RecordVersion::new());
-        let transaction = Arc::new(Mutex::new(storage.transaction()));
+        let transaction = Arc::new(storage_ref.transaction());
         let barrier = Arc::new(Barrier::new(2));
 
         let versioned_object_cloned = versioned_object.clone();
@@ -340,44 +347,30 @@ mod test {
             barrier_cloned.wait();
 
             // Step 1. Tries to acquire lock acquired by an active transaction journal.
-            if let Ok(transaction) = transaction_cloned.lock() {
-                let mut journal = transaction.start();
-                assert!(journal.create(&*versioned_object_cloned, None).is_err());
-                drop(journal);
-            } else {
-                unreachable!();
-            }
+            let mut journal = transaction_cloned.start();
+            assert!(journal.create(&*versioned_object_cloned, None).is_err());
+            drop(journal);
 
             // Step 2. Tries to acquire lock acquired by a submitted transaction journal.
             barrier_cloned.wait();
             barrier_cloned.wait();
 
-            if let Ok(transaction) = transaction_cloned.lock() {
-                let mut journal = transaction.start();
-                assert!(journal.create(&*versioned_object_cloned, None).is_ok());
-                journal.submit();
-            } else {
-                unreachable!();
-            }
+            let mut journal = transaction_cloned.start();
+            assert!(journal.create(&*versioned_object_cloned, None).is_ok());
+            assert_eq!(journal.submit(), 2);
         });
 
-        let mut journal = None;
-        if let Ok(transaction) = transaction.lock() {
-            journal.replace(transaction.start());
-            assert!(journal
-                .as_mut()
-                .unwrap()
-                .create(&*versioned_object, None)
-                .is_ok());
-        } else {
-            unreachable!();
-        }
+        let mut journal = transaction.start();
+        assert!(journal.create(&*versioned_object, None).is_ok());
+
         barrier.wait();
         barrier.wait();
-        journal.map(|j| j.submit());
+        assert_eq!(journal.submit(), 1);
         barrier.wait();
 
-        if let Ok(transaction) = transaction.into_inner() {
+        assert!(thread_handle.join().is_ok());
+
+        if let Ok(transaction) = Arc::try_unwrap(transaction) {
             assert!(transaction.commit().is_ok());
         } else {
             unreachable!();
@@ -409,7 +402,7 @@ mod test {
         let mut journal = transaction.start();
         let result = journal.create(&*versioned_object, None);
         assert!(result.is_ok());
-        journal.submit();
+        assert_eq!(journal.submit(), 1);
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(transaction.commit().is_ok());
         barrier.wait();

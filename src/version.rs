@@ -308,3 +308,5 @@ impl<S: Sequencer> Drop for Locker<S> {
         }
     }
 }
+
+unsafe impl<S: Sequencer> Send for Locker<S> {}
