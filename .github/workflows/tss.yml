@@ -25,7 +25,7 @@ jobs:
     - name: Debug - Build
       run: cargo build --verbose
     - name: Debug - Run tests
-      run: cargo test -p tss-tests
+      run: cargo test --verbose
     - name: Release - Build
       run: cargo build --release --verbose
     - name: Release - Run tests
