@@ -2,9 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ContainerHandle, Error, Sequencer, Transaction};
+use super::{Container, Error, Sequencer, Transaction};
 
-/// LogState denotes the location of the log data.
+use scc::ebr;
+
+/// [`LogState`] denotes the location of the log data.
 pub enum LogState {
     /// The log data is in memory.
     Memory(Vec<u8>),
@@ -36,13 +38,18 @@ impl Default for Log {
 
 impl Log {
     /// Creates a new Log.
+    #[must_use]
     pub fn new() -> Log {
-        Default::default()
+        Log::default()
     }
 
     /// Passes the log data to the logger.
     ///
     /// The given transaction can be used by the logger for transaction recovery.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
     pub fn submit<S: Sequencer, L: Logger<S>>(
         &mut self,
         logger: &L,
@@ -64,6 +71,10 @@ impl Log {
     }
 
     /// Makes sure that the pending log is persisted.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
     pub fn persist<S: Sequencer, L: Logger<S>>(&mut self, logger: &L) -> Result<(), Error> {
         if let Some(LogState::Pending(_, end_position)) = self.log.take() {
             match logger.persist(end_position) {
@@ -87,6 +98,10 @@ pub trait Logger<S: Sequencer> {
     ///
     /// It returns the start and end log sequence number pair of the submitted data.
     /// The given transaction is associated to the log data, thereby enabling it to recover transactions.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
     fn submit(
         &self,
         log_data: Vec<u8>,
@@ -96,15 +111,19 @@ pub trait Logger<S: Sequencer> {
     /// Persists the log buffer up to the given log position.
     ///
     /// It returns the max flushed log sequence number.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
     fn persist(&self, position: usize) -> Result<usize, Error>;
 
     /// Recovers the storage.
     ///
     /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
-    fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
+    fn recover(&self, until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>>;
 
     /// Loads a specific container.
     ///
     /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
-    fn load(&self, path: &str) -> Option<ContainerHandle<S>>;
+    fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
 }

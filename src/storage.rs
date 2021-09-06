@@ -2,37 +2,40 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Container, ContainerHandle, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
+use super::{Container, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
-/// Storage is a transactional data storage.
+use scc::ebr;
+
+/// [Storage] is a transactional database.
 ///
-/// Storage is a collection of internal containers that are hierarchically organized.
-/// The organization of containers resembles that of a POSIX file system as it allows symbolic linking
-/// and offers basic access control mechanisms.
+/// [Storage] is a collection of hierarchically organized [Container] instances. The [Container]
+/// organization resembles that of a `POSIX` file system as a [Container] may
+/// act as a directory of other [Container] instances, and it allows symbolic linking.
 ///
-/// Apart from containers being organized like a file system, every piece of data that a Storage
-/// manages is multi-versioned, and transactionally updated. Therefore, a Storage can be viewed
-/// as the storage layer of a huge database management system, while its flexibility allows the
-/// developers and users to develop, or plug-in new features and transaction mechanisms easily.
+/// Apart from [Container] instances being organized like a file system, every piece of data
+/// that a [Storage] manages is multi-versioned, and atomically updated. This property makes it
+/// suitable for being the underlying storage layer of a database system.
 pub struct Storage<S: Sequencer> {
-    /// The logical clock generator of the storage.
+    /// The logical clock generator of the [Storage].
     sequencer: S,
     /// The logger of the storage.
     _logger: Option<Box<dyn Logger<S> + Send + Sync>>,
     /// The root container of the storage.
-    root_container: ContainerHandle<S>,
+    root_container: ebr::Arc<Container<S>>,
 }
 
 impl<S: Sequencer> Storage<S> {
-    /// Creates a new Storage.
+    /// Creates a new [Storage].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, FileLogger, Storage};
     ///
     /// let logger = Box::new(FileLogger::new("/home/dba/db"));
     /// let storage: Storage<AtomicCounter> = Storage::new(Some(logger));
     /// ```
+    #[must_use]
     pub fn new(logger: Option<Box<dyn Logger<S> + Send + Sync>>) -> Storage<S> {
         let root_container = Container::new_directory();
         Storage {
@@ -42,9 +45,10 @@ impl<S: Sequencer> Storage<S> {
         }
     }
 
-    /// Starts a storage transaction.
+    /// Starts a storage [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Snapshot, Storage};
     ///
@@ -55,12 +59,13 @@ impl<S: Sequencer> Storage<S> {
         Transaction::new(self, &self.sequencer)
     }
 
-    /// Takes a snapshot of the storage.
+    /// Takes a [Snapshot] of the [Storage].
     ///
-    /// If a Transaction is given, the snapshot includes changes that have been made by the
-    /// transaction.
+    /// If a [Transaction] is given, the returned [Snapshot] includes changes that have been
+    /// made by the [Transaction].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -72,9 +77,14 @@ impl<S: Sequencer> Storage<S> {
         Snapshot::new(&self.sequencer, None, None)
     }
 
-    /// Creates a new container directory.
+    /// Creates a new [Container] directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target path is unavailable for the transaction, an error is returned.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -92,37 +102,32 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(directory_handle) =
-                    container_ref.create_directory(name, snapshot, journal)
-                {
-                    current_container_ref = directory_handle.get(&guard);
-                } else {
-                    return Err(Error::Fail);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                if let Some(directory) = container_ref.create_directory(name, snapshot, journal) {
+                    current_container_ptr = directory.ptr(&barrier);
+                    continue;
                 }
-            } else {
-                return Err(Error::Fail);
             }
+            return Err(Error::Fail);
         }
-        if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_handle() {
-                return Ok(container_handle);
-            }
+        if let Some(container) = current_container_ptr.try_into_arc() {
+            return Ok(container);
         }
         Err(Error::Fail)
     }
 
-    /// Gets the Container located at the given path.
+    /// Gets the [Container] located at the given path.
     ///
-    /// When a Transaction is given, and the Container at the given path is created by the
-    /// Transaction, the Container is returned.
+    /// When a [Transaction] is given, and the [Container] at the given path is created by the
+    /// [Transaction], the [Container] is returned.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -142,30 +147,29 @@ impl<S: Sequencer> Storage<S> {
     /// let result = storage.get("/thomas/eats/apples", &snapshot);
     /// assert!(result.is_some());
     /// ```
-    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ContainerHandle<S>> {
+    pub fn get(&self, path: &str, snapshot: &Snapshot<S>) -> Option<ebr::Arc<Container<S>>> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &guard);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                current_container_ptr = container_ref.search(name, snapshot, &barrier);
             } else {
                 return None;
             }
         }
-        if let Some(container_ref) = current_container_ref.take() {
-            if let Some(container_handle) = container_ref.create_handle() {
-                return Some(container_handle);
-            }
+        if let Some(container) = current_container_ptr.try_into_arc() {
+            return Some(container);
         }
         None
     }
 
-    /// Reads the Container at the given path.
+    /// Reads the [Container] at the given path.
     ///
-    /// Getting a reference to a Container requires zero write operations on the storage.
+    /// Getting a reference to a [Container] requires zero write operations on the [Storage].
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -188,24 +192,29 @@ impl<S: Sequencer> Storage<S> {
         snapshot: &Snapshot<S>,
     ) -> Option<R> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                current_container_ref = container_ref.search(name, &snapshot, &guard);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                current_container_ptr = container_ref.search(name, snapshot, &barrier);
             } else {
                 return None;
             }
         }
-        if let Some(container_ref) = current_container_ref.take() {
+        if let Some(container_ref) = current_container_ptr.as_ref() {
             return Some(reader(container_ref));
         }
         None
     }
 
-    /// Links a data container to the given directory.
+    /// Links a data [Container] to the given directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target directory is unavailable for the transaction, an error is returned.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
@@ -237,26 +246,27 @@ impl<S: Sequencer> Storage<S> {
     pub fn link(
         &self,
         path: &str,
-        container: ContainerHandle<S>,
+        container: ebr::Arc<Container<S>>,
         name: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
-        if let Some(container_handle) = self.get(path, snapshot) {
-            let guard = crossbeam_epoch::pin();
-            let container_directory_ref = container_handle.get(&guard);
-            if let Some(container_ref) = container_directory_ref {
-                if container_ref.link(name, container.clone(), snapshot, journal) {
-                    return Ok(container);
-                }
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        if let Some(target_directory) = self.get(path, snapshot) {
+            if target_directory.link(name, container.clone(), snapshot, journal) {
+                return Ok(container);
             }
         }
         Err(Error::Fail)
     }
 
-    /// Relocates a data container.
+    /// Relocates a data [Container].
+    ///
+    /// # Errors
+    ///
+    /// If the target directory is unavailable for the transaction, an error is returned.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
     ///
@@ -297,16 +307,13 @@ impl<S: Sequencer> Storage<S> {
         target_path: &str,
         journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
-        if let Some(container_handle) = self.get(path, snapshot) {
-            if let Some(target_directory_container_handle) = self.get(target_path, snapshot) {
-                if let Some((name, _)) = Self::name(&path) {
-                    let guard = crossbeam_epoch::pin();
-                    if let Some(container_ref) = target_directory_container_handle.get(&guard) {
-                        if container_ref.link(name, container_handle.clone(), snapshot, journal) {
-                            let _result = self.remove(path, snapshot, journal);
-                            return Ok(container_handle);
-                        }
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        if let Some(container) = self.get(path, snapshot) {
+            if let Some(target_directory) = self.get(target_path, snapshot) {
+                if let Some((name, _)) = Self::name(path) {
+                    if target_directory.link(name, container.clone(), snapshot, journal) {
+                        let _result = self.remove(path, snapshot, journal);
+                        return Ok(container);
                     }
                 }
             }
@@ -314,9 +321,14 @@ impl<S: Sequencer> Storage<S> {
         Err(Error::Fail)
     }
 
-    /// Removes the Container at the given path.
+    /// Removes the [Container] from the given directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target [Container] is missing, it returns an error.
     ///
     /// # Examples
+    ///
     /// ```
     /// use tss::{AtomicCounter, Storage};
     ///
@@ -349,38 +361,31 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
-    ) -> Result<ContainerHandle<S>, Error> {
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
-        let guard = crossbeam_epoch::pin();
-        let mut current_container_ref = self.root_container.get(&guard);
+        let barrier = ebr::Barrier::new();
+        let mut current_container_ptr = self.root_container.ptr(&barrier);
         let mut current_container_name: Option<&str> = None;
-        let mut parent_container_ref: Option<&Container<S>> = None;
+        let mut parent_container_ptr = ebr::Ptr::null();
         for name in split {
-            if let Some(container_ref) = current_container_ref.as_ref() {
-                if let Some(child_container_ref) = container_ref.search(name, &snapshot, &guard) {
-                    parent_container_ref.replace(container_ref);
+            if let Some(container_ref) = current_container_ptr.as_ref() {
+                let child_container_ptr = container_ref.search(name, snapshot, &barrier);
+                if !child_container_ptr.is_null() {
+                    parent_container_ptr = current_container_ptr;
                     current_container_name.replace(name);
-                    current_container_ref.replace(child_container_ref);
-                } else {
-                    return Err(Error::Fail);
+                    current_container_ptr = child_container_ptr;
+                    continue;
                 }
-            } else {
-                return Err(Error::Fail);
             }
+            return Err(Error::Fail);
         }
-        if let (
-            Some(current_container_ref),
-            Some(current_container_name),
-            Some(parent_container_ref),
-        ) = (
-            current_container_ref.take(),
+        if let (Some(current_container), Some(current_container_name), Some(parent_container_ref)) = (
+            current_container_ptr.try_into_arc(),
             current_container_name.take(),
-            parent_container_ref.take(),
+            parent_container_ptr.as_ref(),
         ) {
-            if let Some(container_handle) = current_container_ref.create_handle() {
-                if parent_container_ref.unlink(current_container_name, snapshot, journal) {
-                    return Ok(container_handle);
-                }
+            if parent_container_ref.unlink(current_container_name, snapshot, journal) {
+                return Ok(current_container);
             }
         }
         Err(Error::Fail)

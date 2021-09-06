@@ -2,40 +2,50 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#![deny(missing_docs, warnings, clippy::all, clippy::pedantic)]
+
 //! Transactional Storage Framework
 //!
-//! # [`tss::Storage`]
-//! [`tss::Storage`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
-//! # [`tss::Container`]
-//! [`tss::Container`] is a hierachical data container that [`tss::Storage`] manages.
-//! # [`tss::Transaction`]
-//! [`tss::Transaction`] represents storage transactions.
+//! # [`Storage`]
+//! [`Storage`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
 //!
-//! [`tss::Storage`]: storage::Storage
-//! [`tss::Container`]: container::Container
-//! [`tss::Transaction`]: transaction::Transaction
+//! # [`Container`]
+//! [`Container`] is hierachical data container that a [`Storage`] manages.
+//!
+//! # [`Transaction`]
+//! [`Transaction`] represents a storage transaction.
 
-// Public traits.
 mod container;
-mod error;
-mod logger;
-mod sequencer;
-mod snapshot;
-mod storage;
-mod transaction;
-mod version;
-pub use container::{Container, ContainerData, ContainerHandle};
-pub use error::Error;
-pub use logger::{Log, Logger};
-pub use sequencer::{DeriveClock, Sequencer};
-pub use snapshot::Snapshot;
-pub use storage::Storage;
-pub use transaction::{Journal, JournalAnchor, Transaction};
-pub use version::{Version, VersionCell, VersionLocker};
+pub use container::Container;
 
-// Implementation.
-mod r#impl;
-pub use r#impl::atomic_counter::AtomicCounter;
-pub use r#impl::file_logger::FileLogger;
-pub use r#impl::record_version::RecordVersion;
-pub use r#impl::relational_table::RelationalTable;
+mod error;
+pub use error::Error;
+
+mod journal;
+pub use journal::Journal;
+
+mod logger;
+pub use logger::{Log, Logger};
+
+mod sequencer;
+pub use sequencer::{DeriveClock, Sequencer};
+
+mod snapshot;
+pub use snapshot::Snapshot;
+
+mod storage;
+pub use storage::Storage;
+
+mod transaction;
+pub use transaction::{Rubicon, Transaction};
+
+pub mod version;
+pub use version::Version;
+
+mod realization;
+pub use realization::atomic_counter::AtomicCounter;
+pub use realization::file_logger::FileLogger;
+pub use realization::record_version::RecordVersion;
+pub use realization::relational_table::RelationalTable;
+
+mod tests;

@@ -2,71 +2,87 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-/// Sequencer acts as a logical clock for the storage system.
-///
-/// The logical clock is the most important feature of a transactional storage system as it defines
-/// the flow of time.
-///
-/// Developers are able to choose the mechanism by implementing the Sequencer trait, for instance,
-/// the system timestamp generator can directly be used, or a hardware counter can also be
-/// incorporated.
-pub trait Sequencer {
-    /// Clock is a partially ordered type that the Sequencer relies on.
-    ///
-    /// It should satisfy Clone, Send, Sync and PartialOrd.
-    ///
-    /// Send and Sync are required as a single instance of Clock can be shared among threads.
-    /// Copy is required as a logical clock value can be copied to various places.
-    /// PartialOrd allows developers to implement a Lamport vector clock generator.
-    ///
-    /// A Sequencer implementation must be able to calculate a special value that is used to represent
-    /// a snapshot that is invisible to all the present and future readers.
-    type Clock: Clone + Copy + PartialOrd + Send + Sync;
+use std::fmt::Debug;
+use std::sync::atomic::Ordering;
 
-    /// Tracker allows the sequencer to track all the issued clock values.
-    type Tracker: DeriveClock<Self::Clock>;
+/// [Sequencer] acts as a logical clock for the storage system.
+///
+/// A logical clock is the most important feature of a transactional storage system as it
+/// defines the flow of time.
+///
+/// Developers are able to implement their own sequencing mechanism other than a simple atomic
+/// counter by using the [Sequencer] trait, for instance, the system timestamp generator can
+/// directly be used, or an efficient hardware-aided counter can also be incorporated.
+pub trait Sequencer: 'static {
+    /// [Clock](Sequencer::Clock) is a partially ordered type representing a single point of
+    /// time in a system.
+    ///
+    /// It should satisfy [Clone], [Copy], [`PartialEq`], [`PartialOrd`], [Send], and [Sync].
+    ///
+    /// [Clone], [Copy], [Send] and [Sync] are required as the value can be copied sent
+    /// frequently. [`PartialEq`] and [`PartialOrd`] allow developers to implement a
+    /// floating-point, or a `Lamport` vector clock generator.
+    ///
+    /// The [Default] value is treated an `invisible` time point in the system.
+    type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
 
-    /// Creates a new instance of Sequence.
+    /// [Tracker](Sequencer::Tracker) allows the sequencer to track all the issued
+    /// [Clock](Sequencer::Clock) instances.
+    ///
+    /// A [Tracker](Sequencer::Tracker) can be cloned.
+    type Tracker: Clone + DeriveClock<Self::Clock>;
+
+    /// Creates a new [Sequencer].
     fn new() -> Self;
 
-    /// Returns a clock value that no valid snapshots can be associated with at the moment and the future.
-    fn invalid() -> Self::Clock;
-
-    /// Returns a clock value that represents a snapshot that is visible to all the current and future readers.
+    /// Returns a [Clock](Sequencer::Clock) that represents a database snapshot being visible
+    /// to all the current and future readers.
     ///
-    /// The returned value may change based on the state of the sequencer.
-    fn min(&self) -> Self::Clock;
+    /// This must not return the default [Clock](Sequencer::Clock) value.
+    fn min(&self, order: Ordering) -> Self::Clock;
 
-    /// Gets the current logical clock value.
-    fn get(&self) -> Self::Clock;
-
-    /// Issues a logical clock value that is tracked by the sequencer.
-    fn issue(&self) -> Self::Tracker;
-
-    /// Forges the given tracker.
-    fn forge(&self, tracker: &Self::Tracker) -> Option<Self::Tracker>;
-
-    /// Confiscates the tracker.
-    fn confiscate(&self, tracker: Self::Tracker);
-
-    /// Aggregates all the snapshots in the system holding a Ticket.
-    fn fold<F: Fn(&Self::Clock)>(&self, f: F);
-
-    /// Sets the current logical clock value.
+    /// Gets the current [Clock](Sequencer::Clock).
     ///
-    /// It tries to replace the current logical clock value with the given one. It returns the
-    /// result of the substitution attempt along with the latest value of the clock.
-    fn set(&self, new_sequence: Self::Clock) -> Result<Self::Clock, Self::Clock>;
+    /// This must not return the default [Clock](Sequencer::Clock) value.
+    fn get(&self, order: Ordering) -> Self::Clock;
 
-    /// Advances the logical clock.
+    /// Issues a [Clock](Sequencer::Clock) wrapped in a [Tracker](Sequencer::Tracker).
     ///
-    /// It returns the advanced value.
-    fn advance(&self) -> Self::Clock;
+    /// The [Sequencer] takes the issued [Clock](Sequencer::Clock) into account when
+    /// calculating the minimum valid [Clock](Sequencer::Clock) value until the
+    /// [Tracker](Sequencer::Tracker) is dropped.
+    ///
+    /// This must not issue the default [Clock](Sequencer::Clock) value.
+    fn issue(&self, order: Ordering) -> Self::Tracker;
+
+    /// Aggregates all the issued [Clock](Sequencer::Clock) instances being tracked by the
+    /// [Sequencer].
+    fn fold<F: Fn(&Self::Clock)>(&self, f: F, order: Ordering);
+
+    /// Updates the current logical [Clock](Sequencer::Clock) value.
+    ///
+    /// It tries to replace the current [Clock](Sequencer::Clock) value with the given one. It
+    /// returns the result of the update along with the latest value of the clock.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error along with the latest [Clock](Sequencer::Clock) value of the
+    /// [Sequencer] when the given value is unsuitable for the [Sequencer], for example, the
+    /// supplied [Clock](Sequencer::Clock) is too old.
+    fn update(
+        &self,
+        new_sequence: Self::Clock,
+        order: Ordering,
+    ) -> Result<Self::Clock, Self::Clock>;
+
+    /// Advances its own [Clock](Sequencer::Clock).
+    ///
+    /// It returns the updated [Clock](Sequencer::Clock).
+    fn advance(&self, order: Ordering) -> Self::Clock;
 }
 
-/// The DeriveClock trait defines the capability of deriving a clock value out of
-/// an instance of a type implementing the trait.
+/// The [`DeriveClock`] trait defines the capability of deriving a [Clock](Sequencer::Clock).
 pub trait DeriveClock<C> {
-    /// Returns the derived clock value.
-    fn derive(&self) -> C;
+    /// Returns the [Clock](Sequencer::Clock).
+    fn clock(&self) -> C;
 }

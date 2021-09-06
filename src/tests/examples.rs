@@ -3,10 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(test)]
-mod examples {
+mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use tss::{AtomicCounter, Storage};
+
+    use crate::AtomicCounter;
+    use crate::Storage;
 
     #[test]
     fn single_threaded() {
@@ -26,7 +28,7 @@ mod examples {
             .get("/thomas/eats/apples", &journal_snapshot)
             .is_some());
         drop(journal_snapshot);
-        journal.submit();
+        assert_eq!(journal.submit(), 1);
 
         // storage_snapshot had been taken before the transaction started.
         assert!(storage
@@ -72,7 +74,7 @@ mod examples {
                 assert!(storage_cloned
                     .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
                     .is_err());
-                journal.submit();
+                assert!(journal.submit() > 0);
                 barrier_cloned.wait();
             }));
         }
@@ -83,7 +85,7 @@ mod examples {
         assert!(storage
             .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
             .is_ok());
-        journal.submit();
+        assert!(journal.submit() > 0);
         barrier.wait();
         barrier.wait();
 
