@@ -4,6 +4,8 @@
 
 use super::{Container, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
+use std::time::Duration;
+
 use scc::ebr;
 
 /// [Storage] is a transactional database.
@@ -93,7 +95,12 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// ```
@@ -102,13 +109,16 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
+        timeout: Option<Duration>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
         let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ptr.as_ref() {
-                if let Some(directory) = container_ref.create_directory(name, snapshot, journal) {
+                if let Some(directory) =
+                    container_ref.create_directory(name, snapshot, journal, timeout)
+                {
                     current_container_ptr = directory.ptr(&barrier);
                     continue;
                 }
@@ -136,7 +146,12 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -178,7 +193,7 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal, None);
     /// journal.submit();
     ///
     /// let snapshot = transaction.snapshot();
@@ -223,7 +238,12 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -232,7 +252,13 @@ impl<S: Sequencer> Storage<S> {
     /// let mut journal = transaction.start();
     /// let new_container_data = Box::new(RelationalTable::new());
     /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
+    /// storage.link(
+    ///     "/thomas/eats/apples",
+    ///     new_data_container,
+    ///     "apple1",
+    ///     &snapshot,
+    ///     &mut journal,
+    ///     None);
     /// journal.submit();
     /// drop(snapshot);
     ///
@@ -250,9 +276,10 @@ impl<S: Sequencer> Storage<S> {
         name: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
+        timeout: Option<Duration>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         if let Some(target_directory) = self.get(path, snapshot) {
-            if target_directory.link(name, container.clone(), snapshot, journal) {
+            if target_directory.link(name, container.clone(), snapshot, journal, timeout) {
                 return Ok(container);
             }
         }
@@ -275,7 +302,12 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -284,13 +316,24 @@ impl<S: Sequencer> Storage<S> {
     /// let mut journal = transaction.start();
     /// let new_container_data = Box::new(RelationalTable::new());
     /// let new_data_container = Container::<AtomicCounter>::new_container(new_container_data);
-    /// storage.link("/thomas/eats/apples", new_data_container, "apple1", &snapshot, &mut journal);
+    /// storage.link(
+    ///     "/thomas/eats/apples",
+    ///     new_data_container,
+    ///     "apple1",
+    ///     &snapshot,
+    ///     &mut journal,
+    ///     None);
     /// journal.submit();
     /// drop(snapshot);
     ///
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// storage.relocate("/thomas/eats/apples/apple1", "/thomas/eats", &mut journal, &snapshot);
+    /// storage.relocate(
+    ///     "/thomas/eats/apples/apple1",
+    ///     "/thomas/eats",
+    ///     &mut journal,
+    ///     &snapshot,
+    ///     None);
     /// journal.submit();
     /// drop(snapshot);
     ///
@@ -307,12 +350,13 @@ impl<S: Sequencer> Storage<S> {
         target_path: &str,
         journal: &mut Journal<S>,
         snapshot: &Snapshot<S>,
+        timeout: Option<Duration>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         if let Some(container) = self.get(path, snapshot) {
             if let Some(target_directory) = self.get(target_path, snapshot) {
                 if let Some((name, _)) = Self::name(path) {
-                    if target_directory.link(name, container.clone(), snapshot, journal) {
-                        let _result = self.remove(path, snapshot, journal);
+                    if target_directory.link(name, container.clone(), snapshot, journal, timeout) {
+                        let _result = self.remove(path, snapshot, journal, timeout);
                         return Ok(container);
                     }
                 }
@@ -337,7 +381,12 @@ impl<S: Sequencer> Storage<S> {
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.create_directory("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -346,7 +395,12 @@ impl<S: Sequencer> Storage<S> {
     /// let mut transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result = storage.remove("/thomas/eats/apples", &snapshot, &mut journal);
+    /// let result =
+    ///     storage.remove(
+    ///         "/thomas/eats/apples",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
     /// assert!(result.is_ok());
     /// journal.submit();
     /// drop(snapshot);
@@ -361,6 +415,7 @@ impl<S: Sequencer> Storage<S> {
         path: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
+        timeout: Option<Duration>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         let split = path.split('/');
         let barrier = ebr::Barrier::new();
@@ -384,7 +439,7 @@ impl<S: Sequencer> Storage<S> {
             current_container_name.take(),
             parent_container_ptr.as_ref(),
         ) {
-            if parent_container_ref.unlink(current_container_name, snapshot, journal) {
+            if parent_container_ref.unlink(current_container_name, snapshot, journal, timeout) {
                 return Ok(current_container);
             }
         }

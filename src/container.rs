@@ -8,6 +8,7 @@ use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
+use std::time::Duration;
 
 use scc::ebr;
 use scc::TreeIndex;
@@ -66,6 +67,7 @@ impl<S: Sequencer> Container<S> {
         name: &str,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
+        timeout: Option<Duration>,
     ) -> Option<ebr::Arc<Container<S>>> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
@@ -78,6 +80,7 @@ impl<S: Sequencer> Container<S> {
                             .create(
                                 &*new_version,
                                 Some(ebr::AtomicArc::from(new_directory.clone())),
+                                timeout,
                             )
                             .is_ok()
                         {
@@ -122,6 +125,7 @@ impl<S: Sequencer> Container<S> {
         container: ebr::Arc<Container<S>>,
         snapshot: &Snapshot<S>,
         journal: &mut Journal<S>,
+        timeout: Option<Duration>,
     ) -> bool {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
@@ -130,7 +134,11 @@ impl<S: Sequencer> Container<S> {
                     let new_version_ptr = anchor.install(snapshot, &barrier);
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
                         if journal
-                            .create(&*new_version, Some(ebr::AtomicArc::from(container.clone())))
+                            .create(
+                                &*new_version,
+                                Some(ebr::AtomicArc::from(container.clone())),
+                                timeout,
+                            )
                             .is_ok()
                         {
                             // The transaction took ownership.
@@ -148,7 +156,13 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Unlinks a container associated with the given name.
-    pub fn unlink(&self, name: &str, snapshot: &Snapshot<S>, journal: &mut Journal<S>) -> bool {
+    pub fn unlink(
+        &self,
+        name: &str,
+        snapshot: &Snapshot<S>,
+        journal: &mut Journal<S>,
+        timeout: Option<Duration>,
+    ) -> bool {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             if let Some(result) = directory.read(name, |_, anchor| {
@@ -156,7 +170,10 @@ impl<S: Sequencer> Container<S> {
                 if let Some(new_version) = new_version_ptr.try_into_arc() {
                     let deleted_version = ebr::AtomicArc::null();
                     deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
-                    if journal.create(&*new_version, Some(deleted_version)).is_ok() {
+                    if journal
+                        .create(&*new_version, Some(deleted_version), timeout)
+                        .is_ok()
+                    {
                         // The transaction successfully deleted it.
                         return true;
                     }

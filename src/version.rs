@@ -8,6 +8,7 @@ use super::journal::Anchor as JournalAnchor;
 use super::{Error, Log, Sequencer, Snapshot};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::time::Duration;
 
 use scc::ebr;
 
@@ -31,10 +32,11 @@ pub trait Version<S: Sequencer> {
     fn create<'b>(
         &self,
         creator_ptr: ebr::Ptr<'b, JournalAnchor<S>>,
+        timeout: Option<Duration>,
         barrier: &'b ebr::Barrier,
     ) -> Option<Locker<S>> {
         if let Some(version_cell) = self.version_cell_ptr(barrier).try_into_arc() {
-            return Locker::lock(version_cell, creator_ptr, barrier);
+            return Locker::lock(version_cell, creator_ptr, timeout, barrier);
         }
         None
     }
@@ -163,6 +165,7 @@ impl<S: Sequencer> Locker<S> {
     fn lock(
         version_cell: ebr::Arc<Cell<S>>,
         new_owner_ptr: ebr::Ptr<JournalAnchor<S>>,
+        timeout: Option<Duration>,
         barrier: &ebr::Barrier,
     ) -> Option<Locker<S>> {
         if version_cell.time_point != S::Clock::default() {
@@ -230,28 +233,31 @@ impl<S: Sequencer> Locker<S> {
             // Waits for the actual owner to release the lock.
             #[allow(clippy::blocks_in_if_conditions)]
             if actual_owner
-                .wait(|snapshot| {
-                    if snapshot == S::Clock::default() {
-                        // The transaction has been rolled back, or the `Journal` has been
-                        // discarded, it will try to overtake ownership.
-                        //
-                        // The following CAS returning `false` means that another
-                        // transaction overtook ownership.
-                        if let Err((passed, _)) = version_cell.owner.compare_exchange(
-                            actual,
-                            (new_owner.take(), ebr::Tag::None),
-                            Acquire,
-                            Relaxed,
-                        ) {
-                            if let Some(passed) = passed {
-                                new_owner.replace(passed);
+                .wait(
+                    |snapshot| {
+                        if snapshot == S::Clock::default() {
+                            // The transaction has been rolled back, or the `Journal` has been
+                            // discarded, it will try to overtake ownership.
+                            //
+                            // The following CAS returning `false` means that another
+                            // transaction overtook ownership.
+                            if let Err((passed, _)) = version_cell.owner.compare_exchange(
+                                actual,
+                                (new_owner.take(), ebr::Tag::None),
+                                Acquire,
+                                Relaxed,
+                            ) {
+                                if let Some(passed) = passed {
+                                    new_owner.replace(passed);
+                                }
+                                return false;
                             }
-                            return false;
+                            return true;
                         }
-                        return true;
-                    }
-                    false
-                })
+                        false
+                    },
+                    timeout,
+                )
                 .map_or_else(|| false, |result| result)
             {
                 // This transaction has successfully locked the `VersionCell`.
@@ -260,6 +266,11 @@ impl<S: Sequencer> Locker<S> {
 
             if version_cell.time_point != S::Clock::default() {
                 // The `VersionCell` has a valid time point.
+                return None;
+            }
+
+            if timeout.is_some() {
+                // The time-out reached.
                 return None;
             }
         }

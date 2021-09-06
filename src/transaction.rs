@@ -139,12 +139,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// assert!(result.is_ok());
     /// ```
     pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
-        if let Ok(mut change_records) = self.record.lock() {
-            if change_records.len() > clock {
-                while change_records.len() > clock {
-                    drop(change_records.pop());
+        if let Ok(mut record_vector) = self.record.lock() {
+            if record_vector.len() > clock {
+                while record_vector.len() > clock {
+                    drop(record_vector.pop());
                 }
-                let new_clock = change_records.len();
+                let new_clock = record_vector.len();
                 self.clock.store(new_clock, Release);
                 return Ok(new_clock);
             }
@@ -193,7 +193,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// transaction.rollback();
     /// ```
     pub fn rollback(self) {
-        // Dropping the instance entails a synchronous transaction rollback.
+        if let Ok(mut record_vector) = self.record.lock() {
+            while let Some(record) = record_vector.pop() {
+                // Changes should be reverted from the back of the record.
+                drop(record);
+            }
+        }
         drop(self);
     }
 
@@ -204,11 +209,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Takes [Annals], and records them.
     pub(super) fn record(&self, record: Annals<S>) -> usize {
-        let mut change_records = self.record.lock().unwrap();
-        change_records.push(record);
-        let new_clock = change_records.len();
+        let mut record_vector = self.record.lock().unwrap();
+        record_vector.push(record);
+        let new_clock = record_vector.len();
         // submit_clock is updated after the contents are moved to the anchor.
-        change_records[new_clock - 1].assign_clock(new_clock);
+        record_vector[new_clock - 1].assign_clock(new_clock);
         self.clock.store(new_clock, Release);
         new_clock
     }
@@ -336,6 +341,7 @@ mod test {
     use crate::{AtomicCounter, RecordVersion, Version};
     use std::sync::{Arc, Barrier, Once};
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn visibility() {
@@ -359,7 +365,9 @@ mod test {
 
             // Step 1. Tries to acquire lock acquired by an active transaction journal.
             let mut journal = transaction_cloned.start();
-            assert!(journal.create(&*versioned_object_cloned, None).is_err());
+            assert!(journal
+                .create(&*versioned_object_cloned, None, None)
+                .is_err());
             drop(journal);
 
             // Step 2. Tries to acquire lock acquired by a submitted transaction journal.
@@ -367,12 +375,14 @@ mod test {
             barrier_cloned.wait();
 
             let mut journal = transaction_cloned.start();
-            assert!(journal.create(&*versioned_object_cloned, None).is_ok());
+            assert!(journal
+                .create(&*versioned_object_cloned, None, None)
+                .is_ok());
             assert_eq!(journal.submit(), 2);
         });
 
         let mut journal = transaction.start();
-        assert!(journal.create(&*versioned_object, None).is_ok());
+        assert!(journal.create(&*versioned_object, None, None).is_ok());
 
         barrier.wait();
         barrier.wait();
@@ -392,7 +402,7 @@ mod test {
     fn wait_queue() {
         let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
         let versioned_object = Arc::new(RecordVersion::new());
-        let num_threads = 64;
+        let num_threads = 16;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         let mut thread_handles = Vec::new();
         for _ in 0..num_threads {
@@ -411,11 +421,90 @@ mod test {
         barrier.wait();
         let transaction = storage.transaction();
         let mut journal = transaction.start();
-        let result = journal.create(&*versioned_object, None);
+        let result = journal.create(&*versioned_object, None, None);
         assert!(result.is_ok());
         assert_eq!(journal.submit(), 1);
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(transaction.commit().is_ok());
         barrier.wait();
+
+        thread_handles
+            .into_iter()
+            .for_each(|t| assert!(t.join().is_ok()));
+    }
+
+    #[test]
+    fn time_out() {
+        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
+        let versioned_object = Arc::new(RecordVersion::new());
+
+        let transaction = storage.transaction();
+        let mut journal = transaction.start();
+        assert!(journal.create(&*versioned_object, None, None).is_ok());
+
+        let num_threads = 16;
+        let barrier = Arc::new(Barrier::new(num_threads + 1));
+        let mut thread_handles = Vec::new();
+        for _ in 0..num_threads {
+            let storage_cloned = storage.clone();
+            let versioned_object_cloned = versioned_object.clone();
+            let barrier_cloned = barrier.clone();
+            thread_handles.push(thread::spawn(move || {
+                barrier_cloned.wait();
+                let transaction = storage_cloned.transaction();
+                let mut journal = transaction.start();
+                assert!(journal
+                    .create(
+                        &*versioned_object_cloned,
+                        None,
+                        Some(Duration::from_millis(100))
+                    )
+                    .is_err());
+
+                barrier_cloned.wait();
+                barrier_cloned.wait();
+
+                let mut journal = transaction.start();
+                assert!(journal
+                    .create(
+                        &*versioned_object_cloned,
+                        None,
+                        Some(Duration::from_millis(100))
+                    )
+                    .is_err());
+            }));
+        }
+
+        barrier.wait();
+        barrier.wait();
+
+        assert_eq!(journal.submit(), 1);
+        let storage_cloned = storage.clone();
+        let versioned_object_cloned = versioned_object.clone();
+        let thread = thread::spawn(move || {
+            let transaction = storage_cloned.transaction();
+            let mut journal = transaction.start();
+            assert!(journal
+                .create(&*versioned_object_cloned, None, None)
+                .is_ok());
+        });
+
+        barrier.wait();
+
+        let mut journal = transaction.start();
+        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        assert_eq!(journal.submit(), 2);
+
+        thread_handles
+            .into_iter()
+            .for_each(|t| assert!(t.join().is_ok()));
+
+        let mut journal = transaction.start();
+        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        drop(journal);
+
+        transaction.rollback();
+
+        assert!(thread.join().is_ok());
     }
 }

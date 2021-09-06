@@ -9,6 +9,7 @@ use super::{Error, Log, Sequencer, Snapshot, Transaction, Version};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use scc::ebr;
 
@@ -17,7 +18,7 @@ use scc::ebr;
 /// Locks and log records are accumulated in a [Journal].
 pub struct Journal<'s, 't, S: Sequencer> {
     transaction: &'t Transaction<'s, S>,
-    record: Annals<S>,
+    record: Option<Annals<S>>,
 }
 
 impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
@@ -37,8 +38,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// assert_eq!(journal.submit(), 1);
     /// ```
     #[must_use]
-    pub fn submit(self) -> usize {
-        self.transaction.record(self.record)
+    pub fn submit(mut self) -> usize {
+        self.record
+            .take()
+            .map_or_else(|| 0, |r| self.transaction.record(r))
     }
 
     /// Takes a snapshot including changes in the [Journal].
@@ -53,7 +56,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None).is_ok());
+    /// assert!(journal.create(&versioned_object, None, None).is_ok());
     /// let snapshot = journal.snapshot();
     /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
     /// journal.submit();
@@ -88,7 +91,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None).is_ok());
+    /// assert!(journal.create(&versioned_object, None, None).is_ok());
     /// journal.submit();
     ///
     /// transaction.commit();
@@ -100,11 +103,15 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         &mut self,
         version: &V,
         payload: Option<V::Data>,
+        timeout: Option<Duration>,
     ) -> Result<(), Error> {
-        let barrier = ebr::Barrier::new();
-        if let Some(locker) = version.create(self.record.anchor_ptr(&barrier), &barrier) {
-            self.record.append(version, locker, payload, &barrier);
-            return Ok(());
+        if let Some(record_mut) = self.record.as_mut() {
+            let barrier = ebr::Barrier::new();
+            if let Some(locker) = version.create(record_mut.anchor_ptr(&barrier), timeout, &barrier)
+            {
+                record_mut.append(version, locker, payload, &barrier);
+                return Ok(());
+            }
         }
 
         // The versioned object is not ready for versioning.
@@ -118,7 +125,17 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ) -> Journal<'s, 't, S> {
         Journal {
             transaction,
-            record: Annals::new(transaction, transaction_anchor),
+            record: Some(Annals::new(transaction, transaction_anchor)),
+        }
+    }
+}
+
+impl<'s, 't, S: Sequencer> Drop for Journal<'s, 't, S> {
+    fn drop(&mut self) {
+        // Implementing `Drop` is necessary for the compiler to enforce the `Transaction` to
+        // outlive it.
+        if let Some(record) = self.record.take() {
+            drop(record);
         }
     }
 }
@@ -238,11 +255,10 @@ impl<S: Sequencer> Anchor<S> {
         barrier: &ebr::Barrier,
     ) -> bool {
         // The given anchor is itself.
-        if journal.map_or_else(
-            || false,
-            |journal| journal.record.anchor_ptr(barrier).as_raw() == self as *const _,
-        ) {
-            return true;
+        if let Some(journal_ref) = journal {
+            if let Some(record_ref) = journal_ref.record.as_ref() {
+                return record_ref.anchor_ptr(barrier).as_raw() == self as *const _;
+            }
         }
 
         // The given transaction journal is ordered after `self`.
@@ -266,7 +282,7 @@ impl<S: Sequencer> Anchor<S> {
 
         // The transaction will either be committed or rolled back soon.
         if anchor_ref.commit_snapshot() == S::Clock::default() {
-            self.wait(|_| ());
+            self.wait(|_| (), None);
         }
         // Checks the final snapshot.
         anchor_ref.commit_snapshot() != S::Clock::default()
@@ -274,17 +290,40 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Waits for the final state of the [Journal] to be determined.
-    pub(super) fn wait<R, F: FnOnce(S::Clock) -> R>(&self, f: F) -> Option<R> {
+    pub(super) fn wait<R, F: FnOnce(S::Clock) -> R>(
+        &self,
+        f: F,
+        timeout: Option<Duration>,
+    ) -> Option<R> {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
-            if !wait_queue.0 {
-                wait_queue.1 += 1;
-                if let Ok(mut wait_queue) = self.wait_queue.1.wait(wait_queue) {
-                    wait_queue.1 -= 1;
-                    // Before waking up the next waiting thread, calls the supplied closure with the
-                    // mutex acquired.
+            if wait_queue.0 {
+                return Some(f(self.transaction_anchor.commit_snapshot()));
+            }
+
+            // Starts waiting by incrementing the counter.
+            wait_queue.1 += 1;
+            let (wait_queue_after_wait, timed_out) = if let Some(timeout) = timeout {
+                if let Ok((locker, wait_result)) =
+                    self.wait_queue.1.wait_timeout(wait_queue, timeout)
+                {
+                    (Some(locker), wait_result.timed_out())
+                } else {
+                    (None, false)
+                }
+            } else if let Ok(locker) = self.wait_queue.1.wait(wait_queue) {
+                (Some(locker), false)
+            } else {
+                (None, false)
+            };
+
+            if let Some(mut wait_queue) = wait_queue_after_wait {
+                wait_queue.1 -= 1;
+                if !timed_out {
+                    // Before waking up the next waiting thread, calls the supplied closure
+                    // with the mutex acquired.
                     //
-                    // For instance, if the version is owned by the transaction, ownership can be
-                    // transferred.
+                    // For instance, if the version is owned by the transaction, ownership can
+                    // be transferred.
                     let result = f(self.transaction_anchor.commit_snapshot());
 
                     // Once the thread wakes up, it is mandated to wake the next thread up.
@@ -293,6 +332,9 @@ impl<S: Sequencer> Anchor<S> {
                     }
                     return Some(result);
                 }
+            } else {
+                // It does not expect a locking failure.
+                unreachable!();
             }
         }
         None
@@ -311,16 +353,6 @@ impl<S: Sequencer> Anchor<S> {
                 self.wait_queue.1.notify_one();
             }
         }
-
-        // Post-processes with the mutex acquired.
-        //
-        // Still, the `RecordData` is holding all the `VersionLock` instances, therefore, it
-        // firstly wakes all the waiting threads up before releasing the locks.
-        while let Ok(wait_queue) = self.wait_queue.0.lock() {
-            if wait_queue.1 == 0 {
-                break;
-            }
-        }
     }
 }
 
@@ -335,7 +367,7 @@ mod tests {
         let transaction = storage.transaction();
 
         let mut journal = transaction.start();
-        assert!(journal.create(&versioned_object, None).is_ok());
+        assert!(journal.create(&versioned_object, None, None).is_ok());
         assert_eq!(journal.submit(), 1);
 
         assert!(transaction.commit().is_ok());

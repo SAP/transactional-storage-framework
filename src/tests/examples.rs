@@ -19,7 +19,12 @@ mod tests {
         let transaction_snapshot = transaction.snapshot();
         let mut journal = transaction.start();
         assert!(storage
-            .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+            .create_directory(
+                "/thomas/eats/apples",
+                &transaction_snapshot,
+                &mut journal,
+                None
+            )
             .is_ok());
 
         // journal_snapshot includes changes pending in the journal.
@@ -72,7 +77,12 @@ mod tests {
                 let transaction_snapshot = transaction.snapshot();
                 let mut journal = transaction.start();
                 assert!(storage_cloned
-                    .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+                    .create_directory(
+                        "/thomas/eats/apples",
+                        &transaction_snapshot,
+                        &mut journal,
+                        None
+                    )
                     .is_err());
                 assert!(journal.submit() > 0);
                 barrier_cloned.wait();
@@ -83,7 +93,12 @@ mod tests {
         let transaction_snapshot = transaction.snapshot();
         let mut journal = transaction.start();
         assert!(storage
-            .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal)
+            .create_directory(
+                "/thomas/eats/apples",
+                &transaction_snapshot,
+                &mut journal,
+                None
+            )
             .is_ok());
         assert!(journal.submit() > 0);
         barrier.wait();
