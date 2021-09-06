@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::version::Cell;
 use super::Version as VersionTrait;
-use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction, VersionCell};
+use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
@@ -32,6 +33,7 @@ impl<S: Sequencer> Container<S> {
     ///
     /// let container_handle: Handle = Container::new_directory();
     /// ```
+    #[must_use]
     pub fn new_directory() -> ebr::Arc<Container<S>> {
         ebr::Arc::new(Container {
             container: Type::Directory(TreeIndex::default()),
@@ -49,6 +51,7 @@ impl<S: Sequencer> Container<S> {
     /// let container_data = Box::new(RelationalTable::new());
     /// let container_handle: Handle = Container::new_container(container_data);
     /// ```
+    #[must_use]
     pub fn new_container(
         container_data: Box<dyn DataPlane<S> + Send + Sync>,
     ) -> ebr::Arc<Container<S>> {
@@ -67,7 +70,7 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
+                if let Some(result) = directory.read(name, |_, anchor| {
                     let new_version_ptr = anchor.install(snapshot, &barrier);
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
                         let new_directory = Container::new_directory();
@@ -79,12 +82,14 @@ impl<S: Sequencer> Container<S> {
                             .is_ok()
                         {
                             // The transaction took ownership.
-                            return Some(new_directory.clone());
+                            return Some(new_directory);
                         }
                     }
-                    break;
+                    None
+                }) {
+                    return result;
                 }
-                directory.insert(String::from(name), Arc::new(Anchor::new()));
+                let _result = directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
         }
         None
@@ -99,7 +104,7 @@ impl<S: Sequencer> Container<S> {
     ) -> ebr::Ptr<'b, Container<S>> {
         if let Type::Directory(directory) = &self.container {
             if let Some(container_ptr) =
-                directory.read(name, |_, anchor| anchor.get(snapshot, &barrier))
+                directory.read(name, |_, anchor| anchor.get(snapshot, barrier))
             {
                 return container_ptr;
             }
@@ -110,6 +115,7 @@ impl<S: Sequencer> Container<S> {
     /// Makes a link to the given data container if the current container is a directory.
     ///
     /// It overwrites an existing visible container if the container is the latest version under the same name.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn link(
         &self,
         name: &str,
@@ -120,7 +126,7 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
+                if let Some(result) = directory.read(name, |_, anchor| {
                     let new_version_ptr = anchor.install(snapshot, &barrier);
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
                         if journal
@@ -131,9 +137,11 @@ impl<S: Sequencer> Container<S> {
                             return true;
                         }
                     }
-                    break;
+                    false
+                }) {
+                    return result;
                 }
-                directory.insert(String::from(name), Arc::new(Anchor::new()));
+                let _result = directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
         }
         false
@@ -143,32 +151,36 @@ impl<S: Sequencer> Container<S> {
     pub fn unlink(&self, name: &str, snapshot: &Snapshot<S>, journal: &mut Journal<S>) -> bool {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
-            loop {
-                if let Some(anchor) = directory.read(name, |_, anchor| anchor) {
-                    let new_version_ptr = anchor.install(snapshot, &barrier);
-                    if let Some(new_version) = new_version_ptr.try_into_arc() {
-                        let deleted_version = ebr::AtomicArc::null();
-                        deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
-                        if journal.create(&*new_version, Some(deleted_version)).is_ok() {
-                            // The transaction successfully deleted it.
-                            return true;
-                        }
+            if let Some(result) = directory.read(name, |_, anchor| {
+                let new_version_ptr = anchor.install(snapshot, &barrier);
+                if let Some(new_version) = new_version_ptr.try_into_arc() {
+                    let deleted_version = ebr::AtomicArc::null();
+                    deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
+                    if journal.create(&*new_version, Some(deleted_version)).is_ok() {
+                        // The transaction successfully deleted it.
+                        return true;
                     }
-                    break;
                 }
-                return true;
+                false
+            }) {
+                return result;
             }
         }
         false
     }
 
     /// Unloads the [Container] from memory.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
+    #[allow(clippy::unused_self)]
     pub fn unload(&self) -> Result<(), Error> {
         Err(Error::Fail)
     }
 }
 
-/// [DataPlane] defines the data container interfaces.
+/// [`DataPlane`] defines the data container interfaces.
 ///
 /// A container is a two-dimensional plane of data.
 pub trait DataPlane<S: Sequencer> {
@@ -306,7 +318,7 @@ impl<S: Sequencer> Anchor<S> {
 /// [Container] instance.
 struct Version<S: Sequencer> {
     /// Its [VersionCell].
-    version_cell: ebr::AtomicArc<VersionCell<S>>,
+    version_cell: ebr::AtomicArc<Cell<S>>,
 
     /// `container` being tagged indicates that the [Container] is deleted.
     container: ebr::AtomicArc<Container<S>>,
@@ -318,14 +330,14 @@ struct Version<S: Sequencer> {
 impl<S: Sequencer> Version<S> {
     fn new() -> Version<S> {
         Version {
-            version_cell: ebr::AtomicArc::new(VersionCell::default()),
+            version_cell: ebr::AtomicArc::new(Cell::default()),
             container: ebr::AtomicArc::null(),
             link: ebr::AtomicArc::null(),
         }
     }
 
     fn unowned(&self, barrier: &ebr::Barrier) -> bool {
-        let container_ptr = self.container.load(Relaxed, &barrier);
+        let container_ptr = self.container.load(Relaxed, barrier);
         container_ptr.is_null() && container_ptr.tag() == ebr::Tag::None
     }
 }
@@ -333,7 +345,7 @@ impl<S: Sequencer> Version<S> {
 impl<S: Sequencer> VersionTrait<S> for Version<S> {
     type Data = ebr::AtomicArc<Container<S>>;
 
-    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, VersionCell<S>> {
+    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Cell<S>> {
         self.version_cell.load(Acquire, barrier)
     }
 

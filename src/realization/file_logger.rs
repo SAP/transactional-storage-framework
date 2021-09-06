@@ -6,7 +6,7 @@ use crate::{Container, Error, Logger, Sequencer, Transaction};
 
 use scc::ebr;
 
-/// [FileLogger] is a file-based logger that pushes data into files sequentially.
+/// [`FileLogger`] is a file-based logger that pushes data into files sequentially.
 ///
 /// Checkpoint operations entail log file truncation.
 pub struct FileLogger<S: Sequencer> {
@@ -15,6 +15,8 @@ pub struct FileLogger<S: Sequencer> {
 }
 
 impl<S: Sequencer> FileLogger<S> {
+    /// Creates  new [`FileLogger`].
+    #[must_use]
     pub fn new(anchor: &str) -> FileLogger<S> {
         FileLogger {
             _path: String::from(anchor),

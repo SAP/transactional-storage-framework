@@ -11,6 +11,8 @@ pub struct RelationalTable<S: Sequencer> {
 }
 
 impl<S: Sequencer> RelationalTable<S> {
+    /// Creates a new [`RelationalTable`].
+    #[must_use]
     pub fn new() -> RelationalTable<S> {
         RelationalTable {
             _version_vector: None,
@@ -56,5 +58,11 @@ impl<S: Sequencer> DataPlane<S> for RelationalTable<S> {
     }
     fn size(&self) -> (usize, usize) {
         (0, 0)
+    }
+}
+
+impl<S: Sequencer> Default for RelationalTable<S> {
+    fn default() -> Self {
+        Self::new()
     }
 }

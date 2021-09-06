@@ -2,36 +2,39 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AtomicCounter, Log, Snapshot, Version, VersionCell};
+use crate::version::Cell;
+use crate::{AtomicCounter, Log, Snapshot, Version};
 
 use std::sync::atomic::Ordering::Relaxed;
 
 use scc::ebr;
 
+/// [`RecordVersion`] is a versioned database object for a record.
 pub struct RecordVersion {
-    version_cell: ebr::AtomicArc<VersionCell<AtomicCounter>>,
+    version_cell: ebr::AtomicArc<Cell<AtomicCounter>>,
 }
 
 impl Default for RecordVersion {
     fn default() -> Self {
         RecordVersion {
-            version_cell: ebr::AtomicArc::new(VersionCell::default()),
+            version_cell: ebr::AtomicArc::new(Cell::default()),
         }
     }
 }
 impl RecordVersion {
+    /// Creates a new [`RecordVersion`].
+    #[must_use]
     pub fn new() -> RecordVersion {
-        Default::default()
+        RecordVersion {
+            version_cell: ebr::AtomicArc::null(),
+        }
     }
 }
 
 impl Version<AtomicCounter> for RecordVersion {
     type Data = RecordVersion;
 
-    fn version_cell_ptr<'b>(
-        &self,
-        barrier: &'b ebr::Barrier,
-    ) -> ebr::Ptr<'b, VersionCell<AtomicCounter>> {
+    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Cell<AtomicCounter>> {
         self.version_cell.load(Relaxed, barrier)
     }
 

@@ -17,11 +17,11 @@ pub trait Sequencer: 'static {
     /// [Clock](Sequencer::Clock) is a partially ordered type representing a single point of
     /// time in a system.
     ///
-    /// It should satisfy [Clone], [Copy], [PartialEq], [PartialOrd], [Send], and [Sync].
+    /// It should satisfy [Clone], [Copy], [`PartialEq`], [`PartialOrd`], [Send], and [Sync].
     ///
     /// [Clone], [Copy], [Send] and [Sync] are required as the value can be copied sent
-    /// frequently. [PartialEq] and [PartialOrd] allow developers to implement a floating-point
-    ///  or a `Lamport` vector clock generator.
+    /// frequently. [`PartialEq`] and [`PartialOrd`] allow developers to implement a
+    /// floating-point, or a `Lamport` vector clock generator.
     ///
     /// The [Default] value is treated an `invisible` time point in the system.
     type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
@@ -75,7 +75,7 @@ pub trait Sequencer: 'static {
     fn advance(&self, order: Ordering) -> Self::Clock;
 }
 
-/// The [DeriveClock] trait defines the capability of deriving a [Clock](Sequencer::Clock).
+/// The [`DeriveClock`] trait defines the capability of deriving a [Clock](Sequencer::Clock).
 pub trait DeriveClock<C> {
     /// Returns the [Clock].
     fn clock(&self) -> C;

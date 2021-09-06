@@ -85,7 +85,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let snapshot = transaction.snapshot();
     /// ```
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::new(&self.sequencer, Some(self), None)
+        Snapshot::new(self.sequencer, Some(self), None)
     }
 
     /// Gets the current local clock value of the [Transaction].
@@ -113,6 +113,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// All the changes made between the latest transaction clock and the given one are
     /// reverted. It requires a mutable reference, thus ensuring exclusivity.
+    ///
+    /// # Errors
+    ///
+    /// If an invalid clock value is given, an error is returned.
     ///
     /// # Examples
     ///
@@ -148,6 +152,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// It returns a [Rubicon], giving one last chance to roll back the transaction.
     ///
+    /// # Errors
+    ///
+    /// If the transaction cannot be committed, an error is returned.
+    ///
     /// # Examples
     ///
     /// ```
@@ -159,7 +167,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
         // Assigns a new logical clock.
-        let anchor_mut_ref = unsafe { &mut *(&*self.anchor as *const Anchor<S> as *mut Anchor<S>) };
+        let anchor_mut_ref = unsafe {
+            #[allow(clippy::cast_ref_to_mut)]
+            &mut *(&*self.anchor as *const Anchor<S> as *mut Anchor<S>)
+        };
         anchor_mut_ref.preliminary_snapshot = self.sequencer.get(Relaxed);
         Ok(Rubicon {
             transaction: Some(self),
@@ -266,8 +277,10 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
     /// Post-processes the transaction that is not explicitly rolled back.
     fn drop(&mut self) {
         if let Some(transaction) = self.transaction.take() {
-            let anchor_mut_ref =
-                unsafe { &mut *(&*transaction.anchor as *const Anchor<S> as *mut Anchor<S>) };
+            let anchor_mut_ref = unsafe {
+                #[allow(clippy::cast_ref_to_mut)]
+                &mut *(&*transaction.anchor as *const Anchor<S> as *mut Anchor<S>)
+            };
             anchor_mut_ref.commit_snapshot = transaction.sequencer.advance(Release);
             transaction.post_process();
         }

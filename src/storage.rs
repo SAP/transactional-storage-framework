@@ -35,6 +35,7 @@ impl<S: Sequencer> Storage<S> {
     /// let logger = Box::new(FileLogger::new("/home/dba/db"));
     /// let storage: Storage<AtomicCounter> = Storage::new(Some(logger));
     /// ```
+    #[must_use]
     pub fn new(logger: Option<Box<dyn Logger<S> + Send + Sync>>) -> Storage<S> {
         let root_container = Container::new_directory();
         Storage {
@@ -77,6 +78,10 @@ impl<S: Sequencer> Storage<S> {
     }
 
     /// Creates a new [Container] directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target path is unavailable for the transaction, an error is returned.
     ///
     /// # Examples
     ///
@@ -148,7 +153,7 @@ impl<S: Sequencer> Storage<S> {
         let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ptr.as_ref() {
-                current_container_ptr = container_ref.search(name, &snapshot, &barrier);
+                current_container_ptr = container_ref.search(name, snapshot, &barrier);
             } else {
                 return None;
             }
@@ -191,7 +196,7 @@ impl<S: Sequencer> Storage<S> {
         let mut current_container_ptr = self.root_container.ptr(&barrier);
         for name in split {
             if let Some(container_ref) = current_container_ptr.as_ref() {
-                current_container_ptr = container_ref.search(name, &snapshot, &barrier);
+                current_container_ptr = container_ref.search(name, snapshot, &barrier);
             } else {
                 return None;
             }
@@ -203,6 +208,10 @@ impl<S: Sequencer> Storage<S> {
     }
 
     /// Links a data [Container] to the given directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target directory is unavailable for the transaction, an error is returned.
     ///
     /// # Examples
     ///
@@ -252,6 +261,10 @@ impl<S: Sequencer> Storage<S> {
 
     /// Relocates a data [Container].
     ///
+    /// # Errors
+    ///
+    /// If the target directory is unavailable for the transaction, an error is returned.
+    ///
     /// # Examples
     ///
     /// ```
@@ -297,7 +310,7 @@ impl<S: Sequencer> Storage<S> {
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         if let Some(container) = self.get(path, snapshot) {
             if let Some(target_directory) = self.get(target_path, snapshot) {
-                if let Some((name, _)) = Self::name(&path) {
+                if let Some((name, _)) = Self::name(path) {
                     if target_directory.link(name, container.clone(), snapshot, journal) {
                         let _result = self.remove(path, snapshot, journal);
                         return Ok(container);
@@ -309,6 +322,10 @@ impl<S: Sequencer> Storage<S> {
     }
 
     /// Removes the [Container] from the given directory.
+    ///
+    /// # Errors
+    ///
+    /// If the target [Container] is missing, it returns an error.
     ///
     /// # Examples
     ///
@@ -352,7 +369,7 @@ impl<S: Sequencer> Storage<S> {
         let mut parent_container_ptr = ebr::Ptr::null();
         for name in split {
             if let Some(container_ref) = current_container_ptr.as_ref() {
-                let child_container_ptr = container_ref.search(name, &snapshot, &barrier);
+                let child_container_ptr = container_ref.search(name, snapshot, &barrier);
                 if !child_container_ptr.is_null() {
                     parent_container_ptr = current_container_ptr;
                     current_container_name.replace(name);

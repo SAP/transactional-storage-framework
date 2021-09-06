@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::transaction::Anchor as TransactionAnchor;
-use super::{Error, Log, Sequencer, Snapshot, Transaction, Version, VersionLocker};
+use super::version::Locker;
+use super::{Error, Log, Sequencer, Snapshot, Transaction, Version};
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
@@ -35,6 +36,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let journal = transaction.start();
     /// assert_eq!(journal.submit(), 1);
     /// ```
+    #[must_use]
     pub fn submit(self) -> usize {
         self.transaction.record(self.record)
     }
@@ -56,6 +58,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let snapshot = journal.snapshot();
     /// drop(snapshot);
     /// ```
+    #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
         Snapshot::new(
             self.transaction.sequencer(),
@@ -69,6 +72,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// The acquired lock is never released until the [Journal] is dropped. If the lock is
     /// released without a valid clock value assigned to the [Journal], the version is either
     /// be properly initialized by another [Journal], or garbage-collected later.
+    ///
+    /// # Errors
+    ///
+    /// If the versioned database object cannot locked, or invisible to the transaction, an
+    /// error is returned.
     ///
     /// # Examples
     ///
@@ -119,12 +127,12 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
 /// [Annals] consists of locks acquired and log records generated with the [Journal].
 pub(super) struct Annals<S: Sequencer> {
     anchor: ebr::Arc<Anchor<S>>,
-    locks: Vec<VersionLocker<S>>,
+    locks: Vec<Locker<S>>,
     logs: Vec<Log>,
 }
 
 impl<S: Sequencer> Annals<S> {
-    /// Returns an [ebr::Ptr] of its [Anchor].
+    /// Returns an [`ebr::Ptr`] of its [Anchor].
     pub(super) fn anchor_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Anchor<S>> {
         self.anchor.ptr(barrier)
     }
@@ -133,7 +141,7 @@ impl<S: Sequencer> Annals<S> {
     pub(super) fn append<V: Version<S>>(
         &mut self,
         version: &V,
-        locker: VersionLocker<S>,
+        locker: Locker<S>,
         payload: Option<V::Data>,
         barrier: &ebr::Barrier,
     ) {
@@ -178,9 +186,9 @@ impl<S: Sequencer> Drop for Annals<S> {
 
 /// [Anchor] is a piece of data that outlives its associated [Journal] and [Annals].
 ///
-/// [VersionCell](super::version::VersionCell) may point to it if the [Journal] owns the
+/// [Cell](super::version::Cell) may point to it if the [Journal] owns the
 /// [Version].
-pub(super) struct Anchor<S: Sequencer> {
+pub struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     wait_queue: (Mutex<(bool, usize)>, Condvar),
     creation_clock: usize,
@@ -259,44 +267,34 @@ impl<S: Sequencer> Anchor<S> {
 
         // The transaction will either be committed or rolled back soon.
         if anchor_ref.commit_snapshot() == S::Clock::default() {
-            self.wait(|_| (), barrier);
+            self.wait(|_| ());
         }
         // Checks the final snapshot.
         anchor_ref.commit_snapshot() != S::Clock::default()
             && anchor_ref.commit_snapshot() <= snapshot
     }
 
-    /// Returns the submit-time clock value.
-    pub(super) fn submit_clock_ref(&self) -> &AtomicUsize {
-        &self.submit_clock
-    }
-
-    /// Waits for the final state of the [RecordData] to be determined.
-    pub(super) fn wait<R, F: FnOnce(S::Clock) -> R>(
-        &self,
-        f: F,
-        barrier: &ebr::Barrier,
-    ) -> Option<R> {
+    /// Waits for the final state of the [Journal] to be determined.
+    pub(super) fn wait<R, F: FnOnce(S::Clock) -> R>(&self, f: F) -> Option<R> {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
-            while !wait_queue.0 {
+            if !wait_queue.0 {
                 wait_queue.1 += 1;
                 if let Ok(mut wait_queue) = self.wait_queue.1.wait(wait_queue) {
                     wait_queue.1 -= 1;
+                    // Before waking up the next waiting thread, calls the supplied closure with the
+                    // mutex acquired.
+                    //
+                    // For instance, if the version is owned by the transaction, ownership can be
+                    // transferred.
+                    let result = f(self.transaction_anchor.commit_snapshot());
+
+                    // Once the thread wakes up, it is mandated to wake the next thread up.
+                    if wait_queue.1 > 0 {
+                        self.wait_queue.1.notify_one();
+                    }
+                    return Some(result);
                 }
             }
-            // Before waking up the next waiting thread, calls the supplied closure with the
-            // mutex acquired.
-            //
-            // For instance, if the version is owned by the transaction, ownership can be
-            // transferred.
-            let result = f(self.transaction_anchor.commit_snapshot());
-
-            // Once the thread wakes up, it is mandated to wake the next thread up.
-            if wait_queue.1 > 0 {
-                self.wait_queue.1.notify_one();
-            }
-
-            return Some(result);
         }
         None
     }

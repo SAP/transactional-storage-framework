@@ -2,8 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! This module defines data types used for versioning database objects.
+
 use super::journal::Anchor as JournalAnchor;
-use super::{Log, Sequencer, Snapshot};
+use super::{Error, Log, Sequencer, Snapshot};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
@@ -16,9 +18,9 @@ pub trait Version<S: Sequencer> {
     /// The type of the versioned data.
     type Data: Send + Sync;
 
-    /// Returns an [ebr::Ptr] to the [VersionCell] to which the versioned database object
+    /// Returns an [`ebr::Ptr`] to the [`VersionCell`] to which the versioned database object
     /// corresponds.
-    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, VersionCell<S>>;
+    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Cell<S>>;
 
     /// Creates a new [Version] of the versioned database object.
     ///
@@ -30,16 +32,16 @@ pub trait Version<S: Sequencer> {
         &self,
         creator_ptr: ebr::Ptr<'b, JournalAnchor<S>>,
         barrier: &'b ebr::Barrier,
-    ) -> Option<VersionLocker<S>> {
+    ) -> Option<Locker<S>> {
         if let Some(version_cell) = self.version_cell_ptr(barrier).try_into_arc() {
-            return VersionLocker::lock(version_cell, creator_ptr, barrier);
+            return Locker::lock(version_cell, creator_ptr, barrier);
         }
         None
     }
 
     /// The creator of the [Version] is eligible to feed data.
     ///
-    /// The caller must own the [Version], or a [VersionLocker] that owns it.
+    /// The caller must own the [Version], or a [`VersionLocker`] that owns it.
     fn write(&mut self, payload: Self::Data) -> Option<Log>;
 
     /// Returns a reference to the data.
@@ -62,12 +64,12 @@ pub trait Version<S: Sequencer> {
     fn consolidate(&self, barrier: &ebr::Barrier) -> bool;
 }
 
-/// [VersionCell] is a piece of data that is associated with a versioned database object.
+/// [Cell] is a piece of data that is associated with a versioned database object.
 ///
-/// [VersionCell] store the owner of the [Version] and the time point when the version is
+/// [Cell] store the owner of the [Version] and the time point when the version is
 /// created.
-pub struct VersionCell<S: Sequencer> {
-    /// The current owner of the [VersionCell].
+pub struct Cell<S: Sequencer> {
+    /// The current owner of the [Cell].
     ///
     /// Readers have to check the transaction state when it points to a [JournalAnchor].
     owner: ebr::AtomicArc<JournalAnchor<S>>,
@@ -78,8 +80,8 @@ pub struct VersionCell<S: Sequencer> {
     time_point: S::Clock,
 }
 
-impl<S: Sequencer> VersionCell<S> {
-    /// Checks if the [VersionCell] predates the snapshot.
+impl<S: Sequencer> Cell<S> {
+    /// Checks if the [Cell] predates the snapshot.
     fn predate(&self, snapshot: &Snapshot<S>, barrier: &ebr::Barrier) -> bool {
         if self.time_point != S::Clock::default() {
             return self.time_point <= *snapshot.clock();
@@ -92,7 +94,7 @@ impl<S: Sequencer> VersionCell<S> {
         // insufficient, because `VersionCell` is asynchronously updated after a new logical
         // clock is generated for a transaction.
         if let Some(owner_ref) = self.owner.load(Acquire, barrier).as_ref() {
-            if snapshot.visible(owner_ref, &barrier) {
+            if snapshot.visible(owner_ref, barrier) {
                 // The change has been made by the transaction that predates the snapshot.
                 return true;
             }
@@ -103,7 +105,7 @@ impl<S: Sequencer> VersionCell<S> {
     }
 }
 
-impl<S: Sequencer> Default for VersionCell<S> {
+impl<S: Sequencer> Default for Cell<S> {
     fn default() -> Self {
         Self {
             owner: ebr::AtomicArc::default(),
@@ -112,17 +114,17 @@ impl<S: Sequencer> Default for VersionCell<S> {
     }
 }
 
-impl<S: Sequencer> Drop for VersionCell<S> {
+impl<S: Sequencer> Drop for Cell<S> {
     fn drop(&mut self) {
         // Not locked when it is dropped.
         debug_assert!(self.owner.is_null(Relaxed));
     }
 }
 
-/// [VersionLocker] owns a [VersionCell] instance by holding a strong reference to it.
-pub struct VersionLocker<S: Sequencer> {
+/// [Locker] owns a [Cell] instance by holding a strong reference to it.
+pub struct Locker<S: Sequencer> {
     /// [VersionCell] holds a strong reference to [VersionCell].
-    version_cell: ebr::Arc<VersionCell<S>>,
+    version_cell: ebr::Arc<Cell<S>>,
 
     /// The current owner of the [VersionLocker].
     current_owner: *const JournalAnchor<S>,
@@ -135,25 +137,22 @@ pub struct VersionLocker<S: Sequencer> {
     prev_owner: Option<ebr::Arc<JournalAnchor<S>>>,
 }
 
-impl<S: Sequencer> VersionLocker<S> {
-    /// Acquires the exclusive lock on the given [VersionCell].
+impl<S: Sequencer> Locker<S> {
+    /// Acquires the exclusive lock on the given [Cell].
     ///
-    /// If the [VersionCell] has a valid time point assigned, it returns `None`.
+    /// If the [Cell] has a valid time point assigned, it returns `None`.
     fn lock(
-        version_cell: ebr::Arc<VersionCell<S>>,
+        version_cell: ebr::Arc<Cell<S>>,
         new_owner_ptr: ebr::Ptr<JournalAnchor<S>>,
         barrier: &ebr::Barrier,
-    ) -> Option<VersionLocker<S>> {
+    ) -> Option<Locker<S>> {
         if version_cell.time_point != S::Clock::default() {
             // The `VersionCell` has been created by another transaction.
             return None;
         }
 
         let mut new_owner = new_owner_ptr.try_into_arc();
-        if new_owner.is_none() {
-            // The given pointer is invalid.
-            return None;
-        }
+        new_owner.as_ref()?;
 
         while let Err((passed, actual)) = version_cell.owner.compare_exchange(
             ebr::Ptr::null(),
@@ -162,15 +161,12 @@ impl<S: Sequencer> VersionLocker<S> {
             Relaxed,
         ) {
             new_owner = passed;
-            if new_owner.is_none() {
-                // The given pointer is invalid.
-                return None;
-            }
+            new_owner.as_ref()?;
 
             if new_owner_ptr == actual {
                 // The `Journal` has previously acquired the lock.
                 debug_assert_eq!(version_cell.time_point, S::Clock::default());
-                return Some(VersionLocker {
+                return Some(Locker {
                     version_cell,
                     current_owner: new_owner_ptr.as_raw(),
                     prev_owner: new_owner,
@@ -203,7 +199,7 @@ impl<S: Sequencer> VersionLocker<S> {
                     Ok((old, _)) => {
                         // Succesfully took ownership.
                         debug_assert_eq!(version_cell.time_point, S::Clock::default());
-                        return Some(VersionLocker {
+                        return Some(Locker {
                             version_cell,
                             current_owner: new_owner_ptr.as_raw(),
                             prev_owner: old,
@@ -213,32 +209,30 @@ impl<S: Sequencer> VersionLocker<S> {
             }
 
             // Waits for the actual owner to release the lock.
+            #[allow(clippy::blocks_in_if_conditions)]
             if actual_owner
-                .wait(
-                    |snapshot| {
-                        if snapshot == S::Clock::default() {
-                            // The transaction has been rolled back, or the `Journal` has been
-                            // discarded, it will try to overtake ownership.
-                            //
-                            // The following CAS returning `false` means that another
-                            // transaction overtook ownership.
-                            if let Err((passed, _)) = version_cell.owner.compare_exchange(
-                                actual,
-                                (new_owner.take(), ebr::Tag::None),
-                                Acquire,
-                                Relaxed,
-                            ) {
-                                if let Some(passed) = passed {
-                                    new_owner.replace(passed);
-                                }
-                                return false;
+                .wait(|snapshot| {
+                    if snapshot == S::Clock::default() {
+                        // The transaction has been rolled back, or the `Journal` has been
+                        // discarded, it will try to overtake ownership.
+                        //
+                        // The following CAS returning `false` means that another
+                        // transaction overtook ownership.
+                        if let Err((passed, _)) = version_cell.owner.compare_exchange(
+                            actual,
+                            (new_owner.take(), ebr::Tag::None),
+                            Acquire,
+                            Relaxed,
+                        ) {
+                            if let Some(passed) = passed {
+                                new_owner.replace(passed);
                             }
-                            return true;
+                            return false;
                         }
-                        false
-                    },
-                    barrier,
-                )
+                        return true;
+                    }
+                    false
+                })
                 .map_or_else(|| false, |result| result)
             {
                 // This transaction has successfully locked the `VersionCell`.
@@ -257,7 +251,7 @@ impl<S: Sequencer> VersionLocker<S> {
             return None;
         }
 
-        Some(VersionLocker {
+        Some(Locker {
             version_cell,
             current_owner: new_owner_ptr.as_raw(),
             prev_owner: None,
@@ -265,30 +259,39 @@ impl<S: Sequencer> VersionLocker<S> {
     }
 
     /// Converts the given [Version] reference into a mutable reference, and updates it.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
     pub fn write<V: Version<S>>(
         &self,
         version: &V,
         payload: V::Data,
         barrier: &ebr::Barrier,
-    ) -> Result<Option<Log>, ()> {
+    ) -> Result<Option<Log>, Error> {
         if self.version_cell.ptr(barrier) == version.version_cell_ptr(barrier) {
+            #[allow(clippy::cast_ref_to_mut)]
             let version_mut_ref = unsafe { &mut *(version as *const _ as *mut V) };
             return Ok(version_mut_ref.write(payload));
         }
-        Err(())
+        Err(Error::Fail)
     }
 }
 
-impl<S: Sequencer> Drop for VersionLocker<S> {
+impl<S: Sequencer> Drop for Locker<S> {
     fn drop(&mut self) {
         let barrier = ebr::Barrier::new();
-        *unsafe { &mut *(&self.version_cell.time_point as *const S::Clock as *mut S::Clock) } =
-            self.version_cell
-                .owner
-                .load(Relaxed, &barrier)
-                .as_ref()
-                .unwrap()
-                .commit_snapshot();
+
+        *unsafe {
+            #[allow(clippy::cast_ref_to_mut)]
+            &mut *(&self.version_cell.time_point as *const S::Clock as *mut S::Clock)
+        } = self
+            .version_cell
+            .owner
+            .load(Relaxed, &barrier)
+            .as_ref()
+            .unwrap()
+            .commit_snapshot();
         let mut current_owner = self.version_cell.owner.load(Relaxed, &barrier);
         while current_owner.as_raw() == self.current_owner {
             // It must be a release-store.

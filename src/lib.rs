@@ -39,8 +39,8 @@ pub use storage::Storage;
 mod transaction;
 pub use transaction::Transaction;
 
-mod version;
-pub use version::{Version, VersionCell, VersionLocker};
+pub mod version;
+pub use version::Version;
 
 mod realization;
 pub use realization::atomic_counter::AtomicCounter;

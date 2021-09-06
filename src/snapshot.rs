@@ -32,6 +32,23 @@ pub struct Snapshot<'s, 't, 'r, S: Sequencer> {
 }
 
 impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
+    /// Creates a new [Snapshot] using the [Clock](super::Sequencer::Clock) value stored in the
+    /// supplied [Snapshot].
+    pub fn from(
+        snapshot: &'s Snapshot<S>,
+        transaction: Option<&'t Transaction<'s, S>>,
+        journal: Option<&'r Journal<'s, 't, S>>,
+    ) -> Snapshot<'s, 't, 'r, S> {
+        let tracker = snapshot.tracker.clone();
+        Snapshot {
+            sequencer: snapshot.sequencer,
+            tracker,
+            transaction: transaction.map(|transaction| (transaction, transaction.clock())),
+            journal,
+            snapshot: *snapshot.clock(),
+        }
+    }
+
     /// Creates a new [Snapshot].
     ///
     /// The clock value that the [Snapshot] owns is tracked by the given [Sequencer].
@@ -48,24 +65,6 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
             transaction: transaction.map(|transaction| (transaction, transaction.clock())),
             journal,
             snapshot,
-        }
-    }
-
-    /// Creates a new [Snapshot] using the [Clock](super::Sequencer::Clock) value stored in the
-    /// supplied [Snapshot].
-    pub(super) fn from(
-        sequencer: &'s S,
-        snapshot: &'s Snapshot<S>,
-        transaction: Option<&'t Transaction<'s, S>>,
-        journal: Option<&'r Journal<'s, 't, S>>,
-    ) -> Snapshot<'s, 't, 'r, S> {
-        let tracker = snapshot.tracker.clone();
-        Snapshot {
-            sequencer,
-            tracker,
-            transaction: transaction.map(|transaction| (transaction, transaction.clock())),
-            journal,
-            snapshot: *snapshot.clock(),
         }
     }
 
