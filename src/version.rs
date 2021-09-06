@@ -18,7 +18,7 @@ pub trait Version<S: Sequencer> {
     /// The type of the versioned data.
     type Data: Send + Sync;
 
-    /// Returns an [`ebr::Ptr`] to the [`VersionCell`] to which the versioned database object
+    /// Returns an [`ebr::Ptr`] to the [Cell] to which the versioned database object
     /// corresponds.
     fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Cell<S>>;
 
@@ -41,7 +41,7 @@ pub trait Version<S: Sequencer> {
 
     /// The creator of the [Version] is eligible to feed data.
     ///
-    /// The caller must own the [Version], or a [`VersionLocker`] that owns it.
+    /// The caller must own the [Version], or a [Locker] that owns it.
     fn write(&mut self, payload: Self::Data) -> Option<Log>;
 
     /// Returns a reference to the data.
@@ -123,10 +123,10 @@ impl<S: Sequencer> Drop for Cell<S> {
 
 /// [Locker] owns a [Cell] instance by holding a strong reference to it.
 pub struct Locker<S: Sequencer> {
-    /// [VersionCell] holds a strong reference to [VersionCell].
+    /// [Locker] holds a strong reference to [Cell].
     version_cell: ebr::Arc<Cell<S>>,
 
-    /// The current owner of the [VersionLocker].
+    /// The current owner of the [Locker].
     current_owner: *const JournalAnchor<S>,
 
     /// The previous owner.

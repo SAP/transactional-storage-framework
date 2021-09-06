@@ -37,7 +37,7 @@ mod storage;
 pub use storage::Storage;
 
 mod transaction;
-pub use transaction::Transaction;
+pub use transaction::{Rubicon, Transaction};
 
 pub mod version;
 pub use version::Version;

@@ -26,8 +26,8 @@ pub trait Sequencer: 'static {
     /// The [Default] value is treated an `invisible` time point in the system.
     type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
 
-    /// [Tracker](Sequencer::Tracker) allows the sequencer to track all the issued [Clock]
-    /// instances.
+    /// [Tracker](Sequencer::Tracker) allows the sequencer to track all the issued
+    /// [Clock](Sequencer::Clock) instances.
     ///
     /// A [Tracker](Sequencer::Tracker) can be cloned.
     type Tracker: Clone + DeriveClock<Self::Clock>;
@@ -83,6 +83,6 @@ pub trait Sequencer: 'static {
 
 /// The [`DeriveClock`] trait defines the capability of deriving a [Clock](Sequencer::Clock).
 pub trait DeriveClock<C> {
-    /// Returns the [Clock].
+    /// Returns the [Clock](Sequencer::Clock).
     fn clock(&self) -> C;
 }
