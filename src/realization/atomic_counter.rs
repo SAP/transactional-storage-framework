@@ -25,7 +25,8 @@ impl Sequencer for AtomicCounter {
 
     fn new() -> AtomicCounter {
         AtomicCounter {
-            clock: AtomicUsize::new(0),
+            // Starts from `1` in order to avoid using `0`.
+            clock: AtomicUsize::new(1),
             min_heap: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }

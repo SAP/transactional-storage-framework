@@ -46,17 +46,17 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
     ///
     /// let versioned_object = RecordVersion::new();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let mut transaction = storage.transaction();
+    /// let transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
     /// assert!(journal.create(&versioned_object, None).is_ok());
-    ///
     /// let snapshot = journal.snapshot();
-    /// drop(snapshot);
+    /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
+    /// journal.submit();
     /// ```
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
@@ -81,7 +81,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Transaction, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
     ///
     /// let versioned_object = RecordVersion::new();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
@@ -94,8 +94,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// transaction.commit();
     ///
     /// let snapshot = storage.snapshot();
-    /// let guard = crossbeam_epoch::pin();
-    /// assert!(versioned_object.predate(&snapshot, &guard));
+    /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
     /// ```
     pub fn create<V: Version<S>>(
         &mut self,
@@ -226,7 +225,7 @@ impl<S: Sequencer> Anchor<S> {
         // `self` predates the given one.
         (
             true,
-            self.submit_clock.load(Relaxed) <= journal_anchor.creation_clock,
+            journal_anchor.submit_clock.load(Relaxed) <= self.creation_clock,
         )
     }
 
@@ -322,5 +321,26 @@ impl<S: Sequencer> Anchor<S> {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{AtomicCounter, RecordVersion, Storage, Version};
+
+    #[test]
+    fn journal() {
+        let versioned_object = RecordVersion::new();
+        let storage: Storage<AtomicCounter> = Storage::new(None);
+        let transaction = storage.transaction();
+
+        let mut journal = transaction.start();
+        assert!(journal.create(&versioned_object, None).is_ok());
+        assert_eq!(journal.submit(), 1);
+
+        assert!(transaction.commit().is_ok());
+
+        let snapshot = storage.snapshot();
+        assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
     }
 }

@@ -28,7 +28,7 @@ impl<S: Sequencer> Container<S> {
     ///
     /// ```
     ///
-    /// use tss::{AtomicCounter, Container, ContainerHandle};
+    /// use tss::{AtomicCounter, Container};
     /// type Handle = scc::ebr::Arc<Container<AtomicCounter>>;
     ///
     /// let container_handle: Handle = Container::new_directory();
@@ -45,7 +45,7 @@ impl<S: Sequencer> Container<S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Container, ContainerHandle, RelationalTable};
+    /// use tss::{AtomicCounter, Container, RelationalTable};
     /// type Handle = scc::ebr::Arc<Container<AtomicCounter>>;
     ///
     /// let container_data = Box::new(RelationalTable::new());

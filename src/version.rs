@@ -138,6 +138,25 @@ pub struct Locker<S: Sequencer> {
 }
 
 impl<S: Sequencer> Locker<S> {
+    /// Converts the given [Version] reference into a mutable reference, and updates it.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
+    pub fn write<V: Version<S>>(
+        &self,
+        version: &V,
+        payload: V::Data,
+        barrier: &ebr::Barrier,
+    ) -> Result<Option<Log>, Error> {
+        if self.version_cell.ptr(barrier) == version.version_cell_ptr(barrier) {
+            #[allow(clippy::cast_ref_to_mut)]
+            let version_mut_ref = unsafe { &mut *(version as *const _ as *mut V) };
+            return Ok(version_mut_ref.write(payload));
+        }
+        Err(Error::Fail)
+    }
+
     /// Acquires the exclusive lock on the given [Cell].
     ///
     /// If the [Cell] has a valid time point assigned, it returns `None`.
@@ -245,36 +264,19 @@ impl<S: Sequencer> Locker<S> {
             }
         }
 
-        if version_cell.time_point != S::Clock::default() {
-            // The `VersionCell` has a valid time point.
-            version_cell.owner.swap((None, ebr::Tag::None), Relaxed);
-            return None;
-        }
-
-        Some(Locker {
+        let locker = Locker {
             version_cell,
             current_owner: new_owner_ptr.as_raw(),
             prev_owner: None,
-        })
-    }
+        };
 
-    /// Converts the given [Version] reference into a mutable reference, and updates it.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    pub fn write<V: Version<S>>(
-        &self,
-        version: &V,
-        payload: V::Data,
-        barrier: &ebr::Barrier,
-    ) -> Result<Option<Log>, Error> {
-        if self.version_cell.ptr(barrier) == version.version_cell_ptr(barrier) {
-            #[allow(clippy::cast_ref_to_mut)]
-            let version_mut_ref = unsafe { &mut *(version as *const _ as *mut V) };
-            return Ok(version_mut_ref.write(payload));
+        if locker.version_cell.time_point != S::Clock::default() {
+            // The `VersionCell` has a valid time point.
+            drop(locker);
+            return None;
         }
-        Err(Error::Fail)
+
+        Some(locker)
     }
 }
 
@@ -282,16 +284,11 @@ impl<S: Sequencer> Drop for Locker<S> {
     fn drop(&mut self) {
         let barrier = ebr::Barrier::new();
 
-        *unsafe {
-            #[allow(clippy::cast_ref_to_mut)]
-            &mut *(&self.version_cell.time_point as *const S::Clock as *mut S::Clock)
-        } = self
-            .version_cell
-            .owner
-            .load(Relaxed, &barrier)
-            .as_ref()
-            .unwrap()
-            .commit_snapshot();
+        #[allow(clippy::cast_ref_to_mut)]
+        unsafe {
+            *(&self.version_cell.time_point as *const S::Clock as *mut S::Clock) =
+                (*self.current_owner).commit_snapshot();
+        }
         let mut current_owner = self.version_cell.owner.load(Relaxed, &barrier);
         while current_owner.as_raw() == self.current_owner {
             // It must be a release-store.

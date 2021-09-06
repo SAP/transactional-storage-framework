@@ -37,9 +37,13 @@ pub trait Sequencer: 'static {
 
     /// Returns a [Clock](Sequencer::Clock) that represents a database snapshot being visible
     /// to all the current and future readers.
+    ///
+    /// This must not return the default [Clock](Sequencer::Clock) value.
     fn min(&self, order: Ordering) -> Self::Clock;
 
     /// Gets the current [Clock](Sequencer::Clock).
+    ///
+    /// This must not return the default [Clock](Sequencer::Clock) value.
     fn get(&self, order: Ordering) -> Self::Clock;
 
     /// Issues a [Clock](Sequencer::Clock) wrapped in a [Tracker](Sequencer::Tracker).
@@ -47,6 +51,8 @@ pub trait Sequencer: 'static {
     /// The [Sequencer] takes the issued [Clock](Sequencer::Clock) into account when
     /// calculating the minimum valid [Clock](Sequencer::Clock) value until the
     /// [Tracker](Sequencer::Tracker) is dropped.
+    ///
+    /// This must not issue the default [Clock](Sequencer::Clock) value.
     fn issue(&self, order: Ordering) -> Self::Tracker;
 
     /// Aggregates all the issued [Clock](Sequencer::Clock) instances being tracked by the

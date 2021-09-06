@@ -14,19 +14,18 @@ pub struct RecordVersion {
     version_cell: ebr::AtomicArc<Cell<AtomicCounter>>,
 }
 
-impl Default for RecordVersion {
-    fn default() -> Self {
-        RecordVersion {
-            version_cell: ebr::AtomicArc::new(Cell::default()),
-        }
-    }
-}
 impl RecordVersion {
     /// Creates a new [`RecordVersion`].
     #[must_use]
     pub fn new() -> RecordVersion {
+        RecordVersion::default()
+    }
+}
+
+impl Default for RecordVersion {
+    fn default() -> Self {
         RecordVersion {
-            version_cell: ebr::AtomicArc::null(),
+            version_cell: ebr::AtomicArc::new(Cell::default()),
         }
     }
 }
