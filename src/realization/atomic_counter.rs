@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{DeriveClock, Sequencer};
+use crate::sequencer::DeriveClock;
+use crate::Sequencer;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;

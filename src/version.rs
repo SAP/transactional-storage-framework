@@ -27,6 +27,10 @@ pub trait Version<S: Sequencer> {
 
     /// Returns an [Owner] reference that points to the creator transaction.
     ///
+    /// It is allowed for a [Version] implementation to return different references based on
+    /// the status, for instance, if the [Version] is fully consolidated, it may return a
+    /// static reference to an [Owner] instance that represents an always-visible state.
+    ///
     /// # Safety
     ///
     /// The owner field must not be dropped on its own, otherwise a [Locker] may gain access to

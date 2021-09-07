@@ -350,7 +350,7 @@ impl<S: Sequencer> Anchor<S> {
 /// [Version] implements the [Version](super::Version) trait, by implementing a linked list of
 /// [Container] instance.
 struct Version<S: Sequencer> {
-    /// Its [VersionCell].
+    /// Its [Owner].
     owner: Owner<S>,
 
     /// `container` being tagged indicates that the [Container] is deleted.

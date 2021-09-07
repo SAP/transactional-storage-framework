@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor;
-use super::{DeriveClock, Journal, Sequencer, Transaction};
+use super::sequencer::DeriveClock;
+use super::{Journal, Sequencer, Transaction};
 
 use std::sync::atomic::Ordering::Acquire;
 

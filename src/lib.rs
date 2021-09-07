@@ -10,7 +10,7 @@
 //! [`Storage`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
 //!
 //! # [`Container`]
-//! [`Container`] is hierachical data container that a [`Storage`] manages.
+//! [`Container`] is hierarchical data container that a [`Storage`] manages.
 //!
 //! # [`Transaction`]
 //! [`Transaction`] represents a storage transaction.
@@ -27,8 +27,8 @@ pub use journal::Journal;
 mod logger;
 pub use logger::{Log, Logger};
 
-mod sequencer;
-pub use sequencer::{DeriveClock, Sequencer};
+pub mod sequencer;
+pub use sequencer::Sequencer;
 
 mod snapshot;
 pub use snapshot::Snapshot;

@@ -2,6 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! The module defines the [Sequencer] trait.
+//!
+//! The [Sequencer] trait and the [Clock](Sequencer::Clock) are the basis of all the database
+//! operations as they define the flow of time.
+
 use std::fmt::Debug;
 use std::sync::atomic::Ordering;
 
@@ -21,7 +26,7 @@ pub trait Sequencer: 'static + Default {
     ///
     /// [Clone], [Copy], [Send] and [Sync] are required as the value can be copied sent
     /// frequently. [`PartialEq`] and [`PartialOrd`] allow developers to implement a
-    /// floating-point, or a `Lamport` vector clock generator.
+    /// floating-point, or a `Lamport vector clock` generator.
     ///
     /// The [Default] value is treated an `invisible` time point in the system.
     type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
