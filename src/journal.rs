@@ -215,7 +215,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Returns the clock of the transaction snapshot.
     pub(super) fn commit_snapshot(&self) -> S::Clock {
-        self.transaction_anchor.commit_snapshot()
+        self.transaction_anchor.commit_snapshot_clock()
     }
 
     /// Checks if the lock it has acquired can be transferred to the [Journal].
@@ -262,19 +262,19 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         let anchor_ref = &*self.transaction_anchor;
-        if anchor_ref.preliminary_snapshot() == S::Clock::default()
-            || anchor_ref.preliminary_snapshot() >= snapshot
+        if anchor_ref.commit_start_clock() == S::Clock::default()
+            || anchor_ref.commit_start_clock() >= snapshot
         {
             return false;
         }
 
         // The transaction will either be committed or rolled back soon.
-        if anchor_ref.commit_snapshot() == S::Clock::default() {
+        if anchor_ref.commit_snapshot_clock() == S::Clock::default() {
             self.wait(|_| (), None);
         }
         // Checks the final snapshot.
-        anchor_ref.commit_snapshot() != S::Clock::default()
-            && anchor_ref.commit_snapshot() <= snapshot
+        anchor_ref.commit_snapshot_clock() != S::Clock::default()
+            && anchor_ref.commit_snapshot_clock() <= snapshot
     }
 
     /// Waits for the final state of the [Journal] to be determined.
@@ -285,7 +285,7 @@ impl<S: Sequencer> Anchor<S> {
     ) -> Option<R> {
         if let Ok(mut wait_queue) = self.wait_queue.0.lock() {
             if wait_queue.0 {
-                return Some(f(self.transaction_anchor.commit_snapshot()));
+                return Some(f(self.transaction_anchor.commit_snapshot_clock()));
             }
 
             // Starts waiting by incrementing the counter.
@@ -312,7 +312,7 @@ impl<S: Sequencer> Anchor<S> {
                     //
                     // For instance, if the version is owned by the transaction, ownership can
                     // be transferred.
-                    let result = f(self.transaction_anchor.commit_snapshot());
+                    let result = f(self.transaction_anchor.commit_snapshot_clock());
 
                     // Once the thread wakes up, it is mandated to wake the next thread up.
                     if wait_queue.1 > 0 {

@@ -6,7 +6,7 @@
 //!
 //! The data types in the module rely on the [transmute] operator to prolong the lifetime of
 //! their instances, because there is no other way that the code is able to tell the compiler
-//! that they will be safely garbage-collected in accordance with the database `MVCC`
+//! that they will be safely garbage-collected in accordance with a correct database `MVCC`
 //! mechanism.
 
 use super::journal::Anchor as JournalAnchor;
@@ -134,7 +134,7 @@ impl<S: Sequencer> Drop for Owner<S> {
 /// [Locker] has `'static` references to the [Version] and [Journal](super::Journal).
 ///
 /// It semantically owns the [Version] while the `Rust` compiler cannot deduce anything related
-/// to the database `MVCC` mechanism, and therefore instantiating a [Locker] requires calls to
+/// to a database `MVCC` mechanism, and therefore instantiating a [Locker] requires calls to
 /// [transmute](std::mem::transmute) to prolong lifetimes of references.
 pub struct Locker<S: Sequencer> {
     /// [Locker] has a reference to the version owner field of the [Version].

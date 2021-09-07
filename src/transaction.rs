@@ -23,7 +23,7 @@ pub struct Transaction<'s, S: Sequencer> {
     sequencer: &'s S,
 
     /// The changes made by the transaction.
-    record: Mutex<Vec<Annals<S>>>,
+    annals: Mutex<Vec<Annals<S>>>,
 
     /// A piece of data that is shared among [Journal] instances in the [Transaction].
     ///
@@ -51,7 +51,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            record: Mutex::new(Vec::new()),
+            annals: Mutex::new(Vec::new()),
             anchor: ebr::Arc::new(Anchor::new()),
             clock: AtomicUsize::new(0),
         }
@@ -94,7 +94,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Gets the current local clock value of the [Transaction].
     ///
-    /// It returns the number of submitted Journal instances.
+    /// It returns the number of submitted [Journal] instances.
     ///
     /// # Examples
     ///
@@ -132,21 +132,23 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let result = transaction.rewind(1);
     /// assert!(result.is_err());
     ///
-    /// let journal = transaction.start();
-    /// journal.submit();
+    /// for _ in 0..3 {
+    ///     let journal = transaction.start();
+    ///     journal.submit();
+    /// }
     ///
-    /// let result = transaction.rewind(0);
+    /// let result = transaction.rewind(1);
     /// assert!(result.is_ok());
+    /// assert_eq!(transaction.clock(), 1);
     /// ```
     pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
-        if let Ok(mut record_vector) = self.record.lock() {
+        if let Ok(mut record_vector) = self.annals.lock() {
             if record_vector.len() > clock {
                 while record_vector.len() > clock {
                     drop(record_vector.pop());
                 }
-                let new_clock = record_vector.len();
-                self.clock.store(new_clock, Release);
-                return Ok(new_clock);
+                self.clock.store(clock, Release);
+                return Ok(clock);
             }
         }
         Err(Error::Fail)
@@ -170,12 +172,15 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// transaction.commit();
     /// ```
     pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
+        debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
+
         // Assigns a new logical clock.
         let anchor_mut_ref = unsafe {
             #[allow(clippy::cast_ref_to_mut)]
             &mut *(&*self.anchor as *const Anchor<S> as *mut Anchor<S>)
         };
-        anchor_mut_ref.preliminary_snapshot = self.sequencer.get(Relaxed);
+        anchor_mut_ref.prepare_clock = self.sequencer.get(Relaxed);
+        anchor_mut_ref.state.store(1, Release);
         Ok(Rubicon {
             transaction: Some(self),
         })
@@ -193,12 +198,14 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// transaction.rollback();
     /// ```
     pub fn rollback(self) {
-        if let Ok(mut record_vector) = self.record.lock() {
+        self.anchor.state.store(State::RollingBack.into(), Release);
+        if let Ok(mut record_vector) = self.annals.lock() {
             while let Some(record) = record_vector.pop() {
                 // Changes should be reverted from the back of the record.
                 drop(record);
             }
         }
+        self.anchor.state.store(State::RolledBack.into(), Release);
         drop(self);
     }
 
@@ -209,7 +216,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Takes [Annals], and records them.
     pub(super) fn record(&self, record: Annals<S>) -> usize {
-        let mut record_vector = self.record.lock().unwrap();
+        let mut record_vector = self.annals.lock().unwrap();
         record_vector.push(record);
         let new_clock = record_vector.len();
         // submit_clock is updated after the contents are moved to the anchor.
@@ -228,6 +235,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// Only a Rubicon instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) {
+        debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
         drop(self);
     }
 }
@@ -250,10 +258,6 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
     /// use tss::{AtomicCounter, Sequencer, Storage, Transaction};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let mut transaction = storage.transaction();
-    /// if let Ok(rubicon) = transaction.commit() {
-    ///     rubicon.rollback();
-    /// };
     ///
     /// let mut transaction = storage.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
@@ -287,12 +291,18 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
 
     /// Commits the transaction.
     fn post_process(transaction: Transaction<S>) -> S::Clock {
+        debug_assert_eq!(
+            transaction.anchor.state.load(Relaxed),
+            State::Committing.into()
+        );
+
         let anchor_mut_ref = unsafe {
             #[allow(clippy::cast_ref_to_mut)]
             &mut *(&*transaction.anchor as *const Anchor<S> as *mut Anchor<S>)
         };
         let commit_snapshot = transaction.sequencer.advance(Release);
-        anchor_mut_ref.commit_snapshot = commit_snapshot;
+        anchor_mut_ref.commit_clock = commit_snapshot;
+        anchor_mut_ref.state.store(State::Committed.into(), Release);
         transaction.post_process();
         commit_snapshot
     }
@@ -307,31 +317,77 @@ impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
     }
 }
 
+/// [Transaction] state.
+pub enum State {
+    /// The transaction is active.
+    Active,
+    /// The transaction is being committed.
+    Committing,
+    /// The transaction is committed.
+    Committed,
+    /// The transaction is being rolled back.
+    RollingBack,
+    /// The transaction is rolled back.
+    RolledBack,
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<usize> for State {
+    fn into(self) -> usize {
+        match self {
+            Self::Active => 0,
+            Self::Committing => 1,
+            Self::Committed => 2,
+            Self::RollingBack => 3,
+            Self::RolledBack => 4,
+        }
+    }
+}
+
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
 pub(super) struct Anchor<S: Sequencer> {
+    /// The transaction state.
+    ///
+    /// An integer represents a transaction state.
+    ///  * 0: active.
+    ///  * 1: commit started.
+    ///  * 2: committed.
+    ///  * 3: abort started.
+    ///  * 4: aborted.
+    state: AtomicUsize,
+
     /// The clock value when a commit is issued.
-    preliminary_snapshot: S::Clock,
+    prepare_clock: S::Clock,
 
     /// The clock value when the commit is completed.
-    commit_snapshot: S::Clock,
+    commit_clock: S::Clock,
 }
 
 impl<S: Sequencer> Anchor<S> {
     fn new() -> Anchor<S> {
         Anchor {
-            preliminary_snapshot: S::Clock::default(),
-            commit_snapshot: S::Clock::default(),
+            state: AtomicUsize::new(0),
+            prepare_clock: S::Clock::default(),
+            commit_clock: S::Clock::default(),
         }
     }
 
     /// Returns the clock value when the transaction starts to commit.
-    pub(super) fn preliminary_snapshot(&self) -> S::Clock {
-        self.preliminary_snapshot
+    pub(super) fn commit_start_clock(&self) -> S::Clock {
+        if self.state.load(Acquire) == State::Active.into() {
+            S::Clock::default()
+        } else {
+            self.prepare_clock
+        }
     }
 
     /// Returns the final commit clock value of the transaction.
-    pub(super) fn commit_snapshot(&self) -> S::Clock {
-        self.commit_snapshot
+    pub(super) fn commit_snapshot_clock(&self) -> S::Clock {
+        if self.state.load(Acquire) == State::Committed.into() {
+            self.commit_clock
+        } else {
+            S::Clock::default()
+        }
     }
 }
 
