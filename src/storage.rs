@@ -41,7 +41,7 @@ impl<S: Sequencer> Storage<S> {
     pub fn new(logger: Option<Box<dyn Logger<S> + Send + Sync>>) -> Storage<S> {
         let root_container = Container::new_directory();
         Storage {
-            sequencer: S::new(),
+            sequencer: S::default(),
             _logger: logger,
             root_container,
         }

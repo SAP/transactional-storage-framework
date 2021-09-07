@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::version::Cell;
+use super::version::Owner;
 use super::Version as VersionTrait;
-use super::{Error, Journal, Log, Sequencer, Snapshot, Transaction};
+use super::{Error, Journal, Sequencer, Snapshot, Transaction};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
@@ -76,10 +76,14 @@ impl<S: Sequencer> Container<S> {
                     let new_version_ptr = anchor.install(snapshot, &barrier);
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
                         let new_directory = Container::new_directory();
+                        #[allow(clippy::blocks_in_if_conditions)]
                         if journal
                             .create(
                                 &*new_version,
-                                Some(ebr::AtomicArc::from(new_directory.clone())),
+                                |c| {
+                                    *c = ebr::AtomicArc::from(new_directory.clone());
+                                    Ok(None)
+                                },
                                 timeout,
                             )
                             .is_ok()
@@ -133,10 +137,14 @@ impl<S: Sequencer> Container<S> {
                 if let Some(result) = directory.read(name, |_, anchor| {
                     let new_version_ptr = anchor.install(snapshot, &barrier);
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        #[allow(clippy::blocks_in_if_conditions)]
                         if journal
                             .create(
                                 &*new_version,
-                                Some(ebr::AtomicArc::from(container.clone())),
+                                |c| {
+                                    *c = ebr::AtomicArc::from(container.clone());
+                                    Ok(None)
+                                },
                                 timeout,
                             )
                             .is_ok()
@@ -170,8 +178,16 @@ impl<S: Sequencer> Container<S> {
                 if let Some(new_version) = new_version_ptr.try_into_arc() {
                     let deleted_version = ebr::AtomicArc::null();
                     deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
+                    #[allow(clippy::blocks_in_if_conditions)]
                     if journal
-                        .create(&*new_version, Some(deleted_version), timeout)
+                        .create(
+                            &*new_version,
+                            |c| {
+                                *c = deleted_version;
+                                Ok(None)
+                            },
+                            timeout,
+                        )
                         .is_ok()
                     {
                         // The transaction successfully deleted it.
@@ -335,7 +351,7 @@ impl<S: Sequencer> Anchor<S> {
 /// [Container] instance.
 struct Version<S: Sequencer> {
     /// Its [VersionCell].
-    version_cell: ebr::AtomicArc<Cell<S>>,
+    owner: Owner<S>,
 
     /// `container` being tagged indicates that the [Container] is deleted.
     container: ebr::AtomicArc<Container<S>>,
@@ -347,7 +363,7 @@ struct Version<S: Sequencer> {
 impl<S: Sequencer> Version<S> {
     fn new() -> Version<S> {
         Version {
-            version_cell: ebr::AtomicArc::new(Cell::default()),
+            owner: Owner::default(),
             container: ebr::AtomicArc::null(),
             link: ebr::AtomicArc::null(),
         }
@@ -362,28 +378,11 @@ impl<S: Sequencer> Version<S> {
 impl<S: Sequencer> VersionTrait<S> for Version<S> {
     type Data = ebr::AtomicArc<Container<S>>;
 
-    fn version_cell_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Cell<S>> {
-        self.version_cell.load(Acquire, barrier)
+    fn owner_field<'b>(&self) -> &Owner<S> {
+        &self.owner
     }
 
-    fn write(&mut self, payload: Self::Data) -> Option<Log> {
-        self.container = payload;
-        None
-    }
-
-    fn read(&self, snapshot: &Snapshot<S>, barrier: &ebr::Barrier) -> Option<&Self::Data> {
-        if self.predate(snapshot, barrier) {
-            Some(&self.container)
-        } else {
-            None
-        }
-    }
-
-    fn consolidate(&self, barrier: &ebr::Barrier) -> bool {
-        if let Some(version_cell) = self.version_cell.swap((None, ebr::Tag::None), Relaxed) {
-            barrier.reclaim(version_cell);
-            return true;
-        }
-        false
+    fn data_ref(&self) -> &Self::Data {
+        &self.container
     }
 }

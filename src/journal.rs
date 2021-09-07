@@ -51,15 +51,17 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// ```
     /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
     ///
-    /// let versioned_object = RecordVersion::new();
+    /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None, None).is_ok());
+    /// assert!(journal.create(&versioned_object, |_| Ok(None), None).is_ok());
     /// let snapshot = journal.snapshot();
     /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
     /// journal.submit();
+    ///
+    /// assert!(versioned_object.consolidate());
     /// ```
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
@@ -86,30 +88,36 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// ```
     /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
     ///
-    /// let versioned_object = RecordVersion::new();
+    /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
-    /// assert!(journal.create(&versioned_object, None, None).is_ok());
+    /// assert!(journal.create(&versioned_object, |_| Ok(None), None).is_ok());
     /// journal.submit();
     ///
     /// transaction.commit();
     ///
     /// let snapshot = storage.snapshot();
     /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
+    /// assert!(versioned_object.consolidate());
     /// ```
-    pub fn create<V: Version<S>>(
+    pub fn create<V: Version<S>, F: FnOnce(&mut V::Data) -> Result<Option<Log>, Error>>(
         &mut self,
         version: &V,
-        payload: Option<V::Data>,
+        writer: F,
         timeout: Option<Duration>,
     ) -> Result<(), Error> {
         if let Some(record_mut) = self.record.as_mut() {
             let barrier = ebr::Barrier::new();
-            if let Some(locker) = version.create(record_mut.anchor_ptr(&barrier), timeout, &barrier)
+            if let Some(mut locker) =
+                version.create(record_mut.anchor_ptr(&barrier), timeout, &barrier)
             {
-                record_mut.append(version, locker, payload, &barrier);
+                let log = version.write(&mut locker, writer, &barrier)?;
+                record_mut.locks.push(locker);
+                if let Some(log) = log {
+                    record_mut.logs.push(log);
+                }
                 return Ok(());
             }
         }
@@ -151,26 +159,6 @@ impl<S: Sequencer> Annals<S> {
     /// Returns an [`ebr::Ptr`] of its [Anchor].
     pub(super) fn anchor_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Anchor<S>> {
         self.anchor.ptr(barrier)
-    }
-
-    /// Appends a version creation log record.
-    pub(super) fn append<V: Version<S>>(
-        &mut self,
-        version: &V,
-        locker: Locker<S>,
-        payload: Option<V::Data>,
-        barrier: &ebr::Barrier,
-    ) {
-        if let Some(payload) = payload {
-            if let Ok(log_record) = locker.write(version, payload, barrier) {
-                self.locks.push(locker);
-                if let Some(log_record) = log_record {
-                    self.logs.push(log_record);
-                }
-            }
-        } else {
-            self.locks.push(locker);
-        }
     }
 
     /// Assigns a clock value to its [Anchor].
@@ -362,17 +350,55 @@ mod tests {
 
     #[test]
     fn journal() {
-        let versioned_object = RecordVersion::new();
+        let versioned_object = RecordVersion::default();
         let storage: Storage<AtomicCounter> = Storage::new(None);
         let transaction = storage.transaction();
 
         let mut journal = transaction.start();
-        assert!(journal.create(&versioned_object, None, None).is_ok());
+        assert!(journal
+            .create(
+                &versioned_object,
+                |d| {
+                    *d = 10;
+                    Ok(None)
+                },
+                None
+            )
+            .is_ok());
+
+        let mut journal_inner = transaction.start();
+        assert!(journal_inner
+            .create(
+                &versioned_object,
+                |d| {
+                    *d = 12;
+                    Ok(None)
+                },
+                None
+            )
+            .is_err());
+
         assert_eq!(journal.submit(), 1);
+        assert_eq!(*versioned_object.data_ref(), 10);
+
+        assert!(journal_inner
+            .create(
+                &versioned_object,
+                |d| {
+                    *d = 2;
+                    Ok(None)
+                },
+                None
+            )
+            .is_err());
+        assert_eq!(journal_inner.submit(), 2);
 
         assert!(transaction.commit().is_ok());
 
         let snapshot = storage.snapshot();
         assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
+        assert!(versioned_object.consolidate());
+
+        assert_eq!(*versioned_object.data_ref(), 10);
     }
 }

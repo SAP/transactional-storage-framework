@@ -23,14 +23,6 @@ impl Sequencer for AtomicCounter {
     type Clock = usize;
     type Tracker = UsizeTracker;
 
-    fn new() -> AtomicCounter {
-        AtomicCounter {
-            // Starts from `1` in order to avoid using `0`.
-            clock: AtomicUsize::new(1),
-            min_heap: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-
     fn min(&self, _order: Ordering) -> usize {
         if let Ok(min_heap) = self.min_heap.lock() {
             #[allow(clippy::never_loop)]
@@ -88,6 +80,16 @@ impl Sequencer for AtomicCounter {
 
     fn advance(&self, order: Ordering) -> Self::Clock {
         self.clock.fetch_add(1, order) + 1
+    }
+}
+
+impl Default for AtomicCounter {
+    fn default() -> Self {
+        AtomicCounter {
+            // Starts from `1` in order to avoid using `0`.
+            clock: AtomicUsize::new(1),
+            min_heap: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 }
 

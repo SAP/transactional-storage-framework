@@ -56,11 +56,10 @@ The framework provides a row-oriented database table container that resembles tr
 `Sequencer` is a logical clock generator that gives an identifier to a set of changes made by a transaction. The framework allows one to implement the `Lamport vector clock` as the `Sequence` trait assumes `PartialOrd` for the clock value. It is the most important type in a transactional storage system as it defines the flow of time.
 
 ```rust
-pub trait Sequencer: 'static {
+pub trait Sequencer: 'static + Default {
     type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
     type Tracker: Clone + DeriveClock<Self::Clock>;
 
-    fn new() -> Self;
     fn min(&self, order: Ordering) -> Self::Clock;
     fn get(&self, order: Ordering) -> Self::Clock;
     fn issue(&self, order: Ordering) -> Self::Tracker;
@@ -198,15 +197,17 @@ The framework provides a file-based logger that is capable of lock-free check-po
 ```rust
 use tss::{AtomicCounter, RecordVersion, Storage, Version};
 
-let versioned_object = RecordVersion::new();
+let versioned_object: RecordVersion<usize> = RecordVersion::default();
 let storage: Storage<AtomicCounter> = Storage::new(None);
 
 let mut transaction = storage.transaction();
 let mut journal = transaction.start();
 assert!(journal.create(
     &versioned_object,
-    None,
-    None,
+    |d| {
+        *d = 1;
+        Ok(None)
+    },
     Some(Duration::from_millis(100))).is_ok());
 journal.submit();
 transaction.commit();

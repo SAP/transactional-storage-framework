@@ -353,7 +353,7 @@ mod test {
         });
 
         let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
-        let versioned_object = Arc::new(RecordVersion::new());
+        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
         let transaction = Arc::new(storage_ref.transaction());
         let barrier = Arc::new(Barrier::new(2));
 
@@ -366,7 +366,7 @@ mod test {
             // Step 1. Tries to acquire lock acquired by an active transaction journal.
             let mut journal = transaction_cloned.start();
             assert!(journal
-                .create(&*versioned_object_cloned, None, None)
+                .create(&*versioned_object_cloned, |_| Ok(None), None)
                 .is_err());
             drop(journal);
 
@@ -376,13 +376,15 @@ mod test {
 
             let mut journal = transaction_cloned.start();
             assert!(journal
-                .create(&*versioned_object_cloned, None, None)
+                .create(&*versioned_object_cloned, |_| Ok(None), None)
                 .is_ok());
             assert_eq!(journal.submit(), 2);
         });
 
         let mut journal = transaction.start();
-        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        assert!(journal
+            .create(&*versioned_object, |_| Ok(None), None)
+            .is_ok());
 
         barrier.wait();
         barrier.wait();
@@ -401,7 +403,7 @@ mod test {
     #[test]
     fn wait_queue() {
         let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
-        let versioned_object = Arc::new(RecordVersion::new());
+        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
         let num_threads = 16;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         let mut thread_handles = Vec::new();
@@ -414,6 +416,7 @@ mod test {
                 let snapshot = storage_cloned.snapshot();
                 assert!(!versioned_object_cloned.predate(&snapshot, &ebr::Barrier::new()));
                 barrier_cloned.wait();
+                barrier_cloned.wait();
                 let snapshot = storage_cloned.snapshot();
                 assert!(versioned_object_cloned.predate(&snapshot, &ebr::Barrier::new()));
             }));
@@ -421,26 +424,33 @@ mod test {
         barrier.wait();
         let transaction = storage.transaction();
         let mut journal = transaction.start();
-        let result = journal.create(&*versioned_object, None, None);
+        let result = journal.create(&*versioned_object, |_| Ok(None), None);
         assert!(result.is_ok());
         assert_eq!(journal.submit(), 1);
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        barrier.wait();
         assert!(transaction.commit().is_ok());
         barrier.wait();
 
         thread_handles
             .into_iter()
             .for_each(|t| assert!(t.join().is_ok()));
+
+        assert!(versioned_object.consolidate());
+
+        let snapshot = storage.snapshot();
+        assert!(versioned_object.predate(&snapshot, &ebr::Barrier::new()));
     }
 
     #[test]
     fn time_out() {
         let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
-        let versioned_object = Arc::new(RecordVersion::new());
+        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
 
         let transaction = storage.transaction();
         let mut journal = transaction.start();
-        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        assert!(journal
+            .create(&*versioned_object, |_| Ok(None), None)
+            .is_ok());
 
         let num_threads = 16;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
@@ -456,7 +466,7 @@ mod test {
                 assert!(journal
                     .create(
                         &*versioned_object_cloned,
-                        None,
+                        |_| Ok(None),
                         Some(Duration::from_millis(100))
                     )
                     .is_err());
@@ -468,7 +478,7 @@ mod test {
                 assert!(journal
                     .create(
                         &*versioned_object_cloned,
-                        None,
+                        |_| Ok(None),
                         Some(Duration::from_millis(100))
                     )
                     .is_err());
@@ -485,14 +495,16 @@ mod test {
             let transaction = storage_cloned.transaction();
             let mut journal = transaction.start();
             assert!(journal
-                .create(&*versioned_object_cloned, None, None)
+                .create(&*versioned_object_cloned, |_| Ok(None), None)
                 .is_ok());
         });
 
         barrier.wait();
 
         let mut journal = transaction.start();
-        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        assert!(journal
+            .create(&*versioned_object, |_| Ok(None), None)
+            .is_ok());
         assert_eq!(journal.submit(), 2);
 
         thread_handles
@@ -500,7 +512,9 @@ mod test {
             .for_each(|t| assert!(t.join().is_ok()));
 
         let mut journal = transaction.start();
-        assert!(journal.create(&*versioned_object, None, None).is_ok());
+        assert!(journal
+            .create(&*versioned_object, |_| Ok(None), None)
+            .is_ok());
         drop(journal);
 
         transaction.rollback();

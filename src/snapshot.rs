@@ -11,7 +11,10 @@ use scc::ebr;
 
 /// [Snapshot] represents the state of the entire storage system at a point of time.
 ///
-/// There are three ways of taking a [Snapshot].
+/// A [Snapshot] has a [Clock](Sequencer::Clock) value corresponding to a database snapshot,
+/// and the database snapshot stays stable until the [Snapshot] is dropped.
+///
+/// There are three types of [Snapshot], and three ways of taking a [Snapshot].
 ///  1. The `snapshot` method of [Storage](super::Storage).
 ///     The snapshot consists of globally committed data at the moment.
 ///  2. The `snapshot` method in [Transaction].
@@ -51,7 +54,8 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
 
     /// Creates a new [Snapshot].
     ///
-    /// The clock value that the [Snapshot] owns is tracked by the given [Sequencer].
+    /// The [Clock](Sequencer::Clock) value that the [Snapshot] has is tracked by the given
+    /// [Sequencer].
     pub(super) fn new(
         sequencer: &'s S,
         transaction: Option<&'t Transaction<'s, S>>,
@@ -68,7 +72,7 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
         }
     }
 
-    /// Returns the clock value of the [Snapshot].
+    /// Returns the [Clock](Sequencer::Clock) value of the [Snapshot].
     pub(super) fn clock(&self) -> &S::Clock {
         &self.snapshot
     }
