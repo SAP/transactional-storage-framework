@@ -331,15 +331,14 @@ pub enum State {
     RolledBack,
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<usize> for State {
-    fn into(self) -> usize {
-        match self {
-            Self::Active => 0,
-            Self::Committing => 1,
-            Self::Committed => 2,
-            Self::RollingBack => 3,
-            Self::RolledBack => 4,
+impl From<State> for usize {
+    fn from(v: State) -> usize {
+        match v {
+            State::Active => 0,
+            State::Committing => 1,
+            State::Committed => 2,
+            State::RollingBack => 3,
+            State::RolledBack => 4,
         }
     }
 }
