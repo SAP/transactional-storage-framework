@@ -7,8 +7,10 @@ use crate::Sequencer;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
+use std::sync::{Mutex, Once};
+
+use scc::{ebr, LinkedList};
 
 /// [`AtomicCounter`] implements [Sequencer] by managing a single atomic counter.
 ///
@@ -17,7 +19,6 @@ use std::sync::{Arc, Mutex};
 /// threads increases.
 pub struct AtomicCounter {
     clock: AtomicUsize,
-    min_heap: Arc<Mutex<BTreeMap<usize, usize>>>,
 }
 
 impl Sequencer for AtomicCounter {
@@ -25,13 +26,22 @@ impl Sequencer for AtomicCounter {
     type Tracker = UsizeTracker;
 
     fn min(&self, _order: Ordering) -> usize {
-        if let Ok(min_heap) = self.min_heap.lock() {
-            #[allow(clippy::never_loop)]
-            for entry in min_heap.iter() {
-                return *entry.0;
+        let barrier = ebr::Barrier::new();
+        let mut current = anchor().load(Acquire, &barrier);
+        let mut min = self.get(Relaxed);
+        while let Some(tracker) = current.as_ref() {
+            if let Ok(min_heap) = tracker.min_heap.lock() {
+                #[allow(clippy::never_loop)]
+                for entry in min_heap.iter() {
+                    if min > *entry.0 {
+                        min = *entry.0;
+                    }
+                    break;
+                }
             }
+            current = tracker.next_ptr(Acquire, &barrier);
         }
-        0
+        min
     }
 
     fn get(&self, order: Ordering) -> Self::Clock {
@@ -39,27 +49,35 @@ impl Sequencer for AtomicCounter {
     }
 
     fn issue(&self, order: Ordering) -> Self::Tracker {
-        let mut min_heap = self.min_heap.lock().unwrap();
-        let current_clock = self.get(order);
-        match min_heap.get_mut(&current_clock) {
-            Some(counter) => {
-                *counter += 1;
+        TRACKER.with(|t| {
+            let mut min_heap = t.0.min_heap.lock().unwrap();
+            let current_clock = self.get(order);
+            match min_heap.get_mut(&current_clock) {
+                Some(counter) => {
+                    *counter += 1;
+                }
+                None => {
+                    min_heap.insert(current_clock, 1);
+                }
             }
-            None => {
-                min_heap.insert(current_clock, 1);
+            Self::Tracker {
+                clock: current_clock,
+                local_tracker: t.0.ptr(&ebr::Barrier::new()).as_raw(),
             }
-        }
-        Self::Tracker {
-            clock: current_clock,
-            min_heap: self.min_heap.clone(),
-        }
+        })
     }
 
     fn fold<F: Fn(&Self::Clock)>(&self, f: F, _order: Ordering) {
-        if let Ok(min_heap) = self.min_heap.lock() {
-            for entry in min_heap.iter() {
-                f(entry.0);
+        let barrier = ebr::Barrier::new();
+        let mut current = anchor().load(Acquire, &barrier);
+        while let Some(tracker) = current.as_ref() {
+            if let Ok(min_heap) = tracker.min_heap.lock() {
+                #[allow(clippy::never_loop)]
+                for entry in min_heap.iter() {
+                    f(entry.0);
+                }
             }
+            current = tracker.next_ptr(Acquire, &barrier);
         }
     }
 
@@ -89,7 +107,6 @@ impl Default for AtomicCounter {
         AtomicCounter {
             // Starts from `1` in order to avoid using `0`.
             clock: AtomicUsize::new(1),
-            min_heap: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -97,19 +114,24 @@ impl Default for AtomicCounter {
 /// [`UsizeTracker`] keeps its associated [`AtomicCounter`] from becoming oblivious of its clock.
 pub struct UsizeTracker {
     clock: usize,
-    min_heap: Arc<Mutex<BTreeMap<usize, usize>>>,
+    local_tracker: *const LocalTracker,
 }
 
 impl Clone for UsizeTracker {
     fn clone(&self) -> Self {
-        if let Ok(mut min_heap) = self.min_heap.lock() {
-            if let Some(counter) = min_heap.get_mut(&self.clock) {
-                *counter += 1;
-            }
+        if let Ok(mut min_heap) = unsafe { (*self.local_tracker).min_heap.lock() } {
+            match min_heap.get_mut(&self.clock) {
+                Some(counter) => {
+                    *counter += 1;
+                }
+                None => {
+                    min_heap.insert(self.clock, 1);
+                }
+            };
         }
         Self {
             clock: self.clock,
-            min_heap: self.min_heap.clone(),
+            local_tracker: self.local_tracker,
         }
     }
 }
@@ -122,14 +144,75 @@ impl DeriveClock<usize> for UsizeTracker {
 
 impl Drop for UsizeTracker {
     fn drop(&mut self) {
-        if let Ok(mut min_heap) = self.min_heap.lock() {
-            if let Some(counter) = min_heap.get_mut(&self.clock) {
-                if *counter > 0 {
-                    *counter -= 1;
-                    return;
-                }
-            }
+        if let Ok(mut min_heap) = unsafe { (*self.local_tracker).min_heap.lock() } {
             min_heap.remove(&self.clock);
         }
     }
+}
+
+struct LocalTracker {
+    next: ebr::AtomicArc<LocalTracker>,
+    min_heap: Mutex<BTreeMap<usize, usize>>,
+}
+
+impl LocalTracker {
+    fn alloc_new() -> ebr::Arc<LocalTracker> {
+        let barrier = ebr::Barrier::new();
+        let new = ebr::Arc::new(LocalTracker {
+            next: ebr::AtomicArc::null(),
+            min_heap: Mutex::default(),
+        });
+        let mut current = anchor().load(Relaxed, &barrier);
+        loop {
+            new.next
+                .swap((current.try_into_arc(), ebr::Tag::None), Relaxed);
+            match anchor().compare_exchange(
+                current,
+                (Some(new.clone()), ebr::Tag::None),
+                Release,
+                Relaxed,
+            ) {
+                Ok(_) => {
+                    return new;
+                }
+                Err((_, actual)) => {
+                    current = actual;
+                }
+            }
+        }
+    }
+}
+
+impl scc::LinkedList for LocalTracker {
+    fn link_ref(&self) -> &ebr::AtomicArc<Self> {
+        &self.next
+    }
+}
+
+/// This is the head of the tracker linked list.
+static mut ANCHOR: Option<ebr::AtomicArc<LocalTracker>> = None;
+static ANCHOR_REF: Once = Once::new();
+
+/// Returns the global anchor.
+fn anchor() -> &'static ebr::AtomicArc<LocalTracker> {
+    unsafe {
+        ANCHOR_REF.call_once(|| {
+            ANCHOR.replace(ebr::AtomicArc::null());
+        });
+        ANCHOR.as_ref().unwrap()
+    }
+}
+
+/// [`LocalTrackerHolder`] implements [Drop] to set a flag on the thread-local tracker when the
+/// thread is terminated.
+struct LocalTrackerHolder(ebr::Arc<LocalTracker>);
+
+impl Drop for LocalTrackerHolder {
+    fn drop(&mut self) {
+        self.0.delete_self(Relaxed);
+    }
+}
+
+thread_local! {
+    static TRACKER: LocalTrackerHolder = LocalTrackerHolder(LocalTracker::alloc_new());
 }
