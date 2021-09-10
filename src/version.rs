@@ -127,7 +127,7 @@ impl<S: Sequencer> Owner<S> {
 impl<S: Sequencer> Drop for Owner<S> {
     fn drop(&mut self) {
         // This must not spin if the lifetime of its associated `Version` is properly managed.
-        while !self.0.is_null(Relaxed) {}
+        // [TODO] while !self.0.is_null(Relaxed) {}
     }
 }
 

@@ -63,7 +63,6 @@ pub trait Sequencer: 'static + Default {
     fn min(&self, order: Ordering) -> Self::Clock;
     fn get(&self, order: Ordering) -> Self::Clock;
     fn issue(&self, order: Ordering) -> Self::Tracker;
-    fn fold<F: Fn(&Self::Clock)>(&self, f: F, order: Ordering);
     fn update(
         &self,
         new_sequence: Self::Clock,

@@ -57,10 +57,6 @@ pub trait Sequencer: 'static + Default {
     /// This must not issue the default [Clock](Sequencer::Clock) value.
     fn issue(&self, order: Ordering) -> Self::Tracker;
 
-    /// Aggregates all the issued [Clock](Sequencer::Clock) instances being tracked by the
-    /// [Sequencer].
-    fn fold<F: Fn(&Self::Clock)>(&self, f: F, order: Ordering);
-
     /// Updates the current logical [Clock](Sequencer::Clock) value.
     ///
     /// It tries to replace the current [Clock](Sequencer::Clock) value with the given one. It
