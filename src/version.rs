@@ -127,7 +127,17 @@ impl<S: Sequencer> Owner<S> {
 impl<S: Sequencer> Drop for Owner<S> {
     fn drop(&mut self) {
         // This must not spin if the lifetime of its associated `Version` is properly managed.
-        // [TODO] while !self.0.is_null(Relaxed) {}
+        while !self.0.is_null(Relaxed) {
+            let barrier = ebr::Barrier::new();
+            let owner_ptr = self.0.load(Acquire, &barrier);
+            if let Some(owner_ref) = owner_ptr.as_ref() {
+                if owner_ref.commit_snapshot() != S::Clock::default() {
+                    // The transaction has been committed, and there is no possibility of a
+                    // `Locker` trying to release it.
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -299,10 +309,14 @@ impl<S: Sequencer> Locker<S> {
 
 impl<S: Sequencer> Drop for Locker<S> {
     fn drop(&mut self) {
-        let barrier = ebr::Barrier::new();
-        if !self.prev_owner.is_null()
-            || self.owner_field.commit_clock(&barrier) == S::Clock::default()
+        // This `Locker` reverts the state of the `Version` if the transaction has not been
+        // committed.
+        if self
+            .current_owner
+            .as_ref()
+            .map_or_else(|| false, |j| j.commit_snapshot() == S::Clock::default())
         {
+            let barrier = ebr::Barrier::new();
             let mut current_owner = self.owner_field.0.load(Relaxed, &barrier);
             while current_owner == self.current_owner {
                 // It must be a release-store.
@@ -321,4 +335,6 @@ impl<S: Sequencer> Drop for Locker<S> {
     }
 }
 
+/// The [`ebr::Ptr`] instances in a [`Locker`] can be sent as they are not associated with an
+/// [`ebr::Barrier`].
 unsafe impl<S: Sequencer> Send for Locker<S> {}
