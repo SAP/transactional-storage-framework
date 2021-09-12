@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::container::DataPlane;
+use crate::DataPlane;
 use crate::{Error, Sequencer, Snapshot, Transaction};
 
 /// Table is a two dimensional array of u8.

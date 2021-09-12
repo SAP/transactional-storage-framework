@@ -4,7 +4,7 @@
 
 use super::version::Owner;
 use super::Version as VersionTrait;
-use super::{Error, Journal, Sequencer, Snapshot, Transaction};
+use super::{DataPlane, Error, Journal, Sequencer, Snapshot};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
@@ -211,51 +211,6 @@ impl<S: Sequencer> Container<S> {
     pub fn unload(&self) -> Result<(), Error> {
         Err(Error::Fail)
     }
-}
-
-/// [`DataPlane`] defines the data container interfaces.
-///
-/// A container is a two-dimensional plane of data.
-pub trait DataPlane<S: Sequencer> {
-    /// Gets the data located at the given position.
-    fn get(
-        &self,
-        record_index: usize,
-        column_index: usize,
-        snapshot: &Snapshot<S>,
-    ) -> Option<&[u8]>;
-
-    /// Updates the data stored at the given position.
-    ///
-    /// It returns the new position of the updated data.
-    fn update(
-        &self,
-        record_index: usize,
-        column_index: usize,
-        data: (&[u8], usize),
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
-    ) -> Result<(usize, usize), Error>;
-
-    /// Puts the data into the container.
-    fn put(
-        &self,
-        data: (&[u8], usize),
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
-    ) -> Result<usize, Error>;
-
-    /// Removes the data stored at the given position.
-    fn remove(
-        &self,
-        record_index: usize,
-        column_index: usize,
-        transaction: &Transaction<S>,
-        snapshot: &Snapshot<S>,
-    ) -> Result<(usize, usize), Error>;
-
-    /// Returns the size of the container.
-    fn size(&self) -> (usize, usize);
 }
 
 /// [Container] can either be [Data](Type::Data) or [Directory](Type::Directory).

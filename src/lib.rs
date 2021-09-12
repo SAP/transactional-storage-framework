@@ -12,11 +12,17 @@
 //! # [`Container`]
 //! [`Container`] is hierarchical data container that a [`Storage`] manages.
 //!
+//! # [`DataPlane`]
+//! [`DataPlane`] defines interfaces between [`Container`] and actual data.
+//!
 //! # [`Transaction`]
 //! [`Transaction`] represents a storage transaction.
 
 mod container;
 pub use container::Container;
+
+mod data_plane;
+pub use data_plane::DataPlane;
 
 mod error;
 pub use error::Error;
