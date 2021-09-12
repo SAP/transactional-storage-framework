@@ -9,7 +9,7 @@ use super::{Error, Sequencer, Snapshot, Transaction};
 /// A container is a two-dimensional plane of data.
 pub trait DataPlane<S: Sequencer> {
     /// Gets the data located at the given position.
-    fn get(
+    fn read(
         &self,
         record_index: usize,
         column_index: usize,
@@ -19,6 +19,10 @@ pub trait DataPlane<S: Sequencer> {
     /// Updates the data stored at the given position.
     ///
     /// It returns the new position of the updated data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if update fails.
     fn update(
         &self,
         record_index: usize,
@@ -29,6 +33,10 @@ pub trait DataPlane<S: Sequencer> {
     ) -> Result<(usize, usize), Error>;
 
     /// Puts the data into the container.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if putting the data fails.
     fn put(
         &self,
         data: (&[u8], usize),
@@ -37,6 +45,10 @@ pub trait DataPlane<S: Sequencer> {
     ) -> Result<usize, Error>;
 
     /// Removes the data stored at the given position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if removing the record fails.
     fn remove(
         &self,
         record_index: usize,

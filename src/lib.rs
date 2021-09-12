@@ -33,6 +33,12 @@ pub use journal::Journal;
 mod logger;
 pub use logger::{Log, Logger};
 
+mod record;
+pub use record::Record;
+
+mod layout;
+pub use layout::Layout;
+
 pub mod sequencer;
 pub use sequencer::Sequencer;
 

@@ -21,7 +21,7 @@ impl<S: Sequencer> RelationalTable<S> {
 }
 
 impl<S: Sequencer> DataPlane<S> for RelationalTable<S> {
-    fn get(
+    fn read(
         &self,
         _record_index: usize,
         _column_index: usize,
