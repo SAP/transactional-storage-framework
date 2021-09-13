@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Sequencer, Layout};
+use super::{Layout, Sequencer};
 
 /// [Record] is a single record in a [`DataPlane`](super::DataPlane).
-pub trait Record<S: Sequencer, L: Layout> {
-}
+pub trait Record<S: Sequencer, L: Layout> {}

@@ -261,6 +261,7 @@ impl<S: Sequencer> Locker<S> {
                                 Acquire,
                                 Relaxed,
                             ) {
+                                // TODO: retry if `actual` and the new `current` are in the same transaction.
                                 if let Some(passed) = passed {
                                     new_owner.replace(passed);
                                 }

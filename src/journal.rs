@@ -12,13 +12,14 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use scc::ebr;
+use scc::LinkedList;
 
 /// [Journal] keeps the change history.
 ///
 /// Locks and log records are accumulated in a [Journal].
 pub struct Journal<'s, 't, S: Sequencer> {
     transaction: &'t Transaction<'s, S>,
-    record: Option<Annals<S>>,
+    record: Option<ebr::Arc<Annals<S>>>,
 }
 
 impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
@@ -39,9 +40,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// ```
     #[must_use]
     pub fn submit(mut self) -> usize {
-        self.record
-            .take()
-            .map_or_else(|| 0, |r| self.transaction.record(r))
+        if let Some(record) = self.record.take() {
+            self.transaction.record(record)
+        } else {
+            0
+        }
     }
 
     /// Takes a snapshot including changes in the [Journal].
@@ -108,7 +111,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         writer: F,
         timeout: Option<Duration>,
     ) -> Result<(), Error> {
-        if let Some(record_mut) = self.record.as_mut() {
+        if let Some(record_mut) = self.record.as_mut().map(|r| r.get_mut()).and_then(|r| r) {
             let barrier = ebr::Barrier::new();
             if let Some(mut locker) =
                 version.create(record_mut.anchor_ptr(&barrier), timeout, &barrier)
@@ -133,7 +136,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ) -> Journal<'s, 't, S> {
         Journal {
             transaction,
-            record: Some(Annals::new(transaction, transaction_anchor)),
+            record: Some(ebr::Arc::new(Annals::new(transaction, transaction_anchor))),
         }
     }
 }
@@ -142,7 +145,10 @@ impl<'s, 't, S: Sequencer> Drop for Journal<'s, 't, S> {
     fn drop(&mut self) {
         // Implementing `Drop` is necessary for the compiler to enforce the `Transaction` to
         // outlive it.
-        if let Some(record) = self.record.take() {
+        if let Some(mut record) = self.record.take() {
+            if let Some(record_mut) = record.get_mut() {
+                record_mut.rollback();
+            }
             drop(record);
         }
     }
@@ -153,6 +159,7 @@ pub(super) struct Annals<S: Sequencer> {
     anchor: ebr::Arc<Anchor<S>>,
     locks: Vec<Locker<S>>,
     logs: Vec<Log>,
+    next: ebr::AtomicArc<Self>,
 }
 
 impl<S: Sequencer> Annals<S> {
@@ -176,15 +183,27 @@ impl<S: Sequencer> Annals<S> {
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.clock())),
             locks: Vec::new(),
             logs: Vec::new(),
+            next: ebr::AtomicArc::null(),
         }
+    }
+
+    /// Rolls back changes synchronously.
+    pub(super) fn rollback(&mut self) {
+        self.logs.clear();
+        self.locks.clear();
+        self.anchor.end();
     }
 }
 
 impl<S: Sequencer> Drop for Annals<S> {
     fn drop(&mut self) {
-        // It notifies any waiting threads for it to release locks that it is about to be
-        // dropped.
-        self.anchor.end();
+        self.rollback();
+    }
+}
+
+impl<S: Sequencer> LinkedList for Annals<S> {
+    fn link_ref(&self) -> &ebr::AtomicArc<Self> {
+        &self.next
     }
 }
 

@@ -7,9 +7,9 @@ use super::{Error, Journal, Sequencer, Snapshot, Storage};
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::Mutex;
 
 use scc::ebr;
+use scc::LinkedList;
 
 /// [Transaction] is the atomic unit of work for all types of storage operations.
 ///
@@ -23,7 +23,7 @@ pub struct Transaction<'s, S: Sequencer> {
     sequencer: &'s S,
 
     /// The changes made by the transaction.
-    annals: Mutex<Vec<Annals<S>>>,
+    annals: ebr::AtomicArc<Annals<S>>,
 
     /// A piece of data that is shared among [Journal] instances in the [Transaction].
     ///
@@ -51,7 +51,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            annals: Mutex::new(Vec::new()),
+            annals: ebr::AtomicArc::null(),
             anchor: ebr::Arc::new(Anchor::new()),
             clock: AtomicUsize::new(0),
         }
@@ -142,16 +142,25 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// assert_eq!(transaction.clock(), 1);
     /// ```
     pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
-        if let Ok(mut record_vector) = self.annals.lock() {
-            if record_vector.len() > clock {
-                while record_vector.len() > clock {
-                    drop(record_vector.pop());
-                }
-                self.clock.store(clock, Release);
-                return Ok(clock);
-            }
+        let current_clock = self.clock.load(Acquire);
+        if current_clock <= clock {
+            return Err(Error::Fail);
         }
-        Err(Error::Fail)
+        let mut current = self.annals.swap((None, ebr::Tag::None), Acquire);
+        for _ in clock..current_clock {
+            current = current
+                .map(|mut r| {
+                    let next = r.link_ref().swap((None, ebr::Tag::None), Relaxed);
+                    if let Some(r_mut) = r.get_mut() {
+                        r_mut.rollback();
+                    }
+                    next
+                })
+                .and_then(|r| r);
+        }
+        self.annals.swap((current, ebr::Tag::None), Relaxed);
+        self.clock.store(clock, Release);
+        Ok(clock)
     }
 
     /// Commits the changes made by the [Transaction].
@@ -197,14 +206,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let mut transaction = storage.transaction();
     /// transaction.rollback();
     /// ```
-    pub fn rollback(self) {
+    pub fn rollback(mut self) {
         self.anchor.state.store(State::RollingBack.into(), Release);
-        if let Ok(mut record_vector) = self.annals.lock() {
-            while let Some(record) = record_vector.pop() {
-                // Changes should be reverted from the back of the record.
-                drop(record);
-            }
-        }
+        let _result = self.rewind(0);
         self.anchor.state.store(State::RolledBack.into(), Release);
         drop(self);
     }
@@ -215,14 +219,33 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Takes [Annals], and records them.
-    pub(super) fn record(&self, record: Annals<S>) -> usize {
-        let mut record_vector = self.annals.lock().unwrap();
-        record_vector.push(record);
-        let new_clock = record_vector.len();
-        // submit_clock is updated after the contents are moved to the anchor.
-        record_vector[new_clock - 1].assign_clock(new_clock);
-        self.clock.store(new_clock, Release);
-        new_clock
+    pub(super) fn record(&self, mut record: ebr::Arc<Annals<S>>) -> usize {
+        let barrier = ebr::Barrier::new();
+        let mut current = self.annals.load(Relaxed, &barrier);
+        loop {
+            record
+                .link_ref()
+                .swap((current.try_into_arc(), ebr::Tag::None), Relaxed);
+            match self.annals.compare_exchange(
+                current,
+                (Some(record), ebr::Tag::None),
+                Release,
+                Relaxed,
+            ) {
+                Ok((_, current_ptr)) => {
+                    // Transaction-local clock is updated after contents are submitted.
+                    let current_clock = self.clock.fetch_add(1, Release) + 1;
+                    if let Some(current_ref) = current_ptr.as_ref() {
+                        current_ref.assign_clock(current_clock)
+                    }
+                    return current_clock;
+                }
+                Err((passed, actual)) => {
+                    record = passed.unwrap();
+                    current = actual;
+                }
+            }
+        }
     }
 
     /// Returns a reference to its [Anchor].
@@ -237,6 +260,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     fn post_process(self) {
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
         drop(self);
+    }
+}
+
+impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
+    fn drop(&mut self) {
+        let _result = self.rewind(0);
     }
 }
 
@@ -418,14 +447,14 @@ mod test {
         let thread_handle = thread::spawn(move || {
             barrier_cloned.wait();
 
-            // Step 1. Tries to acquire lock acquired by an active transaction journal.
+            // Step 1. Tries to acquire the lock acquired by an active transaction journal.
             let mut journal = transaction_cloned.start();
             assert!(journal
                 .create(&*versioned_object_cloned, |_| Ok(None), None)
                 .is_err());
             drop(journal);
 
-            // Step 2. Tries to acquire lock acquired by a submitted transaction journal.
+            // Step 2. Tries to acquire the lock acquired by a submitted transaction journal.
             barrier_cloned.wait();
             barrier_cloned.wait();
 
@@ -453,6 +482,99 @@ mod test {
         } else {
             unreachable!();
         }
+    }
+
+    #[test]
+    fn rewind() {
+        static mut STORAGE: Option<Storage<AtomicCounter>> = None;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| unsafe {
+            STORAGE.replace(Storage::new(None));
+        });
+
+        let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
+        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
+        let mut transaction = storage_ref.transaction();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let versioned_object_cloned = versioned_object.clone();
+        let barrier_cloned = barrier.clone();
+        let thread_handle = thread::spawn(move || {
+            let transaction = storage_ref.transaction();
+            // Step 1. Tries to acquire the lock acquired by an active transaction journal.
+            for _ in 1..8 {
+                barrier_cloned.wait();
+                let mut journal = transaction.start();
+                assert!(journal
+                    .create(
+                        &*versioned_object_cloned,
+                        |_| Ok(None),
+                        Some(Duration::from_millis(1))
+                    )
+                    .is_err());
+                drop(journal);
+                barrier_cloned.wait();
+            }
+
+            // Step 2. Tries to acquire the lock after reverting some changes.
+            barrier_cloned.wait();
+            let mut journal = transaction.start();
+            assert!(journal
+                .create(
+                    &*versioned_object_cloned,
+                    |_| Ok(None),
+                    Some(Duration::from_millis(1))
+                )
+                .is_err());
+            drop(journal);
+            barrier_cloned.wait();
+
+            // Step 3. Tries to acquire the lock after reverting all the changes.
+            barrier_cloned.wait();
+            let mut journal = transaction.start();
+            assert!(journal
+                .create(&*versioned_object_cloned, |_| Ok(None), None)
+                .is_ok());
+            assert_eq!(journal.submit(), 1);
+        });
+
+        // Step 1. Acquires the lock several times.
+        let journal = transaction.start();
+        assert_eq!(journal.submit(), 1);
+        for i in 1..8 {
+            let mut journal = transaction.start();
+            assert!(journal
+                .create(&*versioned_object, |_| Ok(None), None)
+                .is_ok());
+            assert_eq!(journal.submit(), i + 1);
+            barrier.wait();
+            barrier.wait();
+        }
+
+        // Step 2. Rewinds to half the transaction.
+        assert!(transaction.rewind(4).is_ok());
+        barrier.wait();
+        barrier.wait();
+
+        // Step 3. Rewinds all.
+        assert!(transaction.rewind(6).is_err());
+        assert!(transaction.rewind(0).is_ok());
+        barrier.wait();
+
+        assert!(thread_handle.join().is_ok());
+
+        let mut journal = transaction.start();
+        assert!(journal
+            .create(
+                &*versioned_object,
+                |_| Ok(None),
+                Some(Duration::from_millis(1))
+            )
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+
+        assert!(transaction.commit().is_ok());
     }
 
     #[test]
