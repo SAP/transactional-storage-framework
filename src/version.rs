@@ -246,47 +246,53 @@ impl<S: Sequencer> Locker<S> {
 
             // Waits for the actual owner to release the lock.
             #[allow(clippy::blocks_in_if_conditions)]
-            if actual_owner
-                .wait(
-                    |snapshot| {
-                        if snapshot == S::Clock::default() {
-                            // The transaction has been rolled back, or the `Journal` has been
-                            // discarded, it will try to overtake ownership.
-                            //
-                            // The following CAS returning `false` means that another
-                            // transaction overtook ownership.
-                            if let Err((passed, _)) = owner_field.0.compare_exchange(
-                                actual,
-                                (new_owner.take(), ebr::Tag::None),
-                                Acquire,
-                                Relaxed,
-                            ) {
-                                // TODO: retry if `actual` and the new `current` are in the same transaction.
-                                if let Some(passed) = passed {
-                                    new_owner.replace(passed);
-                                }
-                                return false;
+            match actual_owner.wait(
+                |snapshot| {
+                    if snapshot == S::Clock::default() {
+                        // The transaction has been rolled back, or the `Journal` has been
+                        // discarded, it will try to overtake ownership.
+                        //
+                        // The following CAS returning `false` means that another transaction
+                        // might have overtook ownership.
+                        let mut current = actual;
+                        while let Err((passed, actual)) = owner_field.0.compare_exchange(
+                            current,
+                            (new_owner.take(), ebr::Tag::None),
+                            Acquire,
+                            Relaxed,
+                        ) {
+                            if let Some(passed) = passed {
+                                new_owner.replace(passed);
                             }
-                            return true;
+                            if actual.is_null() {
+                                // The lock has been released.
+                                current = actual;
+                                continue;
+                            }
+
+                            // The lock is still held by another transaction.
+                            return false;
                         }
-                        false
-                    },
-                    timeout,
-                )
-                .map_or_else(|| false, |result| result)
-            {
-                // This transaction has successfully locked the `VersionCell`.
-                break;
-            }
-
-            if owner_field.commit_clock(barrier) != S::Clock::default() {
-                // The `VersionCell` has a valid time point.
-                return None;
-            }
-
-            if timeout.is_some() {
-                // The time-out reached.
-                return None;
+                        return true;
+                    }
+                    false
+                },
+                timeout,
+            ) {
+                None => {
+                    // Timed-out.
+                    return None;
+                }
+                Some(true) => {
+                    // Lock acquired.
+                    break;
+                }
+                _ => {
+                    if owner_field.commit_clock(barrier) != S::Clock::default() {
+                        // The `VersionCell` has a valid time point.
+                        return None;
+                    }
+                }
             }
         }
 

@@ -5,11 +5,10 @@
 use super::journal::Annals;
 use super::{Error, Journal, Sequencer, Snapshot, Storage};
 
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicPtr, AtomicUsize};
 
 use scc::ebr;
-use scc::LinkedList;
 
 /// [Transaction] is the atomic unit of work for all types of storage operations.
 ///
@@ -23,7 +22,7 @@ pub struct Transaction<'s, S: Sequencer> {
     sequencer: &'s S,
 
     /// The changes made by the transaction.
-    annals: ebr::AtomicArc<Annals<S>>,
+    annals: AtomicPtr<Annals<S>>,
 
     /// A piece of data that is shared among [Journal] instances in the [Transaction].
     ///
@@ -51,7 +50,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
-            annals: ebr::AtomicArc::null(),
+            annals: AtomicPtr::default(),
             anchor: ebr::Arc::new(Anchor::new()),
             clock: AtomicUsize::new(0),
         }
@@ -146,19 +145,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         if current_clock <= clock {
             return Err(Error::Fail);
         }
-        let mut current = self.annals.swap((None, ebr::Tag::None), Acquire);
+        let mut current = self.annals.load(Acquire);
         for _ in clock..current_clock {
-            current = current
-                .map(|mut r| {
-                    let next = r.link_ref().swap((None, ebr::Tag::None), Relaxed);
-                    if let Some(r_mut) = r.get_mut() {
-                        r_mut.rollback();
-                    }
-                    next
-                })
-                .and_then(|r| r);
+            let current_boxed = unsafe { Box::from_raw(current) };
+            current = current_boxed.next.load(Relaxed);
         }
-        self.annals.swap((current, ebr::Tag::None), Relaxed);
+        self.annals.store(current, Relaxed);
         self.clock.store(clock, Release);
         Ok(clock)
     }
@@ -219,31 +211,26 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Takes [Annals], and records them.
-    pub(super) fn record(&self, mut record: ebr::Arc<Annals<S>>) -> usize {
-        let barrier = ebr::Barrier::new();
-        let mut current = self.annals.load(Relaxed, &barrier);
+    pub(super) fn record(&self, record: Box<Annals<S>>) -> usize {
+        let mut current = self.annals.load(Relaxed);
+        let desired = Box::into_raw(record);
         loop {
-            record
-                .link_ref()
-                .swap((current.try_into_arc(), ebr::Tag::None), Relaxed);
-            match self.annals.compare_exchange(
-                current,
-                (Some(record), ebr::Tag::None),
-                Release,
-                Relaxed,
-            ) {
-                Ok((_, current_ptr)) => {
+            unsafe {
+                (*desired).next.store(current, Relaxed);
+            }
+            match self
+                .annals
+                .compare_exchange(current, desired, Release, Relaxed)
+            {
+                Ok(_) => {
                     // Transaction-local clock is updated after contents are submitted.
                     let current_clock = self.clock.fetch_add(1, Release) + 1;
-                    if let Some(current_ref) = current_ptr.as_ref() {
-                        current_ref.assign_clock(current_clock)
+                    unsafe {
+                        (*desired).assign_clock(current_clock);
                     }
                     return current_clock;
                 }
-                Err((passed, actual)) => {
-                    record = passed.unwrap();
-                    current = actual;
-                }
+                Err(actual) => current = actual,
             }
         }
     }
@@ -672,7 +659,11 @@ mod test {
             let transaction = storage_cloned.transaction();
             let mut journal = transaction.start();
             assert!(journal
-                .create(&*versioned_object_cloned, |_| Ok(None), None)
+                .create(
+                    &*versioned_object_cloned,
+                    |_| Ok(None),
+                    Some(Duration::from_secs(u64::MAX))
+                )
                 .is_ok());
         });
 
