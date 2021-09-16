@@ -4,6 +4,7 @@
 
 use super::{Container, Error, Journal, Logger, Sequencer, Snapshot, Transaction};
 
+use std::sync::atomic::Ordering::Acquire;
 use std::time::Duration;
 
 use scc::ebr;
@@ -444,6 +445,52 @@ impl<S: Sequencer> Storage<S> {
             }
         }
         Err(Error::Fail)
+    }
+
+    /// Reclaims unreachable resources held by the container.
+    ///
+    /// # Errors
+    ///
+    /// If the target [Container] is missing, it returns an error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tss::{AtomicCounter, Storage};
+    ///
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let mut transaction = storage.transaction();
+    ///
+    /// let snapshot = transaction.snapshot();
+    /// let mut journal = transaction.start();
+    /// let result =
+    ///     storage.create_directory(
+    ///         "/thomas/throws/cans/and/bottles",
+    ///         &snapshot,
+    ///         &mut journal,
+    ///         None);
+    /// assert!(result.is_ok());
+    /// journal.submit();
+    /// drop(snapshot);
+    ///
+    /// transaction.commit();
+    ///
+    /// let snapshot = storage.snapshot();
+    /// let result = storage.vacuum("/thomas/throws", &snapshot, None);
+    /// assert!(result.is_ok());
+    /// ```
+    pub fn vacuum(
+        &self,
+        path: &str,
+        snapshot: &Snapshot<S>,
+        timeout: Option<Duration>,
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        if let Some(container) = self.get(path, snapshot) {
+            container.vacuum(snapshot, self.sequencer.min(Acquire), timeout)?;
+            Ok(container)
+        } else {
+            Err(Error::Fail)
+        }
     }
 
     /// Extracts the name and position of the container out of a string.

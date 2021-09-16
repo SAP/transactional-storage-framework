@@ -185,13 +185,13 @@ The framework provides a file-based logger that is capable of lock-free check-po
 
 ### Locking and versioning semantics
 
-`Transaction` and tss::Version provide a rudimentary, yet versatile locking and versioning mechanism. A versioned object can only be created once, and it can never be modified after the transaction having created the versioned object is committed. In order to make update actions on a single record serializable, an empty versioned object becomes reachable, and then it lets transactions compete against the versioned object. To be specific, once a versioned object is initially created, it becomes globally reachable before being filled with contents. There can be multiple transactions attempting to own the versioned object, and the first one who acquires the mutex among those that are able to see the previous version has a chance to fill the contents of the versioned object. If the transaction is rolled back, the chance is passed to the next transaction queued in the mutex, otherwise, the versioned object is marked with the transaction's commit snapshot time point value. The semantics is slightly different from conventional database systems, but it serves most types of workloads without a problem, because waiting for a lock usually results in serialization failure errors in conventional database systems. The details are as follows.
+`Transaction` and `Version` provides a rudimentary, yet versatile locking and versioning mechanism. A versioned database object can only be created once, and it can never be modified after the transaction having created the versioned object is committed. In order to make update actions on a single record serializable, an empty versioned object is created, making it reachable, and then it lets transactions compete to own it. To be specific, once a versioned object is initially created, it becomes globally reachable before being filled with contents. There can be multiple transactions attempting to own the versioned object, and the first one who acquires the lock of the version among those that are able to see the previous version has a chance to fill the version with contents. If the transaction is rolled back, the chance is passed to the next transaction queued in the wait queue of the transaction, otherwise, the versioned object is marked with the transaction's commit snapshot time point value. The semantics is slightly different from conventional database systems, but it serves most types of workloads without a problem, because waiting for a lock usually results in serialization failure errors in conventional database systems. The details are as follows.
 
-* INSERT/UPDATE/DELETE. It is simple; install an empty Version and VersionCell, and then update the contents afterwards.
+* INSERT/UPDATE/DELETE. It is simple; install an empty `Version`, and then update the contents afterwards.
 
 * SELECT FOR UPDATE. Similar to INSERT/UPDATE/DELETE, though very inefficient as it requires dummy version creation.
 
-* SELECT FOR SHARE. tss::Version does not support shared-locking. Developers may need to implement a separate lock table.
+* SELECT FOR SHARE. `Version` does not support shared-locking. Developers may need to implement a separate lock table.
 
 ```rust
 use tss::{AtomicCounter, RecordVersion, Storage, Version};
@@ -217,4 +217,4 @@ assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
 
 ### RecordVersion
 
-The framework provides a traditional record-level versioning mechanism for tss::RelationalTable.
+The framework provides a traditional record-level versioning mechanism for `RelationalTable`.

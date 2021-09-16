@@ -211,6 +211,18 @@ impl<S: Sequencer> Container<S> {
     pub fn unload(&self) -> Result<(), Error> {
         Err(Error::Fail)
     }
+
+    /// Reclaims unreachable resources held by the container.
+    ///
+    /// It calls the [vacuum](DataPlane::vacuum) method on all the containers attached to it.
+    pub fn vacuum(
+        &self,
+        _snapshot: &Snapshot<S>,
+        _min_snapshot_clock: S::Clock,
+        _timeout: Option<Duration>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// [Container] can either be [Data](Type::Data) or [Directory](Type::Directory).

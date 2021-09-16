@@ -59,6 +59,9 @@ impl<S: Sequencer> DataPlane<S> for RelationalTable<S> {
     fn size(&self) -> (usize, usize) {
         (0, 0)
     }
+    fn vacuum(&self, _min_snapshot_clock: S::Clock) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl<S: Sequencer> Default for RelationalTable<S> {

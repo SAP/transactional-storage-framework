@@ -59,4 +59,7 @@ pub trait DataPlane<S: Sequencer> {
 
     /// Returns the size of the container.
     fn size(&self) -> (usize, usize);
+
+    /// Reclaims unreachable versioned records, and defragments data slots.
+    fn vacuum(&self, min_snapshot_clock: S::Clock) -> Result<(), Error>;
 }
