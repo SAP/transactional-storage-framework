@@ -5,6 +5,8 @@
 use crate::DataPlane;
 use crate::{Error, Sequencer, Snapshot, Transaction};
 
+use std::time::Duration;
+
 /// Table is a two dimensional array of u8.
 pub struct RelationalTable<S: Sequencer> {
     _version_vector: Option<Vec<S::Clock>>,
@@ -59,7 +61,11 @@ impl<S: Sequencer> DataPlane<S> for RelationalTable<S> {
     fn size(&self) -> (usize, usize) {
         (0, 0)
     }
-    fn vacuum(&self, _min_snapshot_clock: S::Clock) -> Result<(), Error> {
+    fn vacuum(
+        &self,
+        _min_snapshot_clock: S::Clock,
+        _timeout: Option<Duration>,
+    ) -> Result<(), Error> {
         Ok(())
     }
 }

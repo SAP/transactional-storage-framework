@@ -13,7 +13,7 @@ use std::time::Duration;
 use scc::ebr;
 use scc::TreeIndex;
 
-/// [Container] is a organized data container that is transactionally updated.
+/// [Container] is an organized data container that is transactionally updated.
 ///
 /// A [Container] may hold references to other [Container] instances, and those holding
 /// [Container] references are called a directory.
@@ -215,13 +215,31 @@ impl<S: Sequencer> Container<S> {
     /// Reclaims unreachable resources held by the container.
     ///
     /// It calls the [vacuum](DataPlane::vacuum) method on all the containers attached to it.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error is vacuuming could not be completed.
     pub fn vacuum(
         &self,
-        _snapshot: &Snapshot<S>,
-        _min_snapshot_clock: S::Clock,
-        _timeout: Option<Duration>,
+        snapshot: &Snapshot<S>,
+        min_snapshot_clock: S::Clock,
+        timeout: Option<Duration>,
     ) -> Result<(), Error> {
-        Ok(())
+        match &self.container {
+            Type::Directory(directory) => {
+                let barrier = ebr::Barrier::new();
+                if directory.iter(&barrier).any(|(_, c)| {
+                    c.get(snapshot, &barrier).as_ref().map_or(false, |c| {
+                        c.vacuum(snapshot, min_snapshot_clock, timeout).is_err()
+                    })
+                }) {
+                    Err(Error::Fail)
+                } else {
+                    Ok(())
+                }
+            }
+            Type::Data(data_plane) => data_plane.vacuum(min_snapshot_clock, timeout),
+        }
     }
 }
 

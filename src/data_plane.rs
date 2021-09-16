@@ -4,6 +4,8 @@
 
 use super::{Error, Sequencer, Snapshot, Transaction};
 
+use std::time::Duration;
+
 /// [`DataPlane`] defines the data container interfaces.
 ///
 /// A container is a two-dimensional plane of data.
@@ -61,5 +63,9 @@ pub trait DataPlane<S: Sequencer> {
     fn size(&self) -> (usize, usize);
 
     /// Reclaims unreachable versioned records, and defragments data slots.
-    fn vacuum(&self, min_snapshot_clock: S::Clock) -> Result<(), Error>;
+    ///
+    /// # Errors
+    ///
+    /// It returns an error is vacuuming cannot be completed.
+    fn vacuum(&self, min_snapshot_clock: S::Clock, timeout: Option<Duration>) -> Result<(), Error>;
 }
