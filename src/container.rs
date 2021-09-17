@@ -229,6 +229,7 @@ impl<S: Sequencer> Container<S> {
             Type::Directory(directory) => {
                 let barrier = ebr::Barrier::new();
                 if directory.iter(&barrier).any(|(_, c)| {
+                    c.vacuum(min_snapshot_clock, &barrier);
                     c.get(snapshot, &barrier).as_ref().map_or(false, |c| {
                         c.vacuum(snapshot, min_snapshot_clock, timeout).is_err()
                     })
@@ -313,7 +314,7 @@ impl<S: Sequencer> Anchor<S> {
         ebr::Ptr::null()
     }
 
-    /// Returns a reference to the latest [Container] among those predate the given snapshot.
+    /// Returns a reference to the latest [Container] among those that predate the snapshot.
     fn get<'b>(
         &self,
         snapshot: &Snapshot<S>,
@@ -329,6 +330,22 @@ impl<S: Sequencer> Anchor<S> {
             current_version_ptr = current_version_ref.link.load(Acquire, barrier);
         }
         ebr::Ptr::null()
+    }
+
+    /// Unlinks obsolete container versions.
+    fn vacuum(&self, min_snapshot_clock: S::Clock, barrier: &ebr::Barrier) {
+        let mut current_version_ptr = self.version_link.load(Acquire, barrier);
+        while let Some(current_version_ref) = current_version_ptr.as_ref() {
+            if current_version_ref.try_consolidate(min_snapshot_clock, barrier) {
+                // All the versions older the the current one can be discarded.
+                if !current_version_ref.link.load(Relaxed, barrier).is_null() {
+                    current_version_ref
+                        .link
+                        .swap((None, ebr::Tag::None), Relaxed);
+                }
+            }
+            current_version_ptr = current_version_ref.link.load(Acquire, barrier);
+        }
     }
 }
 
@@ -369,5 +386,53 @@ impl<S: Sequencer> VersionTrait<S> for Version<S> {
 
     fn data_ref(&self) -> &Self::Data {
         &self.container
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{AtomicCounter, Storage};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn insert_delete_vacuum() {
+        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
+
+        let transaction = storage.transaction();
+        let snapshot = transaction.snapshot();
+        let mut journal = transaction.start();
+        let result = storage.create_directory("/test/directory", &snapshot, &mut journal, None);
+        assert!(result.is_ok());
+        assert_eq!(journal.submit(), 1);
+        drop(snapshot);
+        drop(transaction.commit());
+
+        let num_threads = 4;
+        let barrier = Arc::new(Barrier::new(num_threads + 1));
+        let mut thread_handles = Vec::new();
+        for _ in 0..num_threads {
+            let storage_cloned = storage.clone();
+            let barrier_cloned = barrier.clone();
+            thread_handles.push(thread::spawn(move || {
+                barrier_cloned.wait();
+
+                let transaction = storage_cloned.transaction();
+                let snapshot = transaction.snapshot();
+                let mut journal = transaction.start();
+                let _result =
+                    storage_cloned.remove("/test/directory", &snapshot, &mut journal, None);
+                assert_eq!(journal.submit(), 1);
+                drop(snapshot);
+                drop(transaction.commit());
+            }));
+        }
+
+        barrier.wait();
+        drop(storage);
+
+        thread_handles
+            .into_iter()
+            .for_each(|t| assert!(t.join().is_ok()));
     }
 }

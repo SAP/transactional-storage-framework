@@ -60,8 +60,6 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// let snapshot = journal.snapshot();
     /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
     /// journal.submit();
-    ///
-    /// assert!(versioned_object.consolidate());
     /// ```
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
@@ -100,7 +98,6 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     ///
     /// let snapshot = storage.snapshot();
     /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
-    /// assert!(versioned_object.consolidate());
     /// ```
     pub fn create<V: Version<S>, F: FnOnce(&mut V::Data) -> Result<Option<Log>, Error>>(
         &mut self,
@@ -399,7 +396,6 @@ mod tests {
 
         let snapshot = storage.snapshot();
         assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
-        assert!(versioned_object.consolidate());
 
         assert_eq!(*versioned_object.data_ref(), 10);
     }

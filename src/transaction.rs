@@ -599,8 +599,6 @@ mod test {
             .into_iter()
             .for_each(|t| assert!(t.join().is_ok()));
 
-        assert!(versioned_object.consolidate());
-
         let snapshot = storage.snapshot();
         assert!(versioned_object.predate(&snapshot, &ebr::Barrier::new()));
     }

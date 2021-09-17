@@ -30,6 +30,7 @@ pub trait Version<S: Sequencer> {
     /// It is allowed for a [Version] implementation to return different references based on
     /// the status, for instance, if the [Version] is fully consolidated, it may return a
     /// static reference to an [Owner] instance that represents an always-visible state.
+
     ///
     /// # Safety
     ///
@@ -95,15 +96,23 @@ pub trait Version<S: Sequencer> {
         owner_ptr.tag() == ebr::Tag::First
     }
 
-    /// Consolidates the versioned database object to make it globally visible.
+    /// Tries to consolidate the versioned database object to make it globally visible.
     ///
-    /// Returns `true` if it has successfully detached the versioning information. If it is
-    /// called on an uninitialized [Version], the [Version] remains uninitialized permanently.
-    fn consolidate(&self) -> bool {
-        self.owner_field()
-            .0
-            .swap((None, ebr::Tag::First), Relaxed)
-            .is_some()
+    /// Returns `true` if the [Version] is globally visible.
+    fn try_consolidate(&self, min_snapshot_clock: S::Clock, barrier: &ebr::Barrier) -> bool {
+        let owner_ptr = self.owner_field().0.load(Relaxed, barrier);
+        if let Some(journal_anchor_ref) = owner_ptr.as_ref() {
+            let commit_clock = journal_anchor_ref.commit_snapshot();
+            if commit_clock != S::Clock::default() && commit_clock <= min_snapshot_clock {
+                return self
+                    .owner_field()
+                    .0
+                    .compare_exchange(owner_ptr, (None, ebr::Tag::First), Relaxed, Relaxed)
+                    .is_ok();
+            }
+            return false;
+        }
+        owner_ptr.tag() == ebr::Tag::First
     }
 }
 
