@@ -62,6 +62,8 @@ impl<S: Sequencer> Container<S> {
     }
 
     /// Creates a new container directory under the given name.
+    ///
+    /// It returns `None` if locking failed.
     pub fn create_directory(
         &self,
         name: &str,
@@ -72,29 +74,33 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(result) = directory.read(name, |_, anchor| {
-                    let new_version_ptr = anchor.install(snapshot, &barrier);
-                    if let Some(new_version) = new_version_ptr.try_into_arc() {
-                        let new_directory = Container::new_directory();
-                        #[allow(clippy::blocks_in_if_conditions)]
-                        if journal
-                            .create(
-                                &*new_version,
-                                |c| {
-                                    *c = ebr::AtomicArc::from(new_directory.clone());
-                                    Ok(None)
-                                },
-                                timeout,
-                            )
-                            .is_ok()
-                        {
-                            // The transaction took ownership.
-                            return Some(new_directory);
+                if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
+                    if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+                        if let Some(new_version) = new_version_ptr.try_into_arc() {
+                            let new_directory = Container::new_directory();
+                            #[allow(clippy::blocks_in_if_conditions)]
+                            if journal
+                                .create(
+                                    &*new_version,
+                                    |c| {
+                                        *c = ebr::AtomicArc::from(new_directory.clone());
+                                        Ok(None)
+                                    },
+                                    timeout,
+                                )
+                                .is_ok()
+                            {
+                                // The transaction took ownership.
+                                return Some(new_directory);
+                            }
                         }
+                        return None;
                     }
-                    None
-                }) {
-                    return result;
+
+                    // Installation failure means that the version chain is invalid.
+                    directory.remove_if(name, |v| {
+                        v.version_link.load(Relaxed, &barrier).tag() == ebr::Tag::First
+                    });
                 }
                 let _result = directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
@@ -134,28 +140,31 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(result) = directory.read(name, |_, anchor| {
-                    let new_version_ptr = anchor.install(snapshot, &barrier);
-                    if let Some(new_version) = new_version_ptr.try_into_arc() {
-                        #[allow(clippy::blocks_in_if_conditions)]
-                        if journal
-                            .create(
-                                &*new_version,
-                                |c| {
-                                    *c = ebr::AtomicArc::from(container.clone());
-                                    Ok(None)
-                                },
-                                timeout,
-                            )
-                            .is_ok()
-                        {
-                            // The transaction took ownership.
-                            return true;
+                if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
+                    if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+                        if let Some(new_version) = new_version_ptr.try_into_arc() {
+                            #[allow(clippy::blocks_in_if_conditions)]
+                            if journal
+                                .create(
+                                    &*new_version,
+                                    |c| {
+                                        *c = ebr::AtomicArc::from(container.clone());
+                                        Ok(None)
+                                    },
+                                    timeout,
+                                )
+                                .is_ok()
+                            {
+                                // The transaction took ownership.
+                                return true;
+                            }
                         }
                     }
-                    false
-                }) {
-                    return result;
+
+                    // Installation failure means that the version chain is invalid.
+                    directory.remove_if(name, |v| {
+                        v.version_link.load(Relaxed, &barrier).tag() == ebr::Tag::First
+                    });
                 }
                 let _result = directory.insert(String::from(name), Arc::new(Anchor::new()));
             }
@@ -173,30 +182,26 @@ impl<S: Sequencer> Container<S> {
     ) -> bool {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
-            if let Some(result) = directory.read(name, |_, anchor| {
-                let new_version_ptr = anchor.install(snapshot, &barrier);
-                if let Some(new_version) = new_version_ptr.try_into_arc() {
-                    let deleted_version = ebr::AtomicArc::null();
-                    deleted_version.update_tag_if(ebr::Tag::First, |_| true, Relaxed);
-                    #[allow(clippy::blocks_in_if_conditions)]
-                    if journal
-                        .create(
-                            &*new_version,
-                            |c| {
-                                *c = deleted_version;
-                                Ok(None)
-                            },
-                            timeout,
-                        )
-                        .is_ok()
-                    {
-                        // The transaction successfully deleted it.
-                        return true;
+            if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
+                if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+                    if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        #[allow(clippy::blocks_in_if_conditions)]
+                        if journal
+                            .create(
+                                &*new_version,
+                                |c| {
+                                    *c = ebr::AtomicArc::null();
+                                    Ok(None)
+                                },
+                                timeout,
+                            )
+                            .is_ok()
+                        {
+                            // The transaction successfully deleted it.
+                            return true;
+                        }
                     }
                 }
-                false
-            }) {
-                return result;
             }
         }
         false
@@ -228,8 +233,13 @@ impl<S: Sequencer> Container<S> {
         match &self.container {
             Type::Directory(directory) => {
                 let barrier = ebr::Barrier::new();
-                if directory.iter(&barrier).any(|(_, c)| {
-                    c.vacuum(min_snapshot_clock, &barrier);
+                if directory.iter(&barrier).any(|(key_ref, c)| {
+                    if c.vacuum(min_snapshot_clock, &barrier) {
+                        directory.remove_if(key_ref, |v| {
+                            v.version_link.load(Relaxed, &barrier).tag() == ebr::Tag::First
+                        });
+                        return false;
+                    }
                     c.get(snapshot, &barrier).as_ref().map_or(false, |c| {
                         c.vacuum(snapshot, min_snapshot_clock, timeout).is_err()
                     })
@@ -253,8 +263,9 @@ enum Type<S: Sequencer> {
     Directory(TreeIndex<String, Arc<Anchor<S>>>),
 }
 
-/// [Anchor] is the only access path to [Container] instances.
+/// [`Anchor`] is the only access path to [`Container`] instances.
 struct Anchor<S: Sequencer> {
+    /// `version_link` tagged with [`ebr::Tag::First`] makes the [`Anchor`] invalid.
     version_link: ebr::AtomicArc<Version<S>>,
 }
 
@@ -267,21 +278,25 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Installs a new unowned version into the version chain.
     ///
-    /// It returns a pointer to the newest unowned version. It pushes the version only if
-    /// the previous version is visible to the given [Snapshot], and if not, it returns a null
-    /// pointer.
+    /// It returns an error with the latest pointer value if the version chain has been
+    /// invalidated. It returns an `Ok` with a pointer to the newest unowned version otherwise.
+    /// It pushes a new version only if the previous version is visible to the [`Snapshot`].
     fn install<'b>(
         &self,
         snapshot: &Snapshot<S>,
         barrier: &'b ebr::Barrier,
-    ) -> ebr::Ptr<'b, Version<S>> {
+    ) -> Result<ebr::Ptr<'b, Version<S>>, ebr::Ptr<'b, Version<S>>> {
         let mut new_version: Option<ebr::Arc<Version<S>>> = None;
         let mut current_version_ptr = self.version_link.load(Relaxed, barrier);
         loop {
+            if current_version_ptr.tag() == ebr::Tag::First {
+                // The version chain cannot be used.
+                return Err(current_version_ptr);
+            }
             if let Some(current_version_ref) = current_version_ptr.as_ref() {
-                if current_version_ref.unowned(barrier) {
+                if current_version_ref.is_new(barrier) {
                     // An unowned version is at the head of the linked list.
-                    return current_version_ptr;
+                    return Ok(current_version_ptr);
                 } else if !current_version_ref.predate(snapshot, barrier) {
                     // The latest version is invisible to the given snapshot.
                     //
@@ -302,7 +317,7 @@ impl<S: Sequencer> Anchor<S> {
                 Release,
                 Relaxed,
             ) {
-                Ok((_, current_ptr)) => return current_ptr,
+                Ok((_, current_ptr)) => return Ok(current_ptr),
                 Err((passed, actual)) => {
                     if let Some(passed) = passed {
                         new_version.replace(passed);
@@ -311,7 +326,7 @@ impl<S: Sequencer> Anchor<S> {
                 }
             }
         }
-        ebr::Ptr::null()
+        Ok(ebr::Ptr::null())
     }
 
     /// Returns a reference to the latest [Container] among those that predate the snapshot.
@@ -322,7 +337,7 @@ impl<S: Sequencer> Anchor<S> {
     ) -> ebr::Ptr<'b, Container<S>> {
         let mut current_version_ptr = self.version_link.load(Acquire, barrier);
         while let Some(current_version_ref) = current_version_ptr.as_ref() {
-            if !current_version_ref.unowned(barrier)
+            if !current_version_ref.is_new(barrier)
                 && current_version_ref.predate(snapshot, barrier)
             {
                 return current_version_ref.container.load(Relaxed, barrier);
@@ -333,19 +348,41 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Unlinks obsolete container versions.
-    fn vacuum(&self, min_snapshot_clock: S::Clock, barrier: &ebr::Barrier) {
+    ///
+    /// It returns `true` if the version chain is no longer usable.
+    fn vacuum(&self, min_snapshot_clock: S::Clock, barrier: &ebr::Barrier) -> bool {
         let mut current_version_ptr = self.version_link.load(Acquire, barrier);
         while let Some(current_version_ref) = current_version_ptr.as_ref() {
             if current_version_ref.try_consolidate(min_snapshot_clock, barrier) {
+                if current_version_ref.container.is_null(Relaxed) {
+                    // The container deletion is now globally visible.
+                    if self
+                        .version_link
+                        .compare_exchange(
+                            current_version_ptr,
+                            (None, ebr::Tag::First),
+                            Relaxed,
+                            Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        // Successfully invalidated the version.
+                        //
+                        // From here, no new versions can be installed.
+                        return true;
+                    }
+                }
                 // All the versions older the the current one can be discarded.
                 if !current_version_ref.link.load(Relaxed, barrier).is_null() {
                     current_version_ref
                         .link
                         .swap((None, ebr::Tag::None), Relaxed);
                 }
+                break;
             }
             current_version_ptr = current_version_ref.link.load(Acquire, barrier);
         }
+        false
     }
 }
 
@@ -355,7 +392,7 @@ struct Version<S: Sequencer> {
     /// Its [Owner].
     owner: Owner<S>,
 
-    /// `container` being tagged indicates that the [Container] is deleted.
+    /// `container` being null indicates that the [Container] is deleted.
     container: ebr::AtomicArc<Container<S>>,
 
     /// A link to its predecessor.
@@ -369,11 +406,6 @@ impl<S: Sequencer> Version<S> {
             container: ebr::AtomicArc::null(),
             link: ebr::AtomicArc::null(),
         }
-    }
-
-    fn unowned(&self, barrier: &ebr::Barrier) -> bool {
-        let container_ptr = self.container.load(Relaxed, barrier);
-        container_ptr.is_null() && container_ptr.tag() == ebr::Tag::None
     }
 }
 

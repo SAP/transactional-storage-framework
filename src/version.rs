@@ -45,6 +45,12 @@ pub trait Version<S: Sequencer> {
     /// visibility using the `predate` method is deemed unsafe.
     fn data_ref(&self) -> &Self::Data;
 
+    /// Returns `true` if the version has never been created.
+    fn is_new(&self, barrier: &ebr::Barrier) -> bool {
+        let ptr = self.owner_field().0.load(Relaxed, barrier);
+        ptr.is_null() && ptr.tag() == ebr::Tag::None
+    }
+
     /// Creates a new [Version] of the versioned database object.
     ///
     /// An uninitialized versioned database object becomes reachable before its contents are
