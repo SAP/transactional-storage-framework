@@ -74,8 +74,8 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
-                    if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+                if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
+                    if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
                         if let Some(new_version) = new_version_ptr.try_into_arc() {
                             let new_directory = Container::new_directory();
                             #[allow(clippy::blocks_in_if_conditions)]
@@ -117,7 +117,7 @@ impl<S: Sequencer> Container<S> {
     ) -> ebr::Ptr<'b, Container<S>> {
         if let Type::Directory(directory) = &self.container {
             if let Some(container_ptr) =
-                directory.read(name, |_, anchor| anchor.get(snapshot, barrier))
+                directory.read_with(name, |_, anchor| anchor.get(snapshot, barrier), barrier)
             {
                 return container_ptr;
             }
@@ -140,8 +140,8 @@ impl<S: Sequencer> Container<S> {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
             loop {
-                if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
-                    if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+                if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
+                    if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
                         if let Some(new_version) = new_version_ptr.try_into_arc() {
                             #[allow(clippy::blocks_in_if_conditions)]
                             if journal
@@ -182,8 +182,8 @@ impl<S: Sequencer> Container<S> {
     ) -> bool {
         let barrier = ebr::Barrier::new();
         if let Type::Directory(directory) = &self.container {
-            if let Some(anchor) = directory.read(name, |_, anchor| anchor.clone()) {
-                if let Ok(new_version_ptr) = anchor.install(snapshot, &barrier) {
+            if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
+                if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
                     if let Some(new_version) = new_version_ptr.try_into_arc() {
                         #[allow(clippy::blocks_in_if_conditions)]
                         if journal
