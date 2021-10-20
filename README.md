@@ -9,6 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP/transactional-storage-framework)](https://api.reuse.software/info/github.com/SAP/transactional-storage-framework)
 ![GitHub Workflow Status](https://img.shields.io/github/workflow/status/SAP/transactional-storage-framework/TSS)
 
+**The project is currently work-in-progress.**
+**PRs welcome.**
+
 The transactional storage framework is a software framework that offers key operation interfaces and basic functionality for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
 
 * [tss::Storage](#Storage)
@@ -49,11 +52,13 @@ let container_handle: Handle = Container::new_container(container_data);
 
 ### RelationalTable
 
+**Work-in-progress.**
+
 The framework provides a row-oriented database table container that resembles traditional database tables.
 
 ## Sequencer
 
-`Sequencer` is a logical clock generator that gives an identifier to a set of changes made by a transaction. The framework allows one to implement the `Lamport vector clock` as the `Sequence` trait assumes `PartialOrd` for the clock value. It is the most important type in a transactional storage system as it defines the flow of time.
+`Sequencer` is a logical clock generator that gives an identifier to a set of changes made by a transaction. The framework allows one to implement the `Lamport vector clock` as the `Sequencer` trait assumes `PartialOrd` for the clock value. It is the most important type in a transactional storage system as it defines the flow of time.
 
 ```rust
 pub trait Sequencer: 'static + Default {
@@ -177,6 +182,8 @@ pub trait Logger<S: Sequencer> {
 
 ### FileLogger
 
+**Work-in-progress.**
+
 The framework provides a file-based logger that is capable of lock-free check-pointing and point-in-time recovery.
 
 ## Version
@@ -216,5 +223,7 @@ assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
 ```
 
 ### RecordVersion
+
+**Work-in-progress.**
 
 The framework provides a traditional record-level versioning mechanism for `RelationalTable`.
