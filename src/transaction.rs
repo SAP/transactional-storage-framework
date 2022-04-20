@@ -5,6 +5,7 @@
 use super::journal::Annals;
 use super::{Error, Journal, Sequencer, Snapshot, Storage};
 
+use std::ptr::addr_of;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicPtr, AtomicUsize};
 
@@ -176,10 +177,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
-        let anchor_mut_ref = unsafe {
-            #[allow(clippy::cast_ref_to_mut)]
-            &mut *(&*self.anchor as *const Anchor<S> as *mut Anchor<S>)
-        };
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_clock = self.sequencer.get(Relaxed);
         anchor_mut_ref.state.store(1, Release);
         Ok(Rubicon {
@@ -312,10 +310,7 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
             State::Committing.into()
         );
 
-        let anchor_mut_ref = unsafe {
-            #[allow(clippy::cast_ref_to_mut)]
-            &mut *(&*transaction.anchor as *const Anchor<S> as *mut Anchor<S>)
-        };
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*transaction.anchor) as *mut Anchor<S>) };
         let commit_snapshot = transaction.sequencer.advance(Release);
         anchor_mut_ref.commit_clock = commit_snapshot;
         anchor_mut_ref.state.store(State::Committed.into(), Release);

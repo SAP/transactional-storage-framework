@@ -147,8 +147,7 @@ impl LocalTracker {
         });
         let mut current = anchor().load(Relaxed, &barrier);
         loop {
-            new.next
-                .swap((current.try_into_arc(), ebr::Tag::None), Relaxed);
+            new.next.swap((current.get_arc(), ebr::Tag::None), Relaxed);
             match anchor().compare_exchange(
                 current,
                 (Some(new.clone()), ebr::Tag::None),
@@ -207,7 +206,7 @@ fn first_ptr(barrier: &ebr::Barrier) -> ebr::Ptr<LocalTracker> {
             let next_ptr = tracker_ref.next_ptr(Relaxed, barrier);
             match anchor().compare_exchange(
                 current_ptr,
-                (next_ptr.try_into_arc(), ebr::Tag::None),
+                (next_ptr.get_arc(), ebr::Tag::None),
                 Acquire,
                 Acquire,
             ) {

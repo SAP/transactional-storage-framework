@@ -191,7 +191,7 @@ impl<S: Sequencer> Locker<S> {
             return None;
         }
 
-        let mut new_owner = new_owner_ptr.try_into_arc();
+        let mut new_owner = new_owner_ptr.get_arc();
         new_owner.as_ref()?;
 
         while let Err((passed, actual)) = owner_field.0.compare_exchange(
@@ -363,7 +363,7 @@ impl<S: Sequencer> Drop for Locker<S> {
                 // It must be a release-store.
                 if let Err((_, actual)) = self.owner_field.0.compare_exchange(
                     current_owner,
-                    (self.prev_owner.try_into_arc(), ebr::Tag::None),
+                    (self.prev_owner.get_arc(), ebr::Tag::None),
                     Release,
                     Relaxed,
                 ) {

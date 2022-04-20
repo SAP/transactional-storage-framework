@@ -76,7 +76,7 @@ impl<S: Sequencer> Container<S> {
             loop {
                 if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
                     if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
-                        if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        if let Some(new_version) = new_version_ptr.get_arc() {
                             let new_directory = Container::new_directory();
                             #[allow(clippy::blocks_in_if_conditions)]
                             if journal
@@ -142,7 +142,7 @@ impl<S: Sequencer> Container<S> {
             loop {
                 if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
                     if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
-                        if let Some(new_version) = new_version_ptr.try_into_arc() {
+                        if let Some(new_version) = new_version_ptr.get_arc() {
                             #[allow(clippy::blocks_in_if_conditions)]
                             if journal
                                 .create(
@@ -184,7 +184,7 @@ impl<S: Sequencer> Container<S> {
         if let Type::Directory(directory) = &self.container {
             if let Some(anchor_ref) = directory.read_with(name, |_, anchor| anchor, &barrier) {
                 if let Ok(new_version_ptr) = anchor_ref.install(snapshot, &barrier) {
-                    if let Some(new_version) = new_version_ptr.try_into_arc() {
+                    if let Some(new_version) = new_version_ptr.get_arc() {
                         #[allow(clippy::blocks_in_if_conditions)]
                         if journal
                             .create(
@@ -307,10 +307,7 @@ impl<S: Sequencer> Anchor<S> {
             new_version
                 .get_or_insert(ebr::Arc::new(Version::new()))
                 .link
-                .swap(
-                    (current_version_ptr.try_into_arc(), ebr::Tag::None),
-                    Relaxed,
-                );
+                .swap((current_version_ptr.get_arc(), ebr::Tag::None), Relaxed);
             match self.version_link.compare_exchange(
                 current_version_ptr,
                 (new_version.take(), ebr::Tag::None),

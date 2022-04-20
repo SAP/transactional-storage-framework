@@ -126,7 +126,7 @@ impl<S: Sequencer> Storage<S> {
             }
             return Err(Error::Fail);
         }
-        if let Some(container) = current_container_ptr.try_into_arc() {
+        if let Some(container) = current_container_ptr.get_arc() {
             return Ok(container);
         }
         Err(Error::Fail)
@@ -174,7 +174,7 @@ impl<S: Sequencer> Storage<S> {
                 return None;
             }
         }
-        if let Some(container) = current_container_ptr.try_into_arc() {
+        if let Some(container) = current_container_ptr.get_arc() {
             return Some(container);
         }
         None
@@ -436,7 +436,7 @@ impl<S: Sequencer> Storage<S> {
             return Err(Error::Fail);
         }
         if let (Some(current_container), Some(current_container_name), Some(parent_container_ref)) = (
-            current_container_ptr.try_into_arc(),
+            current_container_ptr.get_arc(),
             current_container_name.take(),
             parent_container_ptr.as_ref(),
         ) {
