@@ -288,6 +288,7 @@ mod test {
                     let current = ATOMIC_COUNTER.get(Acquire);
                     assert!(advanced <= current);
                 }
+                barrier_cloned.wait();
             }));
         }
 
