@@ -12,7 +12,7 @@ use std::sync::{Mutex, Once};
 
 use scc::{ebr, LinkedList};
 
-/// [`AtomicCounter`] implements [Sequencer] by managing a single atomic counter.
+/// [`AtomicCounter`] implements [`Sequencer`] by managing a single atomic counter.
 ///
 /// An atomic counter is known to be inefficient when the system is equipped with a large
 /// number of processors.
@@ -126,7 +126,19 @@ impl DeriveClock<usize> for UsizeTracker {
 impl Drop for UsizeTracker {
     fn drop(&mut self) {
         if let Ok(mut min_heap) = unsafe { (*self.local_tracker).min_heap.lock() } {
-            min_heap.remove(&self.clock);
+            let remove = if let Some(counter) = min_heap.get_mut(&self.clock) {
+                if *counter == 1 {
+                    true
+                } else {
+                    *counter -= 1;
+                    false
+                }
+            } else {
+                false
+            };
+            if remove {
+                min_heap.remove(&self.clock);
+            }
         }
     }
 }
@@ -153,6 +165,7 @@ impl LocalTracker {
                 (Some(new.clone()), ebr::Tag::None),
                 Release,
                 Relaxed,
+                &barrier,
             ) {
                 Ok(_) => {
                     return new;
@@ -209,6 +222,7 @@ fn first_ptr(barrier: &ebr::Barrier) -> ebr::Ptr<LocalTracker> {
                 (next_ptr.get_arc(), ebr::Tag::None),
                 Acquire,
                 Acquire,
+                barrier,
             ) {
                 Ok(_) => {
                     current_ptr = next_ptr;
@@ -280,6 +294,6 @@ mod test {
         thread_handles
             .into_iter()
             .for_each(|t| assert!(t.join().is_ok()));
-        // Bug #9: assert_eq!(ATOMIC_COUNTER.min(Acquire), ATOMIC_COUNTER.get(Acquire));
+        assert_eq!(ATOMIC_COUNTER.min(Acquire), ATOMIC_COUNTER.get(Acquire));
     }
 }

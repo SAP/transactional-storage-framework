@@ -313,6 +313,7 @@ impl<S: Sequencer> Anchor<S> {
                 (new_version.take(), ebr::Tag::None),
                 Release,
                 Relaxed,
+                barrier,
             ) {
                 Ok((_, current_ptr)) => return Ok(current_ptr),
                 Err((passed, actual)) => {
@@ -360,6 +361,7 @@ impl<S: Sequencer> Anchor<S> {
                             (None, ebr::Tag::First),
                             Relaxed,
                             Relaxed,
+                            barrier,
                         )
                         .is_ok()
                     {

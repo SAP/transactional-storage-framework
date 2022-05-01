@@ -113,7 +113,13 @@ pub trait Version<S: Sequencer> {
                 return self
                     .owner_field()
                     .0
-                    .compare_exchange(owner_ptr, (None, ebr::Tag::First), Relaxed, Relaxed)
+                    .compare_exchange(
+                        owner_ptr,
+                        (None, ebr::Tag::First),
+                        Relaxed,
+                        Relaxed,
+                        barrier,
+                    )
                     .is_ok();
             }
             return false;
@@ -199,6 +205,7 @@ impl<S: Sequencer> Locker<S> {
             (new_owner.take(), ebr::Tag::None),
             Relaxed,
             Relaxed,
+            barrier,
         ) {
             new_owner = passed;
             new_owner.as_ref()?;
@@ -237,6 +244,7 @@ impl<S: Sequencer> Locker<S> {
                     (new_owner, ebr::Tag::None),
                     Acquire,
                     Relaxed,
+                    barrier,
                 ) {
                     Err((passed, _)) => {
                         new_owner = passed;
@@ -257,9 +265,14 @@ impl<S: Sequencer> Locker<S> {
                 }
             }
 
-            if let Err(remaining) =
-                Self::wait(actual_owner, actual, &mut new_owner, owner_field, timeout)
-            {
+            if let Err(remaining) = Self::wait(
+                actual_owner,
+                actual,
+                &mut new_owner,
+                owner_field,
+                timeout,
+                barrier,
+            ) {
                 if let Some(remaining_time) = remaining {
                     // Still has some time to wait.
                     timeout.replace(remaining_time);
@@ -296,6 +309,7 @@ impl<S: Sequencer> Locker<S> {
         new_owner: &mut Option<ebr::Arc<JournalAnchor<S>>>,
         owner_field: &Owner<S>,
         timeout: Option<Duration>,
+        barrier: &'b ebr::Barrier,
     ) -> Result<(), Option<Duration>> {
         let now = Instant::now();
         let result = known_owner.wait(
@@ -316,6 +330,7 @@ impl<S: Sequencer> Locker<S> {
                     (new_owner.take(), ebr::Tag::None),
                     Acquire,
                     Relaxed,
+                    barrier,
                 ) {
                     if let Some(passed) = passed {
                         new_owner.replace(passed);
@@ -366,6 +381,7 @@ impl<S: Sequencer> Drop for Locker<S> {
                     (self.prev_owner.get_arc(), ebr::Tag::None),
                     Release,
                     Relaxed,
+                    &barrier,
                 ) {
                     current_owner = actual;
                 } else {
