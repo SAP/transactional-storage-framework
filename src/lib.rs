@@ -22,7 +22,7 @@ mod container;
 pub use container::Container;
 
 mod data_plane;
-pub use data_plane::DataPlane;
+pub use data_plane::{DataPlane, RelationalTable};
 
 mod error;
 pub use error::Error;
@@ -31,7 +31,7 @@ mod journal;
 pub use journal::Journal;
 
 mod logger;
-pub use logger::{Log, Logger};
+pub use logger::{FileLogger, Log, Logger};
 
 mod record;
 pub use record::Record;
@@ -40,7 +40,7 @@ mod layout;
 pub use layout::Layout;
 
 pub mod sequencer;
-pub use sequencer::Sequencer;
+pub use sequencer::{AtomicCounter, Sequencer};
 
 mod snapshot;
 pub use snapshot::Snapshot;
@@ -52,12 +52,6 @@ mod transaction;
 pub use transaction::{Rubicon, Transaction};
 
 pub mod version;
-pub use version::Version;
-
-mod realization;
-pub use realization::atomic_counter::AtomicCounter;
-pub use realization::file_logger::FileLogger;
-pub use realization::record_version::RecordVersion;
-pub use realization::relational_table::RelationalTable;
+pub use version::{RecordVersion, Version};
 
 mod tests;

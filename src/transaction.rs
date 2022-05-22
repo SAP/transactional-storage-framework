@@ -404,7 +404,11 @@ impl<S: Sequencer> Anchor<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, RecordVersion, Version};
+
+    use crate::sequencer::AtomicCounter;
+    use crate::version::RecordVersion;
+    use crate::Version;
+
     use std::sync::{Arc, Barrier, Once};
     use std::thread;
     use std::time::Duration;

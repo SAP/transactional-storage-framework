@@ -7,7 +7,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::AtomicCounter;
+    use crate::sequencer::AtomicCounter;
     use crate::Storage;
 
     #[test]

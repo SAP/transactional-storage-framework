@@ -422,7 +422,9 @@ impl<S: Sequencer> VersionTrait<S> for Version<S> {
 
 #[cfg(test)]
 mod test {
-    use crate::{AtomicCounter, Storage};
+    use crate::sequencer::AtomicCounter;
+    use crate::Storage;
+
     use std::sync::{Arc, Barrier};
     use std::thread;
 

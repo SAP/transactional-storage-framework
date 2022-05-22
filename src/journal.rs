@@ -345,7 +345,9 @@ impl<S: Sequencer> Anchor<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AtomicCounter, RecordVersion, Storage, Version};
+    use crate::sequencer::AtomicCounter;
+    use crate::version::RecordVersion;
+    use crate::{Storage, Version};
 
     #[test]
     fn journal() {

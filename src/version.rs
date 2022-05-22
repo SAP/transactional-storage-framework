@@ -10,6 +10,7 @@
 //! mechanism.
 
 use super::journal::Anchor as JournalAnchor;
+use super::sequencer::AtomicCounter;
 use super::{Error, Log, Sequencer, Snapshot};
 
 use std::mem::transmute;
@@ -395,3 +396,23 @@ impl<S: Sequencer> Drop for Locker<S> {
 /// The [`ebr::Ptr`] instances in a [`Locker`] can be sent as they are not associated with an
 /// [`ebr::Barrier`].
 unsafe impl<S: Sequencer> Send for Locker<S> {}
+
+/// [`RecordVersion`] is a versioned database object for a record.
+#[allow(clippy::module_name_repetitions)]
+#[derive(Default)]
+pub struct RecordVersion<D: Default + Send + Sync> {
+    owner: Owner<AtomicCounter>,
+    data: D,
+}
+
+impl<D: Default + Send + Sync> Version<AtomicCounter> for RecordVersion<D> {
+    type Data = D;
+
+    fn owner_field<'b>(&self) -> &Owner<AtomicCounter> {
+        &self.owner
+    }
+
+    fn data_ref(&self) -> &Self::Data {
+        &self.data
+    }
+}

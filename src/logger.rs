@@ -127,3 +127,42 @@ pub trait Logger<S: Sequencer> {
     /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
     fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
 }
+
+/// [`FileLogger`] is a file-based logger that pushes data into files sequentially.
+///
+/// Checkpoint operations entail log file truncation.
+#[allow(clippy::module_name_repetitions)]
+pub struct FileLogger<S: Sequencer> {
+    _path: String,
+    _invalid_clock: S::Clock,
+}
+
+impl<S: Sequencer> FileLogger<S> {
+    /// Creates  new [`FileLogger`].
+    #[must_use]
+    pub fn new(anchor: &str) -> FileLogger<S> {
+        FileLogger {
+            _path: String::from(anchor),
+            _invalid_clock: S::Clock::default(),
+        }
+    }
+}
+
+impl<S: Sequencer> Logger<S> for FileLogger<S> {
+    fn submit(
+        &self,
+        _log_data: Vec<u8>,
+        _transaction: &Transaction<S>,
+    ) -> Result<(usize, usize), Error> {
+        Err(Error::Fail)
+    }
+    fn persist(&self, _position: usize) -> Result<usize, Error> {
+        Err(Error::Fail)
+    }
+    fn recover(&self, _until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>> {
+        None
+    }
+    fn load(&self, _path: &str) -> Option<ebr::Arc<Container<S>>> {
+        None
+    }
+}
