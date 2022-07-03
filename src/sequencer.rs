@@ -134,7 +134,7 @@ impl Sequencer for AtomicCounter {
                                 .is_ok()
                             {
                                 // Reuse the entry.
-                                reuse.replace(e as *const Entry);
+                                reuse.replace(std::ptr::addr_of!((**e)));
                                 return false;
                             }
                             // Cannot push a new entry if the existing if larger.
