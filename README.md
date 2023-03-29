@@ -10,6 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 ![GitHub Workflow Status](https://img.shields.io/github/workflow/status/SAP/transactional-storage-framework/TSS)
 
 **The project is currently work-in-progress.**
+**The whole code base will undergo extensive renovation.**
 
 The transactional storage framework is a software framework that offers key operation interfaces and basic functionality for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
 

@@ -189,7 +189,7 @@ impl<S: Sequencer> Drop for Annals<S> {
 
 /// [Anchor] is a piece of data that outlives its associated [Journal] and [Annals].
 ///
-/// [Cell](super::version::Cell) may point to it if the [Journal] owns the
+/// [Cell](super::version::Owner) may point to it if the [Journal] owns the
 /// [Version].
 pub struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
