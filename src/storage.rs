@@ -46,12 +46,12 @@ impl<S: Sequencer> Storage<S> {
         }
     }
 
-    /// Starts a storage [`Transaction`].
+    /// Starts a [`Transaction`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Snapshot, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
@@ -61,7 +61,7 @@ impl<S: Sequencer> Storage<S> {
         Transaction::new(self, &self.sequencer)
     }
 
-    /// Takes a [`Snapshot`] of the [`Storage`].
+    /// Captures the current [`Snapshot`] of the database.
     ///
     /// # Examples
     ///
@@ -77,7 +77,7 @@ impl<S: Sequencer> Storage<S> {
         Snapshot::new(&self.sequencer, None, None)
     }
 
-    /// Creates a new [`Container`] directory.
+    /// Creates a new empty [`Container`].
     ///
     /// # Errors
     ///
@@ -90,27 +90,47 @@ impl<S: Sequencer> Storage<S> {
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
-    /// let snapshot = transaction.snapshot();
     /// let mut journal = transaction.start();
-    /// let result_future =
-    ///     storage.create_container(
-    ///         "hello".to_string(),
-    ///         &snapshot,
-    ///         &mut journal,
-    ///         None);
+    /// let result_future = storage.create_container("hello".to_string(), &mut journal, None);
     /// ```
     #[inline]
     pub async fn create_container<'s, 't, 'j>(
         &'s self,
         name: String,
-        snapshot: &Snapshot<'s, 't, 'j, S>,
         journal: &'j mut Journal<'s, 't, S>,
         deadline: Option<Instant>,
-    ) -> Result<ebr::Arc<Container<S>>, Error> {
+    ) -> Result<&'j mut Container<S>, Error> {
         unimplemented!()
     }
 
-    /// Gets the [`Container`] under the specified name.
+    /// Renames an existing [`Container`].
+    ///
+    /// # Errors
+    ///
+    /// If no [`Container`] exists under the specified name, returns an [`Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tss::{AtomicCounter, Storage};
+    ///
+    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let transaction = storage.transaction();
+    /// let mut journal = transaction.start();
+    /// let result_future = storage.rename_container("hi", "ho".to_string(), &mut journal, None);
+    /// ```
+    #[inline]
+    pub async fn rename_container<'s, 't, 'j>(
+        &'s self,
+        name: &str,
+        new_name: String,
+        journal: &'j mut Journal<'s, 't, S>,
+        deadline: Option<Instant>,
+    ) -> Result<&'j mut Container<S>, Error> {
+        unimplemented!()
+    }
+
+    /// Gets a reference to the [`Container`] under the specified name.
     ///
     /// # Examples
     ///
@@ -122,32 +142,11 @@ impl<S: Sequencer> Storage<S> {
     /// let result_future = storage.get_container("hello", &snapshot);
     /// ```
     #[inline]
-    pub async fn get_container<'s, 't, 'j>(
-        &'s self,
-        path: &str,
-        snapshot: &Snapshot<'s, 't, 'j, S>,
-    ) -> Option<ebr::Arc<Container<S>>> {
-        None
-    }
-
-    /// Reads the [`Container`] under the specified name.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{AtomicCounter, Storage};
-    ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
-    /// let snapshot = storage.snapshot();
-    /// let result_future = storage.read_container("hello", |_| true, &snapshot);
-    /// ```
-    #[inline]
-    pub async fn read_container<'s, 't, 'j, R, F: FnOnce(&Container<S>) -> R>(
+    pub async fn get_container<'s, 't, 'j, 'r>(
         &'s self,
         name: &str,
-        reader: F,
-        snapshot: &Snapshot<'s, 't, 'j, S>,
-    ) -> Option<R> {
+        snapshot: &'r Snapshot<'s, 't, 'j, S>,
+    ) -> Option<&'r Container<S>> {
         None
     }
 
@@ -160,7 +159,7 @@ impl<S: Sequencer> Storage<S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Container, RelationalTable, Storage};
+    /// use tss::{AtomicCounter, Storage};
     ///
     /// let storage: Storage<AtomicCounter> = Storage::new(None);
     /// let transaction = storage.transaction();
@@ -175,7 +174,7 @@ impl<S: Sequencer> Storage<S> {
         snapshot: &Snapshot<'s, 't, 'j, S>,
         journal: &'j mut Journal<'s, 't, S>,
         deadline: Option<Instant>,
-    ) -> Result<ebr::Arc<Container<S>>, Error> {
+    ) -> Result<&'j Container<S>, Error> {
         unimplemented!();
     }
 }
