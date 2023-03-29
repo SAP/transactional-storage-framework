@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Transactional Storage Framework
 
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP/transactional-storage-framework)](https://api.reuse.software/info/github.com/SAP/transactional-storage-framework)
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/SAP/transactional-storage-framework/TSS)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/SAP/transactional-storage-framework/tss.yml?branch=main)
 
 **The project is currently work-in-progress.**
 **The whole code base will undergo extensive renovation.**
