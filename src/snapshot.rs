@@ -27,22 +27,22 @@ use scc::ebr;
 ///     The changes can be discarded if the [Journal] is not submitted, therefore the snapshot
 ///     cannot outlive it.
 #[derive(Clone)]
-pub struct Snapshot<'s, 't, 'r, S: Sequencer> {
+pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
     sequencer: &'s S,
     tracker: S::Tracker,
     transaction: Option<(&'t Transaction<'s, S>, usize)>,
-    journal: Option<&'r Journal<'s, 't, S>>,
+    journal: Option<&'j Journal<'s, 't, S>>,
     snapshot: S::Clock,
 }
 
-impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
+impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
     /// Creates a new [Snapshot] using the [Clock](super::Sequencer::Clock) value stored in the
     /// supplied [Snapshot].
     pub fn from(
         snapshot: &'s Snapshot<S>,
         transaction: Option<&'t Transaction<'s, S>>,
-        journal: Option<&'r Journal<'s, 't, S>>,
-    ) -> Snapshot<'s, 't, 'r, S> {
+        journal: Option<&'j Journal<'s, 't, S>>,
+    ) -> Snapshot<'s, 't, 'j, S> {
         let tracker = snapshot.tracker.clone();
         Snapshot {
             sequencer: snapshot.sequencer,
@@ -60,8 +60,8 @@ impl<'s, 't, 'r, S: Sequencer> Snapshot<'s, 't, 'r, S> {
     pub(super) fn new(
         sequencer: &'s S,
         transaction: Option<&'t Transaction<'s, S>>,
-        journal: Option<&'r Journal<'s, 't, S>>,
-    ) -> Snapshot<'s, 't, 'r, S> {
+        journal: Option<&'j Journal<'s, 't, S>>,
+    ) -> Snapshot<'s, 't, 'j, S> {
         let tracker = sequencer.issue(Acquire);
         let snapshot = tracker.clock();
         Snapshot {

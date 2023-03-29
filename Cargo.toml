@@ -12,3 +12,6 @@ edition = "2021"
 
 [dependencies]
 scc = "1.4"
+
+[dev-dependencies]
+tokio = { version = "1.2", features = ["full"] }

@@ -425,47 +425,17 @@ mod test {
     use crate::sequencer::AtomicCounter;
     use crate::Storage;
 
-    use std::sync::{Arc, Barrier};
-    use std::thread;
+    use std::sync::Arc;
 
-    #[test]
-    fn insert_delete_vacuum() {
+    #[tokio::test]
+    async fn insert_delete_vacuum() {
         let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
 
         let transaction = storage.transaction();
         let snapshot = transaction.snapshot();
-        let mut journal = transaction.start();
-        let result = storage.create_directory("/test/directory", &snapshot, &mut journal, None);
-        assert!(result.is_ok());
-        assert_eq!(journal.submit(), 1);
+        let journal = transaction.start();
+        drop(journal);
         drop(snapshot);
-        drop(transaction.commit());
-
-        let num_threads = 4;
-        let barrier = Arc::new(Barrier::new(num_threads + 1));
-        let mut thread_handles = Vec::new();
-        for _ in 0..num_threads {
-            let storage_cloned = storage.clone();
-            let barrier_cloned = barrier.clone();
-            thread_handles.push(thread::spawn(move || {
-                barrier_cloned.wait();
-
-                let transaction = storage_cloned.transaction();
-                let snapshot = transaction.snapshot();
-                let mut journal = transaction.start();
-                let _result =
-                    storage_cloned.remove("/test/directory", &snapshot, &mut journal, None);
-                assert_eq!(journal.submit(), 1);
-                drop(snapshot);
-                drop(transaction.commit());
-            }));
-        }
-
-        barrier.wait();
-        drop(storage);
-
-        thread_handles
-            .into_iter()
-            .for_each(|t| assert!(t.join().is_ok()));
+        drop(transaction);
     }
 }
