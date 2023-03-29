@@ -14,22 +14,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  basic:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-    - uses: actions/checkout@v2
-    - name: REUSE Compliance Check
+    - uses: actions/checkout@v3
+    - name: Compliance
       uses: fsfe/reuse-action@v1.1
-    - name: Debug - Build
-      run: cargo build --verbose
-    - name: Debug - Run tests
+    - name: Format
+      run: cargo fmt --all
+    - name: Lint
+      run: cargo clippy --all
+    - name: Debug
       run: cargo test --verbose
-    - name: Release - Build
-      run: cargo build --release --verbose
-    - name: Release - Run tests
+    - name: Release
       run: cargo test --release --verbose
-    - name: Document - Generate documentation
-      run: cargo doc
-
+    - name: Doc
+      run: cargo doc --document-private-items

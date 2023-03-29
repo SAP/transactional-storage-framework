@@ -187,11 +187,11 @@ impl<S: Sequencer> Locker<S> {
     /// Acquires the exclusive lock on the given [Version].
     ///
     /// If the [Version] has a valid time point assigned, it returns `None`.
-    fn lock<'b>(
+    fn lock(
         owner_field: &Owner<S>,
         new_owner_ptr: ebr::Ptr<JournalAnchor<S>>,
         mut timeout: Option<Duration>,
-        barrier: &'b ebr::Barrier,
+        barrier: &ebr::Barrier,
     ) -> Option<Locker<S>> {
         if owner_field.commit_clock(barrier) != S::Clock::default() {
             // The `Version` has been created by another transaction.

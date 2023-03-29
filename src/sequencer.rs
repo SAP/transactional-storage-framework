@@ -104,7 +104,7 @@ impl Sequencer for AtomicCounter {
     fn min(&self, _order: Ordering) -> u64 {
         let min = self.get(Acquire);
         while let Ok(Some(_)) = self.list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
-        self.list.peek(|e| e.timestamp).map_or(min, |t| t.min(min))
+        self.list.peek(|e| e.map_or(min, |t| t.timestamp.min(min)))
     }
 
     fn get(&self, order: Ordering) -> Self::Clock {
