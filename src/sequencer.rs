@@ -194,8 +194,7 @@ impl Default for AtomicCounter {
     }
 }
 
-/// [`U64Tracker`] points to the [`Entry`] associated with its own [`Clock`](Sequencer::Clock)
-/// value.
+/// [`U64Tracker`] points to a tracking entry associated with its own [`Clock`](Sequencer::Clock).
 pub struct U64Tracker {
     ptr: *const Entry,
 }

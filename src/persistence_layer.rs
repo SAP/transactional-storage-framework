@@ -3,10 +3,49 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Container, Error, Sequencer, Transaction};
-
 use scc::ebr;
-
 use std::fmt::Debug;
+
+/// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
+/// the persistence layer of the transactional storage system.
+pub trait PersistenceLayer<S: Sequencer>: Debug + Send + Sync {
+    /// Submits the given data to the log buffer.
+    ///
+    /// It returns the start and end log sequence number pair of the submitted data.
+    /// The given transaction is associated to the log data, thereby enabling it to recover transactions.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
+    fn submit(
+        &self,
+        log_data: Vec<u8>,
+        transaction: &Transaction<S>,
+    ) -> Result<(usize, usize), Error>;
+
+    /// Persists the log buffer up to the given log position.
+    ///
+    /// It returns the max flushed log sequence number.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned on failure.
+    fn persist(&self, position: usize) -> Result<usize, Error>;
+
+    /// Recovers the storage.
+    ///
+    /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the database could not be recovered.
+    fn recover(&self, until: Option<S::Clock>) -> Result<(), Error>;
+
+    /// Loads a specific container.
+    ///
+    /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
+    fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
+}
 
 /// [`LogState`] denotes the state of a log record.
 #[derive(Debug)]
@@ -32,15 +71,6 @@ pub struct Log {
     ///
     /// log being None indicates that the Log instance is invalid.
     log: Option<LogState>,
-}
-
-impl Default for Log {
-    #[inline]
-    fn default() -> Log {
-        Log {
-            log: Some(LogState::Memory(Vec::new())),
-        }
-    }
 }
 
 impl Log {
@@ -102,40 +132,13 @@ impl Log {
     }
 }
 
-/// The Logger trait defines logging interfaces.
-pub trait PersistenceLayer<S: Sequencer>: Debug + Send + Sync {
-    /// Submits the given data to the log buffer.
-    ///
-    /// It returns the start and end log sequence number pair of the submitted data.
-    /// The given transaction is associated to the log data, thereby enabling it to recover transactions.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    fn submit(
-        &self,
-        log_data: Vec<u8>,
-        transaction: &Transaction<S>,
-    ) -> Result<(usize, usize), Error>;
-
-    /// Persists the log buffer up to the given log position.
-    ///
-    /// It returns the max flushed log sequence number.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    fn persist(&self, position: usize) -> Result<usize, Error>;
-
-    /// Recovers the storage.
-    ///
-    /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
-    fn recover(&self, until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>>;
-
-    /// Loads a specific container.
-    ///
-    /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
-    fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
+impl Default for Log {
+    #[inline]
+    fn default() -> Log {
+        Log {
+            log: Some(LogState::Memory(Vec::new())),
+        }
+    }
 }
 
 /// [`FileLogger`] is a file-based logger that pushes data into files sequentially.
@@ -170,8 +173,8 @@ impl<S: Sequencer> PersistenceLayer<S> for FileLogger<S> {
     fn persist(&self, _position: usize) -> Result<usize, Error> {
         Err(Error::UnexpectedState)
     }
-    fn recover(&self, _until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>> {
-        None
+    fn recover(&self, _until: Option<S::Clock>) -> Result<(), Error> {
+        Ok(())
     }
     fn load(&self, _path: &str) -> Option<ebr::Arc<Container<S>>> {
         None
