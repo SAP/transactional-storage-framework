@@ -15,6 +15,7 @@ use scc::ebr;
 ///
 /// A single strand of [Journal] constitutes a [Transaction]. An on-going transaction can be
 /// rewound to a certain point of time by reverting submitted [Journal] instances.
+#[derive(Debug)]
 pub struct Transaction<'s, S: Sequencer> {
     /// The transaction refers to a [Database] to persist pending changes at commit.
     _storage: &'s Database<S>,
@@ -89,7 +90,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// let snapshot = transaction.snapshot();
     /// ```
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::new(self.sequencer, Some(self), None)
+        Snapshot::from_parts(self.sequencer, Some(self), None)
     }
 
     /// Gets the current local clock value of the [Transaction].
@@ -356,6 +357,7 @@ impl From<State> for usize {
 }
 
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
+#[derive(Debug)]
 pub(super) struct Anchor<S: Sequencer> {
     /// The transaction state.
     ///

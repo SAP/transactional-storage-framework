@@ -9,6 +9,7 @@ use scc::ebr;
 use std::fmt::Debug;
 
 /// [`LogState`] denotes the state of a log record.
+#[derive(Debug)]
 pub enum LogState {
     /// The log data is in memory.
     Memory(Vec<u8>),
@@ -25,6 +26,7 @@ pub enum LogState {
 }
 
 /// [`Log`] stores data to be persisted.
+#[derive(Debug)]
 pub struct Log {
     /// The data stored in the vector is persisted.
     ///

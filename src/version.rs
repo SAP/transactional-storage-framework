@@ -131,7 +131,7 @@ pub trait Version<S: Sequencer> {
 
 /// [Owner] is a mandatory field in a [Version] in order for the [Version] to be correctly
 /// locked and updated.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Owner<S: Sequencer>(ebr::AtomicArc<JournalAnchor<S>>);
 
 impl<S: Sequencer> Owner<S> {
@@ -168,6 +168,7 @@ impl<S: Sequencer> Drop for Owner<S> {
 /// It semantically owns the [Version] while the `Rust` compiler cannot deduce anything related
 /// to a database `MVCC` mechanism, and therefore instantiating a [Locker] requires calls to
 /// [transmute](std::mem::transmute) to prolong lifetimes of references.
+#[derive(Debug)]
 pub struct Locker<S: Sequencer> {
     /// [Locker] has a reference to the version owner field of the [Version].
     owner_field: &'static Owner<S>,

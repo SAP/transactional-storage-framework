@@ -128,7 +128,7 @@ impl<S: Sequencer> Database<S> {
     /// ```
     #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::new(&self.sequencer, None, None)
+        Snapshot::from_parts(&self.sequencer, None, None)
     }
 
     /// Creates a new empty [`Container`].

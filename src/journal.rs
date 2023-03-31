@@ -16,6 +16,7 @@ use scc::ebr;
 /// [Journal] keeps the change history.
 ///
 /// Locks and log records are accumulated in a [Journal].
+#[derive(Debug)]
 pub struct Journal<'s, 't, S: Sequencer> {
     transaction: &'t Transaction<'s, S>,
     record: Option<Box<Annals<S>>>,
@@ -63,7 +64,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// ```
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
-        Snapshot::new(
+        Snapshot::from_parts(
             self.transaction.sequencer(),
             Some(self.transaction),
             Some(self),
@@ -146,6 +147,7 @@ impl<'s, 't, S: Sequencer> Drop for Journal<'s, 't, S> {
 }
 
 /// [Annals] consists of locks acquired and log records generated with the [Journal].
+#[derive(Debug)]
 pub(super) struct Annals<S: Sequencer> {
     anchor: ebr::Arc<Anchor<S>>,
     locks: Vec<Locker<S>>,
@@ -191,6 +193,7 @@ impl<S: Sequencer> Drop for Annals<S> {
 ///
 /// [Cell](super::version::Owner) may point to it if the [Journal] owns the
 /// [Version].
+#[derive(Debug)]
 pub struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     wait_queue: (Mutex<(bool, usize)>, Condvar),
