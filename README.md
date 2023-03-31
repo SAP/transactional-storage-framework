@@ -85,7 +85,7 @@ assert!(storage
 let storage_snapshot = storage.snapshot();
 
 drop(transaction_snapshot);
-assert!(transaction.commit().is_ok());
+assert!(transaction.commit().await.is_ok());
 
 // storage_snapshot had been taken before the transaction was committed.
 assert!(storage
@@ -147,7 +147,7 @@ assert!(journal.create(
     },
     Some(Duration::from_millis(100))).is_ok());
 journal.submit();
-transaction.commit();
+transaction.commit().await;
 
 let snapshot = storage.snapshot();
 assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));

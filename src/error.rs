@@ -18,4 +18,7 @@ pub enum Error {
 
     /// The operation causes the same key to be inserted into a unique container.
     UniquenessViolation,
+
+    /// The supplied parameter value is wrong.
+    WrongParameter,
 }

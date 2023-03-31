@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::unused_async, unused)]
-
 use super::overseer::{Overseer, Task};
 use super::{
     AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer, Sequencer, Snapshot,
@@ -108,7 +106,7 @@ impl<S: Sequencer> Database<S> {
     /// ```
     #[inline]
     pub fn transaction(&self) -> Transaction<S> {
-        Transaction::new(self, &self.sequencer)
+        Transaction::new(self)
     }
 
     /// Captures the current state of the [`Database`] as a [`Snapshot`].
@@ -153,8 +151,8 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: String,
         metadata: Metadata,
-        journal: &'j mut Journal<'s, 't, S>,
-        deadline: Option<Instant>,
+        _journal: &'j mut Journal<'s, 't, S>,
+        _deadline: Option<Instant>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
         let container = ebr::Arc::new(Container::new(metadata));
         match self
@@ -198,8 +196,8 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: &str,
         new_name: String,
-        journal: &'j mut Journal<'s, 't, S>,
-        deadline: Option<Instant>,
+        _journal: &'j mut Journal<'s, 't, S>,
+        _deadline: Option<Instant>,
     ) -> Result<(), Error> {
         if let Some(container) = self.container_map.read(name, |_, c| c.clone()) {
             if self
@@ -239,11 +237,12 @@ impl<S: Sequencer> Database<S> {
     ///     assert!(get_result.is_some());
     /// };
     /// ```
+    #[allow(clippy::unused_async)]
     #[inline]
     pub async fn get_container<'s, 't, 'j, 'r>(
         &'s self,
         name: &str,
-        snapshot: &'r Snapshot<'s, 't, 'j, S>,
+        _snapshot: &'r Snapshot<'s, 't, 'j, S>,
     ) -> Option<&'r Container<S>> {
         self.container_map.read(name, |_, c| unsafe {
             // The `Container` survives as long as the `Snapshot` is valid.
@@ -284,14 +283,19 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: &str,
         _snapshot: &Snapshot<'s, 't, 'j, S>,
-        journal: &'j mut Journal<'s, 't, S>,
-        deadline: Option<Instant>,
+        _journal: &'j mut Journal<'s, 't, S>,
+        _deadline: Option<Instant>,
     ) -> Result<(), Error> {
         if self.container_map.remove_async(name).await {
             Ok(())
         } else {
             Err(Error::NotFound)
         }
+    }
+
+    /// Returns a reference to its [`Sequencer`].
+    pub(crate) fn sequencer(&self) -> &S {
+        &self.sequencer
     }
 }
 

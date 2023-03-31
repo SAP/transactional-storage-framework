@@ -95,10 +95,11 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// assert!(journal.create(&versioned_object, |_| Ok(None), None).is_ok());
     /// journal.submit();
     ///
-    /// transaction.commit();
-    ///
-    /// let snapshot = storage.snapshot();
-    /// assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
+    /// async {
+    ///     assert!(transaction.commit().await.is_ok());
+    ///     let snapshot = storage.snapshot();
+    ///     assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
+    /// };
     /// ```
     pub fn create<V: Version<S>, F: FnOnce(&mut V::Data) -> Result<Option<Log>, Error>>(
         &mut self,
@@ -351,8 +352,8 @@ mod tests {
     use crate::version::RecordVersion;
     use crate::{Database, Version};
 
-    #[test]
-    fn journal() {
+    #[tokio::test]
+    async fn journal() {
         let versioned_object = RecordVersion::default();
         let storage = Database::default();
         let transaction = storage.transaction();
@@ -396,7 +397,7 @@ mod tests {
             .is_err());
         assert_eq!(journal_inner.submit(), 2);
 
-        assert!(transaction.commit().is_ok());
+        assert!(transaction.commit().await.is_ok());
 
         let snapshot = storage.snapshot();
         assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
