@@ -50,7 +50,7 @@ impl Log {
     /// # Errors
     ///
     /// An error is returned on failure.
-    pub fn submit<S: Sequencer, L: Logger<S>>(
+    pub fn submit<S: Sequencer, L: PersistenceLayer<S>>(
         &mut self,
         logger: &L,
         transaction: &Transaction<S>,
@@ -75,7 +75,10 @@ impl Log {
     /// # Errors
     ///
     /// An error is returned on failure.
-    pub fn persist<S: Sequencer, L: Logger<S>>(&mut self, logger: &L) -> Result<(), Error> {
+    pub fn persist<S: Sequencer, L: PersistenceLayer<S>>(
+        &mut self,
+        logger: &L,
+    ) -> Result<(), Error> {
         if let Some(LogState::Pending(_, end_position)) = self.log.take() {
             match logger.persist(end_position) {
                 Ok(max_persisted_position) => {
@@ -93,7 +96,7 @@ impl Log {
 }
 
 /// The Logger trait defines logging interfaces.
-pub trait Logger<S: Sequencer> {
+pub trait PersistenceLayer<S: Sequencer>: Send + Sync {
     /// Submits the given data to the log buffer.
     ///
     /// It returns the start and end log sequence number pair of the submitted data.
@@ -148,7 +151,7 @@ impl<S: Sequencer> FileLogger<S> {
     }
 }
 
-impl<S: Sequencer> Logger<S> for FileLogger<S> {
+impl<S: Sequencer> PersistenceLayer<S> for FileLogger<S> {
     fn submit(
         &self,
         _log_data: Vec<u8>,

@@ -21,7 +21,7 @@ use scc::ebr;
 
 /// The [Version] trait stipulates interfaces of versioned database objects.
 ///
-/// All the versioned database objects in a [Storage](super::Storage) must implement the trait.
+/// All the versioned database objects in a [Database](super::Database) must implement the trait.
 pub trait Version<S: Sequencer> {
     /// The type of the versioned data.
     type Data: Send + Sync;
@@ -37,7 +37,7 @@ pub trait Version<S: Sequencer> {
     ///
     /// The owner field must not be dropped on its own, otherwise a [Locker] may gain access to
     /// freed memory. [Version] is meant to be garbage-collected by a correctly implemented
-    /// garbage collector in its associated [Storage](super::Storage).
+    /// garbage collector in its associated [Database](super::Database).
     fn owner_field(&self) -> &Owner<S>;
 
     /// Returns its data.

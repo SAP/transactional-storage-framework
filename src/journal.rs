@@ -30,9 +30,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Log, Storage, Transaction};
+    /// use tss::{AtomicCounter, Log, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// assert_eq!(journal.submit(), 1);
@@ -49,10 +49,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Database, Version};
     ///
     /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -84,10 +84,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Database, Version};
     ///
     /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -345,14 +345,13 @@ impl<S: Sequencer> Anchor<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sequencer::AtomicCounter;
     use crate::version::RecordVersion;
-    use crate::{Storage, Version};
+    use crate::{Database, Version};
 
     #[test]
     fn journal() {
         let versioned_object = RecordVersion::default();
-        let storage: Storage<AtomicCounter> = Storage::new(None);
+        let storage = Database::default();
         let transaction = storage.transaction();
 
         let mut journal = transaction.start();

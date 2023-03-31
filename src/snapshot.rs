@@ -16,7 +16,7 @@ use scc::ebr;
 /// and the database snapshot stays stable until the [Snapshot] is dropped.
 ///
 /// There are three types of [Snapshot], and three ways of taking a [Snapshot].
-///  1. The `snapshot` method of [Storage](super::Storage).
+///  1. The `snapshot` method of [Database](super::Database).
 ///     The snapshot consists of globally committed data at the moment.
 ///  2. The `snapshot` method in [Transaction].
 ///     The snapshot additionally includes changes in submitted [Journal] instances in the

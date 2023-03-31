@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Annals;
-use super::{Error, Journal, Sequencer, Snapshot, Storage};
+use super::{Database, Error, Journal, Sequencer, Snapshot};
 
 use std::ptr::addr_of;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -16,8 +16,8 @@ use scc::ebr;
 /// A single strand of [Journal] constitutes a [Transaction]. An on-going transaction can be
 /// rewound to a certain point of time by reverting submitted [Journal] instances.
 pub struct Transaction<'s, S: Sequencer> {
-    /// The transaction refers to a [Storage] to persist pending changes at commit.
-    _storage: &'s Storage<S>,
+    /// The transaction refers to a [Database] to persist pending changes at commit.
+    _storage: &'s Database<S>,
 
     /// The transaction refers to a [Sequencer] in order to assign a [Clock](Sequencer::Clock).
     sequencer: &'s S,
@@ -42,12 +42,12 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// ```
-    pub fn new(storage: &'s Storage<S>, sequencer: &'s S) -> Transaction<'s, S> {
+    pub fn new(storage: &'s Database<S>, sequencer: &'s S) -> Transaction<'s, S> {
         Transaction {
             _storage: storage,
             sequencer,
@@ -65,9 +65,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// journal.submit();
@@ -76,15 +76,15 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Journal::new(self, self.anchor.clone())
     }
 
-    /// Takes a snapshot of the [Storage] including changes pending in the submitted [Journal]
+    /// Takes a snapshot of the [Database] including changes pending in the submitted [Journal]
     /// instances.
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// let snapshot = transaction.snapshot();
     /// ```
@@ -99,9 +99,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Journal, Storage, Transaction};
+    /// use tss::{AtomicCounter, Journal, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// let clock = journal.submit();
@@ -125,9 +125,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Log, Storage, Transaction};
+    /// use tss::{AtomicCounter, Log, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     /// let result = transaction.rewind(1);
     /// assert!(result.is_err());
@@ -158,7 +158,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Commits the changes made by the [Transaction].
     ///
-    /// It returns a [Rubicon], giving one last chance to roll back the transaction.
+    /// It returns a [InDoubtTransaction], giving one last chance to roll back the transaction.
     ///
     /// # Errors
     ///
@@ -167,20 +167,20 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     /// transaction.commit();
     /// ```
-    pub fn commit(self) -> Result<Rubicon<'s, S>, Error> {
+    pub fn commit(self) -> Result<InDoubtTransaction<'s, S>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_clock = self.sequencer.get(Relaxed);
         anchor_mut_ref.state.store(1, Release);
-        Ok(Rubicon {
+        Ok(InDoubtTransaction {
             transaction: Some(self),
         })
     }
@@ -190,9 +190,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     /// transaction.rollback();
     /// ```
@@ -240,7 +240,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Post-processes its transaction commit.
     ///
-    /// Only a Rubicon instance is allowed to call this function.
+    /// Only a InDoubtTransaction instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) {
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
@@ -254,24 +254,25 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     }
 }
 
-/// [Rubicon] gives one last chance of rolling back the transaction.
+/// [InDoubtTransaction] gives one last chance of rolling back the transaction.
 ///
 /// The transaction is bound to be committed if no actions are taken before dropping the
-/// [Rubicon] instance. On the other hands, the transaction stays uncommitted until the
-/// [Rubicon] instance is dropped.
-pub struct Rubicon<'s, S: Sequencer> {
+/// [InDoubtTransaction] instance. On the other hands, the transaction stays uncommitted until the
+/// [InDoubtTransaction] instance is dropped.
+#[allow(clippy::module_name_repetitions)]
+pub struct InDoubtTransaction<'s, S: Sequencer> {
     transaction: Option<Transaction<'s, S>>,
 }
 
-impl<'s, S: Sequencer> Rubicon<'s, S> {
+impl<'s, S: Sequencer> InDoubtTransaction<'s, S> {
     /// Commits the transaction, and returns the assigned commit snapshot of the transaction.
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Sequencer, Storage, Transaction};
+    /// use tss::{AtomicCounter, Sequencer, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     ///
     /// let mut transaction = storage.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
@@ -289,9 +290,9 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Storage, Transaction};
+    /// use tss::{AtomicCounter, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
     ///     rubicon.rollback();
@@ -319,7 +320,7 @@ impl<'s, S: Sequencer> Rubicon<'s, S> {
     }
 }
 
-impl<'s, S: Sequencer> Drop for Rubicon<'s, S> {
+impl<'s, S: Sequencer> Drop for InDoubtTransaction<'s, S> {
     /// Post-processes the transaction that is not explicitly rolled back.
     fn drop(&mut self) {
         if let Some(transaction) = self.transaction.take() {
@@ -415,11 +416,11 @@ mod test {
 
     #[test]
     fn visibility() {
-        static mut STORAGE: Option<Storage<AtomicCounter>> = None;
+        static mut STORAGE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| unsafe {
-            STORAGE.replace(Storage::new(None));
+            STORAGE.replace(Database::default());
         });
 
         let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
@@ -472,11 +473,11 @@ mod test {
 
     #[test]
     fn rewind() {
-        static mut STORAGE: Option<Storage<AtomicCounter>> = None;
+        static mut STORAGE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| unsafe {
-            STORAGE.replace(Storage::new(None));
+            STORAGE.replace(Database::default());
         });
 
         let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
@@ -565,7 +566,7 @@ mod test {
 
     #[test]
     fn wait_queue() {
-        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
+        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
         let num_threads = 16;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
@@ -604,7 +605,7 @@ mod test {
 
     #[test]
     fn time_out() {
-        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
+        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
 
         let transaction = storage.transaction();

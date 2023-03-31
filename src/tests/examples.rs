@@ -5,22 +5,22 @@
 #[cfg(test)]
 mod tests {
     use crate::sequencer::AtomicCounter;
-    use crate::Storage;
+    use crate::Database;
 
     use std::sync::Arc;
 
     #[tokio::test]
     async fn single_threaded() {
-        let storage: Storage<AtomicCounter> = Storage::new(None);
-        let storage_snapshot = storage.snapshot();
-        let transaction = storage.transaction();
+        let database = Database::default();
+        let storage_snapshot = database.snapshot();
+        let transaction = database.transaction();
         let transaction_snapshot = transaction.snapshot();
         let journal = transaction.start();
         drop(journal);
         drop(transaction_snapshot);
         drop(transaction);
         drop(storage_snapshot);
-        drop(storage);
+        drop(database);
         /*
         assert!(storage
             .create_directory(
@@ -69,7 +69,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn multi_threaded() {
-        let storage: Arc<Storage<AtomicCounter>> = Arc::new(Storage::new(None));
+        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         drop(storage);
         /*(
         let num_threads = 8;
