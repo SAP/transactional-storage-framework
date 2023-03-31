@@ -6,8 +6,8 @@
 
 use super::{Metadata, Sequencer};
 
-/// [`Container`] is a collection of organized data that can be interpreted by the contained
-/// metadata.
+/// [`Container`] is a collection of organized data and its [`Metadata`].
+#[derive(Debug)]
 pub struct Container<S: Sequencer> {
     /// The metadata describing the specification of the [`Container`].
     metadata: Metadata,

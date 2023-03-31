@@ -6,21 +6,25 @@ use super::{Container, Error, Sequencer, Transaction};
 
 use scc::ebr;
 
-/// [`LogState`] denotes the location of the log data.
+use std::fmt::Debug;
+
+/// [`LogState`] denotes the state of a log record.
 pub enum LogState {
     /// The log data is in memory.
     Memory(Vec<u8>),
+
     /// The log data is passed to a Logger.
     ///
     /// The usize pair is the start and end positions in the log buffer.
     Pending(usize, usize),
+
     /// The log data is fully persisted.
     ///
     /// The max known persisted log position.
     Persisted(usize),
 }
 
-/// Log stores the data that is to be persisted.
+/// [`Log`] stores data to be persisted.
 pub struct Log {
     /// The data stored in the vector is persisted.
     ///
@@ -29,6 +33,7 @@ pub struct Log {
 }
 
 impl Default for Log {
+    #[inline]
     fn default() -> Log {
         Log {
             log: Some(LogState::Memory(Vec::new())),
@@ -67,7 +72,7 @@ impl Log {
                 }
             }
         }
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
 
     /// Makes sure that the pending log is persisted.
@@ -91,12 +96,12 @@ impl Log {
                 }
             }
         }
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
 }
 
 /// The Logger trait defines logging interfaces.
-pub trait PersistenceLayer<S: Sequencer>: Send + Sync {
+pub trait PersistenceLayer<S: Sequencer>: Debug + Send + Sync {
     /// Submits the given data to the log buffer.
     ///
     /// It returns the start and end log sequence number pair of the submitted data.
@@ -135,6 +140,7 @@ pub trait PersistenceLayer<S: Sequencer>: Send + Sync {
 ///
 /// Checkpoint operations entail log file truncation.
 #[allow(clippy::module_name_repetitions)]
+#[derive(Debug)]
 pub struct FileLogger<S: Sequencer> {
     _path: String,
     _invalid_clock: S::Clock,
@@ -157,10 +163,10 @@ impl<S: Sequencer> PersistenceLayer<S> for FileLogger<S> {
         _log_data: Vec<u8>,
         _transaction: &Transaction<S>,
     ) -> Result<(usize, usize), Error> {
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
     fn persist(&self, _position: usize) -> Result<usize, Error> {
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
     fn recover(&self, _until: Option<S::Clock>) -> Option<ebr::Arc<Container<S>>> {
         None

@@ -21,7 +21,7 @@ use scc::Queue;
 /// Developers are able to implement their own sequencing mechanism other than a simple atomic
 /// counter by using the [Sequencer] trait, for instance, the system timestamp generator can
 /// directly be used, or an efficient hardware-aided counter can also be incorporated.
-pub trait Sequencer: 'static + Default {
+pub trait Sequencer: 'static + Debug + Default {
     /// [Clock](Sequencer::Clock) is a partially ordered type representing a single point of
     /// time in a system.
     ///
@@ -92,6 +92,7 @@ pub trait DeriveClock<C> {
 ///
 /// An atomic counter is known to be inefficient when the system is equipped with a large
 /// number of processors.
+#[derive(Debug)]
 pub struct AtomicCounter {
     clock: AtomicU64,
     list: Queue<Entry>,
@@ -222,6 +223,7 @@ impl Drop for U64Tracker {
 unsafe impl Send for U64Tracker {}
 unsafe impl Sync for U64Tracker {}
 
+#[derive(Debug)]
 struct Entry {
     timestamp: u64,
     ref_cnt: AtomicU64,

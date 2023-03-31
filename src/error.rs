@@ -4,6 +4,12 @@
 
 /// [`Error`] defines all the error codes used by the code base.
 pub enum Error {
-    /// General error.
-    Fail,
+    /// The operation conflicts with others.
+    Conflict,
+
+    /// The operation failed to be serialized with others.
+    SerializationFailure,
+
+    /// The operation encountered the target database object being in an unexpected state.
+    UnexpectedState,
 }

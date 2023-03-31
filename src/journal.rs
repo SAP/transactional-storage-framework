@@ -120,7 +120,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         }
 
         // The versioned object is not ready for versioning.
-        Err(Error::Fail)
+        Err(Error::SerializationFailure)
     }
 
     /// Creates a new [Journal].

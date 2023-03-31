@@ -4,11 +4,14 @@
 
 #![allow(clippy::unused_async, unused)]
 
+use super::overseer::Overseer;
+use super::overseer::Task;
 use super::{
     AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer, Sequencer, Snapshot,
     Transaction,
 };
 
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use scc::{ebr, HashIndex};
@@ -17,10 +20,8 @@ use scc::{ebr, HashIndex};
 ///
 /// [`Database`] provides the interface for users to interact with each individual transactional
 /// [`Container`] in it.
-pub struct Database<S = AtomicCounter>
-where
-    S: Sequencer,
-{
+#[derive(Debug)]
+pub struct Database<S: Sequencer = AtomicCounter> {
     /// The logical clock generator of the [`Database`].
     sequencer: S,
 
@@ -29,6 +30,9 @@ where
 
     /// The container map.
     container_map: HashIndex<String, ebr::Arc<Container<S>>>,
+
+    /// A background thread waking up timed out tasks and deleting unreachable database objects.
+    overseer: Overseer,
 }
 
 impl<S: Sequencer> Database<S> {
@@ -48,6 +52,7 @@ impl<S: Sequencer> Database<S> {
             sequencer: S::default(),
             persistence_layer: None,
             container_map: HashIndex::default(),
+            overseer: Overseer::spawn(),
         }
     }
 
@@ -69,6 +74,7 @@ impl<S: Sequencer> Database<S> {
             sequencer: S::default(),
             persistence_layer: Some(persistence_layer),
             container_map: HashIndex::default(),
+            overseer: Overseer::spawn(),
         }
     }
 
@@ -283,6 +289,17 @@ impl Default for Database<AtomicCounter> {
             sequencer: AtomicCounter::default(),
             persistence_layer: None,
             container_map: HashIndex::default(),
+            overseer: Overseer::spawn(),
+        }
+    }
+}
+
+impl<S: Sequencer> Drop for Database<S> {
+    #[inline]
+    fn drop(&mut self) {
+        while !self.overseer.try_post(Task::Shutdown) {
+            // Reaching here means that there is a program logic bug.
+            debug_assert!(false, "programming logic error");
         }
     }
 }

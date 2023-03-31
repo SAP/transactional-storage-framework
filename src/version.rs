@@ -90,7 +90,7 @@ pub trait Version<S: Sequencer> {
             let log = writer(data_mut_ref)?;
             return Ok(log);
         }
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
 
     /// Returns `true` if the [Version] predates the [Snapshot].

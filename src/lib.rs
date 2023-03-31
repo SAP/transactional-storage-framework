@@ -42,4 +42,6 @@ pub use transaction::{InDoubtTransaction, Transaction};
 pub mod version;
 pub use version::{RecordVersion, Version};
 
+mod overseer;
+
 mod tests;

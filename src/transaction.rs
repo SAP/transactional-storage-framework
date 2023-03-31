@@ -144,7 +144,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
         let current_clock = self.clock.load(Acquire);
         if current_clock <= clock {
-            return Err(Error::Fail);
+            return Err(Error::UnexpectedState);
         }
         let mut current = self.annals.load(Acquire);
         for _ in clock..current_clock {
@@ -158,7 +158,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Commits the changes made by the [Transaction].
     ///
-    /// It returns a [InDoubtTransaction], giving one last chance to roll back the transaction.
+    /// It returns a [`InDoubtTransaction`], giving one last chance to roll back the transaction.
     ///
     /// # Errors
     ///
@@ -240,7 +240,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Post-processes its transaction commit.
     ///
-    /// Only a InDoubtTransaction instance is allowed to call this function.
+    /// Only a `InDoubtTransaction` instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) {
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
@@ -254,11 +254,11 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     }
 }
 
-/// [InDoubtTransaction] gives one last chance of rolling back the transaction.
+/// [`InDoubtTransaction`] gives one last chance of rolling back the transaction.
 ///
 /// The transaction is bound to be committed if no actions are taken before dropping the
-/// [InDoubtTransaction] instance. On the other hands, the transaction stays uncommitted until the
-/// [InDoubtTransaction] instance is dropped.
+/// [`InDoubtTransaction`] instance. On the other hands, the transaction stays uncommitted until the
+/// [`InDoubtTransaction`] instance is dropped.
 #[allow(clippy::module_name_repetitions)]
 pub struct InDoubtTransaction<'s, S: Sequencer> {
     transaction: Option<Transaction<'s, S>>,
