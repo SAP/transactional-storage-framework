@@ -108,7 +108,7 @@ impl<S: Sequencer> Database<S> {
     /// ```
     #[inline]
     pub fn transaction(&self) -> Transaction<S> {
-        Transaction::new(self, &self.sequencer)
+        Transaction::new(self)
     }
 
     /// Captures the current state of the [`Database`] as a [`Snapshot`].
@@ -292,6 +292,11 @@ impl<S: Sequencer> Database<S> {
         } else {
             Err(Error::NotFound)
         }
+    }
+
+    /// Returns a reference to its [`Sequencer`].
+    pub(crate) fn sequencer(&self) -> &S {
+        &self.sequencer
     }
 }
 

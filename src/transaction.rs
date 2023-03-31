@@ -4,132 +4,111 @@
 
 use super::journal::Annals;
 use super::{Database, Error, Journal, Sequencer, Snapshot};
-
+use scc::ebr;
 use std::ptr::addr_of;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicPtr, AtomicUsize};
 
-use scc::ebr;
-
-/// [Transaction] is the atomic unit of work for all types of storage operations.
+/// [`Transaction`] is the atomic unit of work for all types of database operations.
 ///
-/// A single strand of [Journal] constitutes a [Transaction]. An on-going transaction can be
-/// rewound to a certain point of time by reverting submitted [Journal] instances.
+/// A single strand of [`Journal`] constitutes a [`Transaction`], and an on-going transaction can
+/// be rewound to a certain point of time by reverting submitted [`Journal`] instances.
 #[derive(Debug)]
 pub struct Transaction<'s, S: Sequencer> {
-    /// The transaction refers to a [Database] to persist pending changes at commit.
-    _storage: &'s Database<S>,
-
-    /// The transaction refers to a [Sequencer] in order to assign a [Clock](Sequencer::Clock).
-    sequencer: &'s S,
+    /// The transaction refers to the corresponding [`Database`] to persist pending changes at
+    /// commit.
+    database: &'s Database<S>,
 
     /// The changes made by the transaction.
     annals: AtomicPtr<Annals<S>>,
 
-    /// A piece of data that is shared among [Journal] instances in the [Transaction].
+    /// A piece of data that is shared among [`Journal`] instances in the [`Transaction`].
     ///
-    /// It outlives the [Transaction].
+    /// It outlives the [`Transaction`].
     anchor: ebr::Arc<Anchor<S>>,
 
-    /// A transaction-local clock generator.
+    /// The transaction-local clock generator.
     ///
-    /// The clock value is updated whenever a [Journal] is submitted.
+    /// The clock value is updated whenever a [`Journal`] is submitted.
     clock: AtomicUsize,
 }
 
 impl<'s, S: Sequencer> Transaction<'s, S> {
-    /// Creates a new [Transaction].
+    /// Starts a new [`Journal`].
+    ///
+    /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
+    /// permanent, the [`Journal`] has to be submitted to the [`Transaction`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let transaction = storage.transaction();
-    /// ```
-    pub fn new(storage: &'s Database<S>, sequencer: &'s S) -> Transaction<'s, S> {
-        Transaction {
-            _storage: storage,
-            sequencer,
-            annals: AtomicPtr::default(),
-            anchor: ebr::Arc::new(Anchor::new()),
-            clock: AtomicUsize::new(0),
-        }
-    }
-
-    /// Starts a new [Journal].
-    ///
-    /// A [Journal] keeps storage changes until it is dropped. In order to make the changes
-    /// permanent, the [Journal] has to be submitted.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
-    ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
     /// let journal = transaction.start();
     /// journal.submit();
     /// ```
+    #[inline]
     pub fn start<'t>(&'t self) -> Journal<'s, 't, S> {
         Journal::new(self, self.anchor.clone())
     }
 
-    /// Takes a snapshot of the [Database] including changes pending in the submitted [Journal]
-    /// instances.
+    /// Captures the current state of the [`Database`] and the [`Transaction`] as a [`Snapshot`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
     /// let snapshot = transaction.snapshot();
     /// ```
+    #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(self.sequencer, Some(self), None)
+        Snapshot::from_parts(self.database.sequencer(), Some(self), None)
     }
 
-    /// Gets the current local clock value of the [Transaction].
+    /// Gets the current local clock value of the [`Transaction`].
     ///
-    /// It returns the number of submitted [Journal] instances.
+    /// The returned value amounts to the number of submitted [`Journal`] instances in the
+    /// [`Transaction`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Journal, Database, Transaction};
+    /// use tss::{Database, Journal, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
     /// let journal = transaction.start();
     /// let clock = journal.submit();
     ///
     /// assert_eq!(transaction.clock(), 1);
     /// assert_eq!(clock, 1);
     /// ```
+    #[inline]
     pub fn clock(&self) -> usize {
         self.clock.load(Acquire)
     }
 
-    /// Rewinds the [Transaction] to the given point of time.
+    /// Rewinds the [`Transaction`] to the given point of time.
     ///
-    /// All the changes made between the latest transaction clock and the given one are
-    /// reverted. It requires a mutable reference, thus ensuring exclusivity.
+    /// All the changes made between the latest transaction clock and the given one are rolled
+    /// back. It requires a mutable reference, thus ensuring exclusivity.
     ///
     /// # Errors
     ///
-    /// If an invalid clock value is given, an error is returned.
+    /// If an invalid clock value is supplied, an error is returned.
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Log, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let mut transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let mut transaction = database.transaction();
     /// let result = transaction.rewind(1);
     /// assert!(result.is_err());
     ///
@@ -142,10 +121,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// assert!(result.is_ok());
     /// assert_eq!(transaction.clock(), 1);
     /// ```
+    #[inline]
     pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
         let current_clock = self.clock.load(Acquire);
         if current_clock <= clock {
-            return Err(Error::UnexpectedState);
+            return Err(Error::WrongParameter);
         }
         let mut current = self.annals.load(Acquire);
         for _ in clock..current_clock {
@@ -168,10 +148,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let mut transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let mut transaction = database.transaction();
     /// transaction.commit();
     /// ```
     pub fn commit(self) -> Result<InDoubtTransaction<'s, S>, Error> {
@@ -179,7 +159,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
         // Assigns a new logical clock.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
-        anchor_mut_ref.prepare_clock = self.sequencer.get(Relaxed);
+        anchor_mut_ref.prepare_clock = self.sequencer().get(Relaxed);
         anchor_mut_ref.state.store(1, Release);
         Ok(InDoubtTransaction {
             transaction: Some(self),
@@ -191,10 +171,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let mut transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let mut transaction = database.transaction();
     /// transaction.rollback();
     /// ```
     pub fn rollback(mut self) {
@@ -204,9 +184,20 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         drop(self);
     }
 
+    /// Creates a new [`Transaction`].
+    #[inline]
+    pub(crate) fn new(database: &'s Database<S>) -> Transaction<'s, S> {
+        Transaction {
+            database,
+            annals: AtomicPtr::default(),
+            anchor: ebr::Arc::new(Anchor::new()),
+            clock: AtomicUsize::new(0),
+        }
+    }
+
     /// Returns a reference to its associated [Sequencer].
     pub(super) fn sequencer(&self) -> &'s S {
-        self.sequencer
+        self.database.sequencer()
     }
 
     /// Takes [Annals], and records them.
@@ -271,11 +262,11 @@ impl<'s, S: Sequencer> InDoubtTransaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Sequencer, Database, Transaction};
+    /// use tss::{AtomicCounter, Database, Sequencer, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
+    /// let database = Database::default();
     ///
-    /// let mut transaction = storage.transaction();
+    /// let mut transaction = database.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
     ///     assert_ne!(rubicon.commit(), <AtomicCounter as Sequencer>::Clock::default());
     /// };
@@ -291,10 +282,10 @@ impl<'s, S: Sequencer> InDoubtTransaction<'s, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, Transaction};
+    /// use tss::{Database, Transaction};
     ///
-    /// let storage: Database<AtomicCounter> = Database::default();
-    /// let mut transaction = storage.transaction();
+    /// let database = Database::default();
+    /// let mut transaction = database.transaction();
     /// if let Ok(rubicon) = transaction.commit() {
     ///     rubicon.rollback();
     /// };
@@ -313,7 +304,7 @@ impl<'s, S: Sequencer> InDoubtTransaction<'s, S> {
         );
 
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*transaction.anchor) as *mut Anchor<S>) };
-        let commit_snapshot = transaction.sequencer.advance(Release);
+        let commit_snapshot = transaction.sequencer().advance(Release);
         anchor_mut_ref.commit_clock = commit_snapshot;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         transaction.post_process();
@@ -418,38 +409,38 @@ mod test {
 
     #[test]
     fn visibility() {
-        static mut STORAGE: Option<Database<AtomicCounter>> = None;
+        static mut DATABASE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| unsafe {
-            STORAGE.replace(Database::default());
+            DATABASE.replace(Database::default());
         });
 
-        let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
+        let database_ref = unsafe { DATABASE.as_ref().unwrap() };
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-        let transaction = Arc::new(storage_ref.transaction());
+        let transaction = Arc::new(database_ref.transaction());
         let barrier = Arc::new(Barrier::new(2));
 
-        let versioned_object_cloned = versioned_object.clone();
-        let transaction_cloned = transaction.clone();
-        let barrier_cloned = barrier.clone();
+        let versioned_object_clone = versioned_object.clone();
+        let transaction_clone = transaction.clone();
+        let barrier_clone = barrier.clone();
         let thread_handle = thread::spawn(move || {
-            barrier_cloned.wait();
+            barrier_clone.wait();
 
             // Step 1. Tries to acquire the lock acquired by an active transaction journal.
-            let mut journal = transaction_cloned.start();
+            let mut journal = transaction_clone.start();
             assert!(journal
-                .create(&*versioned_object_cloned, |_| Ok(None), None)
+                .create(&*versioned_object_clone, |_| Ok(None), None)
                 .is_err());
             drop(journal);
 
             // Step 2. Tries to acquire the lock acquired by a submitted transaction journal.
-            barrier_cloned.wait();
-            barrier_cloned.wait();
+            barrier_clone.wait();
+            barrier_clone.wait();
 
-            let mut journal = transaction_cloned.start();
+            let mut journal = transaction_clone.start();
             assert!(journal
-                .create(&*versioned_object_cloned, |_| Ok(None), None)
+                .create(&*versioned_object_clone, |_| Ok(None), None)
                 .is_ok());
             assert_eq!(journal.submit(), 2);
         });
@@ -475,55 +466,55 @@ mod test {
 
     #[test]
     fn rewind() {
-        static mut STORAGE: Option<Database<AtomicCounter>> = None;
+        static mut DATABASE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| unsafe {
-            STORAGE.replace(Database::default());
+            DATABASE.replace(Database::default());
         });
 
-        let storage_ref = unsafe { STORAGE.as_ref().unwrap() };
+        let database_ref = unsafe { DATABASE.as_ref().unwrap() };
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-        let mut transaction = storage_ref.transaction();
+        let mut transaction = database_ref.transaction();
         let barrier = Arc::new(Barrier::new(2));
 
-        let versioned_object_cloned = versioned_object.clone();
-        let barrier_cloned = barrier.clone();
+        let versioned_object_clone = versioned_object.clone();
+        let barrier_clone = barrier.clone();
         let thread_handle = thread::spawn(move || {
-            let transaction = storage_ref.transaction();
+            let transaction = database_ref.transaction();
             // Step 1. Tries to acquire the lock acquired by an active transaction journal.
             for _ in 1..8 {
-                barrier_cloned.wait();
+                barrier_clone.wait();
                 let mut journal = transaction.start();
                 assert!(journal
                     .create(
-                        &*versioned_object_cloned,
+                        &*versioned_object_clone,
                         |_| Ok(None),
                         Some(Duration::from_millis(1))
                     )
                     .is_err());
                 drop(journal);
-                barrier_cloned.wait();
+                barrier_clone.wait();
             }
 
             // Step 2. Tries to acquire the lock after reverting some changes.
-            barrier_cloned.wait();
+            barrier_clone.wait();
             let mut journal = transaction.start();
             assert!(journal
                 .create(
-                    &*versioned_object_cloned,
+                    &*versioned_object_clone,
                     |_| Ok(None),
                     Some(Duration::from_millis(1))
                 )
                 .is_err());
             drop(journal);
-            barrier_cloned.wait();
+            barrier_clone.wait();
 
             // Step 3. Tries to acquire the lock after reverting all the changes.
-            barrier_cloned.wait();
+            barrier_clone.wait();
             let mut journal = transaction.start();
             assert!(journal
-                .create(&*versioned_object_cloned, |_| Ok(None), None)
+                .create(&*versioned_object_clone, |_| Ok(None), None)
                 .is_ok());
             assert_eq!(journal.submit(), 1);
         });
@@ -568,27 +559,27 @@ mod test {
 
     #[test]
     fn wait_queue() {
-        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
+        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
         let num_threads = 16;
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         let mut thread_handles = Vec::new();
         for _ in 0..num_threads {
-            let storage_cloned = storage.clone();
-            let versioned_object_cloned = versioned_object.clone();
-            let barrier_cloned = barrier.clone();
+            let database_clone = database.clone();
+            let versioned_object_clone = versioned_object.clone();
+            let barrier_clone = barrier.clone();
             thread_handles.push(thread::spawn(move || {
-                barrier_cloned.wait();
-                let snapshot = storage_cloned.snapshot();
-                assert!(!versioned_object_cloned.predate(&snapshot, &ebr::Barrier::new()));
-                barrier_cloned.wait();
-                barrier_cloned.wait();
-                let snapshot = storage_cloned.snapshot();
-                assert!(versioned_object_cloned.predate(&snapshot, &ebr::Barrier::new()));
+                barrier_clone.wait();
+                let snapshot = database_clone.snapshot();
+                assert!(!versioned_object_clone.predate(&snapshot, &ebr::Barrier::new()));
+                barrier_clone.wait();
+                barrier_clone.wait();
+                let snapshot = database_clone.snapshot();
+                assert!(versioned_object_clone.predate(&snapshot, &ebr::Barrier::new()));
             }));
         }
         barrier.wait();
-        let transaction = storage.transaction();
+        let transaction = database.transaction();
         let mut journal = transaction.start();
         let result = journal.create(&*versioned_object, |_| Ok(None), None);
         assert!(result.is_ok());
@@ -601,16 +592,16 @@ mod test {
             .into_iter()
             .for_each(|t| assert!(t.join().is_ok()));
 
-        let snapshot = storage.snapshot();
+        let snapshot = database.snapshot();
         assert!(versioned_object.predate(&snapshot, &ebr::Barrier::new()));
     }
 
     #[test]
     fn time_out() {
-        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
+        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
 
-        let transaction = storage.transaction();
+        let transaction = database.transaction();
         let mut journal = transaction.start();
         assert!(journal
             .create(&*versioned_object, |_| Ok(None), None)
@@ -620,28 +611,28 @@ mod test {
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         let mut thread_handles = Vec::new();
         for _ in 0..num_threads {
-            let storage_cloned = storage.clone();
-            let versioned_object_cloned = versioned_object.clone();
-            let barrier_cloned = barrier.clone();
+            let database_clone = database.clone();
+            let versioned_object_clone = versioned_object.clone();
+            let barrier_clone = barrier.clone();
             thread_handles.push(thread::spawn(move || {
-                barrier_cloned.wait();
-                let transaction = storage_cloned.transaction();
+                barrier_clone.wait();
+                let transaction = database_clone.transaction();
                 let mut journal = transaction.start();
                 assert!(journal
                     .create(
-                        &*versioned_object_cloned,
+                        &*versioned_object_clone,
                         |_| Ok(None),
                         Some(Duration::from_millis(100))
                     )
                     .is_err());
 
-                barrier_cloned.wait();
-                barrier_cloned.wait();
+                barrier_clone.wait();
+                barrier_clone.wait();
 
                 let mut journal = transaction.start();
                 assert!(journal
                     .create(
-                        &*versioned_object_cloned,
+                        &*versioned_object_clone,
                         |_| Ok(None),
                         Some(Duration::from_millis(100))
                     )
@@ -653,14 +644,14 @@ mod test {
         barrier.wait();
 
         assert_eq!(journal.submit(), 1);
-        let storage_cloned = storage.clone();
-        let versioned_object_cloned = versioned_object.clone();
+        let database_clone = database.clone();
+        let versioned_object_clone = versioned_object.clone();
         let thread = thread::spawn(move || {
-            let transaction = storage_cloned.transaction();
+            let transaction = database_clone.transaction();
             let mut journal = transaction.start();
             assert!(journal
                 .create(
-                    &*versioned_object_cloned,
+                    &*versioned_object_clone,
                     |_| Ok(None),
                     Some(Duration::from_secs(u64::MAX))
                 )
