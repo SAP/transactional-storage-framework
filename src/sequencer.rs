@@ -2,96 +2,93 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! The module defines the [Sequencer] trait.
+//! The module defines the [`Sequencer`] trait.
 //!
-//! The [Sequencer] trait and the [Clock](Sequencer::Clock) are the basis of all the database
+//! The [`Sequencer`] trait and the [`Clock`](Sequencer::Clock) are the basis of all the database
 //! operations as they define the flow of time.
 
+use scc::Queue;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 
-use scc::Queue;
-
-/// [Sequencer] acts as a logical clock for the storage system.
+/// [`Sequencer`] acts as a logical clock for the storage system.
 ///
-/// A logical clock is the most important feature of a transactional storage system as it
-/// defines the flow of time.
+/// A logical clock is the most important feature of a transactional storage system as it defines
+/// the flow of time.
 ///
 /// Developers are able to implement their own sequencing mechanism other than a simple atomic
-/// counter by using the [Sequencer] trait, for instance, the system timestamp generator can
-/// directly be used, or an efficient hardware-aided counter can also be incorporated.
+/// counter by implementing the [`Sequencer`] trait, for instance, the system timestamp generator
+/// can directly be used, or an efficient hardware-aided counter can also be incorporated.
 pub trait Sequencer: 'static + Debug + Default {
-    /// [Clock](Sequencer::Clock) is a partially ordered type representing a single point of
-    /// time in a system.
+    /// [`Clock`](Sequencer::Clock) is a partially ordered type representing a single point of time
+    /// in a system.
     ///
-    /// It should satisfy [Clone], [Copy], [`PartialEq`], [`PartialOrd`], [Send], and [Sync].
+    /// It should satisfy [`Clone`], [`Copy`], [`PartialEq`], [`PartialOrd`], [`Send`], and
+    /// [`Sync`].
     ///
-    /// [Clone], [Copy], [Send] and [Sync] are required as the value can be copied sent
-    /// frequently. [`PartialEq`] and [`PartialOrd`] allow developers to implement a
-    /// floating-point, or a `Lamport vector clock` generator.
+    /// [`Clone`], [`Copy`], [`Send`] and [`Sync`] are required as the value can be copied and sent
+    /// across threads and awaits frequently. [`PartialEq`] and [`PartialOrd`] allow developers to
+    /// implement a floating-point, or a `Lamport vector clock` generator.
     ///
-    /// The [Default] value is treated an `invisible` time point in the system.
+    /// The [`Default`] value is treated an `invisible` time point in the system.
     type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
 
-    /// [Tracker](Sequencer::Tracker) allows the sequencer to track all the issued
-    /// [Clock](Sequencer::Clock) instances.
+    /// [`Tracker`](Sequencer::Tracker) allows the sequencer to track every actively used
+    /// [`Clock`](Sequencer::Clock) instance associated with a [`Snapshot`](super::Snapshot).
     ///
-    /// A [Tracker](Sequencer::Tracker) can be cloned.
+    /// A [`Tracker`](Sequencer::Tracker) can be cloned.
     type Tracker: Clone + DeriveClock<Self::Clock>;
 
-    /// Returns a [Clock](Sequencer::Clock) that represents a database snapshot being visible
-    /// to all the current and future readers.
+    /// Returns a [`Clock`](Sequencer::Clock) that represents a database snapshot being visible to
+    /// all the current and future readers.
     ///
-    /// This must not return the default [Clock](Sequencer::Clock) value.
+    /// This must not return the default [`Clock`](Sequencer::Clock) value.
     fn min(&self, order: Ordering) -> Self::Clock;
 
-    /// Gets the current [Clock](Sequencer::Clock).
+    /// Gets the current [`Clock`](Sequencer::Clock).
     ///
-    /// This must not return the default [Clock](Sequencer::Clock) value.
+    /// This must not return the default [`Clock`](Sequencer::Clock) value.
     fn get(&self, order: Ordering) -> Self::Clock;
 
-    /// Issues a [Clock](Sequencer::Clock) wrapped in a [Tracker](Sequencer::Tracker).
+    /// Tracks the current [`Clock`](Sequencer::Clock) value by wrapping it in a
+    /// [`Tracker`](Sequencer::Tracker).
     ///
-    /// The [Sequencer] takes the issued [Clock](Sequencer::Clock) into account when
-    /// calculating the minimum valid [Clock](Sequencer::Clock) value until the
-    /// [Tracker](Sequencer::Tracker) is dropped.
-    ///
-    /// This must not issue the default [Clock](Sequencer::Clock) value.
-    fn issue(&self, order: Ordering) -> Self::Tracker;
+    /// This must not wrap the default [`Clock`](Sequencer::Clock) value.
+    fn track(&self, order: Ordering) -> Self::Tracker;
 
-    /// Updates the current logical [Clock](Sequencer::Clock) value.
+    /// Updates the current logical [`Clock`](Sequencer::Clock) value.
     ///
-    /// It tries to replace the current [Clock](Sequencer::Clock) value with the given one. It
+    /// It tries to replace the current [`Clock`](Sequencer::Clock) value with the given one. It
     /// returns the result of the update along with the latest value of the clock.
     ///
     /// # Errors
     ///
-    /// It returns an error along with the latest [Clock](Sequencer::Clock) value of the
-    /// [Sequencer] when the given value is unsuitable for the [Sequencer], for example, the
-    /// supplied [Clock](Sequencer::Clock) is too old.
+    /// It returns an error along with the latest [`Clock`](Sequencer::Clock) value of the
+    /// [`Sequencer`] when the given value is unsuitable for the [`Sequencer`], for example, the
+    /// supplied [`Clock`](Sequencer::Clock) is too old.
     fn update(
         &self,
         new_sequence: Self::Clock,
         order: Ordering,
     ) -> Result<Self::Clock, Self::Clock>;
 
-    /// Advances its own [Clock](Sequencer::Clock).
+    /// Advances its own [`Clock`](Sequencer::Clock).
     ///
-    /// It returns the updated [Clock](Sequencer::Clock).
+    /// It returns the updated [`Clock`](Sequencer::Clock).
     fn advance(&self, order: Ordering) -> Self::Clock;
 }
 
-/// The [`DeriveClock`] trait defines the capability of deriving a [Clock](Sequencer::Clock).
+/// The [`DeriveClock`] trait defines the capability of deriving a [`Clock`](Sequencer::Clock).
 pub trait DeriveClock<C> {
-    /// Returns the [Clock](Sequencer::Clock).
+    /// Returns the [`Clock`](Sequencer::Clock).
     fn clock(&self) -> C;
 }
 
-/// [`AtomicCounter`] implements a [`Sequencer`] of a single atomic counter.
+/// [`AtomicCounter`] implements [`Sequencer`] on top of a single atomic counter.
 ///
-/// An atomic counter is known to be inefficient when the system is equipped with a large
-/// number of processors.
+/// An atomic counter is known to be inefficient when the system is equipped with a large number of
+/// processors.
 #[derive(Debug)]
 pub struct AtomicCounter {
     clock: AtomicU64,
@@ -102,17 +99,20 @@ impl Sequencer for AtomicCounter {
     type Clock = u64;
     type Tracker = U64Tracker;
 
+    #[inline]
     fn min(&self, _order: Ordering) -> u64 {
         let min = self.get(Acquire);
         while let Ok(Some(_)) = self.list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
         self.list.peek(|e| e.map_or(min, |t| t.timestamp.min(min)))
     }
 
+    #[inline]
     fn get(&self, order: Ordering) -> Self::Clock {
         self.clock.load(order)
     }
 
-    fn issue(&self, order: Ordering) -> Self::Tracker {
+    #[inline]
+    fn track(&self, order: Ordering) -> Self::Tracker {
         loop {
             let candidate = self.get(order);
             let mut reuse = None;
@@ -160,6 +160,7 @@ impl Sequencer for AtomicCounter {
         }
     }
 
+    #[inline]
     fn update(&self, new_value: Self::Clock, order: Ordering) -> Result<Self::Clock, Self::Clock> {
         let current = self.clock.load(Relaxed);
         loop {
@@ -176,12 +177,14 @@ impl Sequencer for AtomicCounter {
         }
     }
 
+    #[inline]
     fn advance(&self, order: Ordering) -> Self::Clock {
         self.clock.fetch_add(1, order) + 1
     }
 }
 
 impl Default for AtomicCounter {
+    #[inline]
     fn default() -> Self {
         AtomicCounter {
             // Starts from `1` in order to avoid using `0`.
@@ -191,12 +194,14 @@ impl Default for AtomicCounter {
     }
 }
 
-/// [`U64Tracker`] keeps its associated [`AtomicCounter`] from becoming oblivious of its clock.
+/// [`U64Tracker`] points to the [`Entry`] associated with its own [`Clock`](Sequencer::Clock)
+/// value.
 pub struct U64Tracker {
     ptr: *const Entry,
 }
 
 impl Clone for U64Tracker {
+    #[inline]
     fn clone(&self) -> Self {
         let entry = unsafe { self.ptr.as_ref().unwrap() };
         let prev = entry.ref_cnt.fetch_add(1, Relaxed);
@@ -206,6 +211,7 @@ impl Clone for U64Tracker {
 }
 
 impl DeriveClock<u64> for U64Tracker {
+    #[inline]
     fn clock(&self) -> u64 {
         let entry = unsafe { self.ptr.as_ref().unwrap() };
         entry.timestamp
@@ -213,6 +219,7 @@ impl DeriveClock<u64> for U64Tracker {
 }
 
 impl Drop for U64Tracker {
+    #[inline]
     fn drop(&mut self) {
         let entry = unsafe { self.ptr.as_ref().unwrap() };
         let prev = entry.ref_cnt.fetch_sub(1, Relaxed);
@@ -257,7 +264,7 @@ mod test {
                     let current = atomic_counter_cloned.get(Acquire);
                     assert!(advanced <= current);
 
-                    let tracker = atomic_counter_cloned.issue(Acquire);
+                    let tracker = atomic_counter_cloned.track(Acquire);
                     assert!(current <= tracker.clock());
 
                     let min = atomic_counter_cloned.min(Relaxed);

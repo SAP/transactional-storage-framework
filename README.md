@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2023 Changgyoo Park <wvwwvwwv@me.com>
+SPDX-FileCopyrightText: 2021 Changgyoo Park <wvwwvwwv@me.com>
 
 SPDX-License-Identifier: Apache-2.0
 -->
@@ -10,11 +10,11 @@ SPDX-License-Identifier: Apache-2.0
 ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/SAP/transactional-storage-framework/tss.yml?branch=main)
 
 **The project is currently work-in-progress.**
-**The whole code base will undergo extensive renovation.**
+**The whole code base is currently undergoing extensive renovation.**
 
-The transactional storage framework is a software framework that offers key operation interfaces and basic functionality for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
+`Transactional Storage Framework` is a software framework providing methods and type traits for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
 
-* [tss::Storage](#Storage)
+* [tss::Database](#Database)
 * [tss::Container](#Container)
 * [tss::Sequencer](#Sequencer)
 * [tss::Snapshot](#Snapshot)
@@ -22,19 +22,17 @@ The transactional storage framework is a software framework that offers key oper
 * [tss::Logger](#Logger)
 * [tss::Version](#Version)
 
-This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are useful when it comes to checking if a specific database mechanism scales well as the number of processors increases, because those adverse effects that the paper describes will be hardly detected on a large database instance running on the same hardware.
-
-Therefore, the goal of the project is to provide a transactional storage system framework that enables developers to easily validate algorithms before applying them to a real world system. Furthermore, the framework provides realization of `Container`, `Logger`, `Sequencer`, and `Version` types, thereby making the framework itself a complete transactional storage system for a relational database system.
+This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are useful for scalability testing of a database operation mechanism, because commercial full-fledged database systems usually do not provide a fully isolated environment, thus making it harder to clearly spot any performance bottleneck. `Transactional Storage Framework` is a modular system that allows any developers or researchers to activate only relevant components in the system to help them test any new innovative methods for a database system.
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
-## Storage
+## Database
 
-`Storage` is the main module of the whole framework that satisfies atomicity, consistency, isolation, and durability properties. It is analogous to a database in database management software. The underlying storage can either be a file or a large chunk of system memory depending on the actual implementation.
+`Database` is the main module of the whole framework.
 
 ```rust
-use tss::{AtomicCounter, Storage};
-let storage: Storage<AtomicCounter> = Storage::new(None);
+use tss::Database;
+let database = Database::default();
 ```
 
 ## Container
@@ -48,67 +46,6 @@ let storage: Storage<AtomicCounter> = Storage::new(None);
 
 let container_data = Box::new(RelationalTable::new());
 let container_handle: Handle = Container::new_container(container_data);
-```
-
-### RelationalTable
-
-**Work-in-progress.**
-
-The framework provides a row-oriented database table container that resembles traditional database tables.
-
-## Sequencer
-
-`Sequencer` is a logical clock generator that gives an identifier to a set of changes made by a transaction. The framework allows one to implement the `Lamport vector clock` as the `Sequencer` trait assumes `PartialOrd` for the clock value. It is the most important type in a transactional storage system as it defines the flow of time.
-
-```rust
-pub trait Sequencer: 'static + Default {
-    type Clock: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
-    type Tracker: Clone + DeriveClock<Self::Clock>;
-
-    fn min(&self, order: Ordering) -> Self::Clock;
-    fn get(&self, order: Ordering) -> Self::Clock;
-    fn issue(&self, order: Ordering) -> Self::Tracker;
-    fn update(
-        &self,
-        new_sequence: Self::Clock,
-        order: Ordering,
-    ) -> Result<Self::Clock, Self::Clock>;
-    fn advance(&self, order: Ordering) -> Self::Clock;
-}
-```
-
-### AtomicCounter
-
-The framework provides an atomic-counter sequencer and a mutex-protected mean-heap snapshot tracker.
-
-## Snapshot
-
-`Snapshot` represents a snapshot of a `Storage` instance at a certain point of time represented by an identifier issued by `Sequencer`.
-
-```rust
-use std::time::Duration;
-use tss::{AtomicCounter, Storage};
-
-let storage: Storage<AtomicCounter> = Storage::new(None);
-let transaction = storage.transaction();
-
-let snapshot = transaction.snapshot();
-let mut journal = transaction.start();
-let result =
-    storage.create_directory(
-        "/thomas/eats/apples",
-        &snapshot,
-        &mut journal,
-        Some(Duration::from_millis(100)));
-assert!(result.is_ok());
-journal.submit();
-drop(snapshot);
-
-transaction.commit();
-
-let snapshot = storage.snapshot();
-let result = storage.get("/thomas/eats/apples", &snapshot);
-assert!(result.is_some());
 ```
 
 ## Transaction
@@ -180,12 +117,6 @@ pub trait Logger<S: Sequencer> {
 }
 ```
 
-### FileLogger
-
-**Work-in-progress.**
-
-The framework provides a file-based logger that is capable of lock-free check-pointing and point-in-time recovery.
-
 ## Version
 
 `Version` is a type trait for all the versioned data that a storage instance manages. The interfaces are used by storage readers to determine if they are allowed to read the data, or by storage writers to check if they are allowed to create the versioned object. The locking mechanism is closely tied to the versioning mechanism in this framework by default, however, it is totally up to developers to have a separate lock table without relying on the default locking mechanism. The details of the versioning mechanism are described in the following section.
@@ -222,8 +153,4 @@ let snapshot = storage.snapshot();
 assert!(versioned_object.predate(&snapshot, &scc::ebr::Barrier::new()));
 ```
 
-### RecordVersion
-
-**Work-in-progress.**
-
-The framework provides a traditional record-level versioning mechanism for `RelationalTable`.
+## [Changelog](https://github.com/SAP/transactional-storage-framework/blob/main/CHANGELOG.md)

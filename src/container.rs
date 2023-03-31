@@ -2,18 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::unused_async, unused)]
-
 use super::{Metadata, Sequencer};
 
 /// [`Container`] is a collection of organized data and its [`Metadata`].
 #[derive(Debug)]
 pub struct Container<S: Sequencer> {
     /// The metadata describing the specification of the [`Container`].
-    metadata: Metadata,
+    _metadata: Metadata,
 
-    /// Unimplemented.
-    _phantom: std::marker::PhantomData<S>,
+    /// A link to old versions of the [`Container`].
+    _version: std::marker::PhantomData<S>,
 }
 
 impl<S: Sequencer> Container<S> {
@@ -21,8 +19,8 @@ impl<S: Sequencer> Container<S> {
     #[must_use]
     pub(super) fn new(metadata: Metadata) -> Container<S> {
         Container {
-            metadata,
-            _phantom: std::marker::PhantomData,
+            _metadata: metadata,
+            _version: std::marker::PhantomData,
         }
     }
 }
@@ -30,19 +28,11 @@ impl<S: Sequencer> Container<S> {
 #[cfg(test)]
 mod test {
     use crate::sequencer::AtomicCounter;
-    use crate::Database;
-
-    use std::sync::Arc;
+    use crate::{Container, Metadata};
 
     #[tokio::test]
-    async fn insert_delete_vacuum() {
-        let storage: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
-
-        let transaction = storage.transaction();
-        let snapshot = transaction.snapshot();
-        let journal = transaction.start();
-        drop(journal);
-        drop(snapshot);
-        drop(transaction);
+    async fn container() {
+        let metadata = Metadata {};
+        let _container = Container::<AtomicCounter>::new(metadata);
     }
 }

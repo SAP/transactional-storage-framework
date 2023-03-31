@@ -4,17 +4,13 @@
 
 #![allow(clippy::unused_async, unused)]
 
-use super::overseer::Overseer;
-use super::overseer::Task;
+use super::overseer::{Overseer, Task};
 use super::{
     AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer, Sequencer, Snapshot,
     Transaction,
 };
-
-use std::thread::JoinHandle;
-use std::time::Instant;
-
 use scc::{ebr, HashIndex};
+use std::time::Instant;
 
 /// [`Database`] represents a single stand-alone transactional database.
 ///
@@ -159,8 +155,16 @@ impl<S: Sequencer> Database<S> {
         metadata: Metadata,
         journal: &'j mut Journal<'s, 't, S>,
         deadline: Option<Instant>,
-    ) -> Result<&'j mut Container<S>, Error> {
-        unimplemented!()
+    ) -> Result<ebr::Arc<Container<S>>, Error> {
+        let container = ebr::Arc::new(Container::new(metadata));
+        match self
+            .container_map
+            .insert_async(name, container.clone())
+            .await
+        {
+            Ok(_) => Ok(container),
+            Err(_) => Err(Error::UniquenessViolation),
+        }
     }
 
     /// Renames an existing [`Container`].
@@ -196,8 +200,21 @@ impl<S: Sequencer> Database<S> {
         new_name: String,
         journal: &'j mut Journal<'s, 't, S>,
         deadline: Option<Instant>,
-    ) -> Result<&'j mut Container<S>, Error> {
-        unimplemented!()
+    ) -> Result<(), Error> {
+        if let Some(container) = self.container_map.read(name, |_, c| c.clone()) {
+            if self
+                .container_map
+                .insert_async(new_name, container)
+                .await
+                .is_ok()
+            {
+                Ok(())
+            } else {
+                Err(Error::UniquenessViolation)
+            }
+        } else {
+            Err(Error::NotFound)
+        }
     }
 
     /// Gets a reference to the [`Container`] under the specified name.
@@ -228,7 +245,10 @@ impl<S: Sequencer> Database<S> {
         name: &str,
         snapshot: &'r Snapshot<'s, 't, 'j, S>,
     ) -> Option<&'r Container<S>> {
-        None
+        self.container_map.read(name, |_, c| unsafe {
+            // The `Container` survives as long as the `Snapshot` is valid.
+            std::mem::transmute::<&Container<S>, &'r Container<S>>(&**c)
+        })
     }
 
     /// Drops a [`Container`] under the specified name.
@@ -263,11 +283,15 @@ impl<S: Sequencer> Database<S> {
     pub async fn drop_container<'s, 't, 'j>(
         &'s self,
         name: &str,
-        snapshot: &Snapshot<'s, 't, 'j, S>,
+        _snapshot: &Snapshot<'s, 't, 'j, S>,
         journal: &'j mut Journal<'s, 't, S>,
         deadline: Option<Instant>,
-    ) -> Result<&'j Container<S>, Error> {
-        unimplemented!();
+    ) -> Result<(), Error> {
+        if self.container_map.remove_async(name).await {
+            Ok(())
+        } else {
+            Err(Error::NotFound)
+        }
     }
 }
 
@@ -301,5 +325,34 @@ impl<S: Sequencer> Drop for Database<S> {
             // Reaching here means that there is a program logic bug.
             debug_assert!(false, "programming logic error");
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::sequencer::AtomicCounter;
+    use crate::{Database, Metadata};
+
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn database() {
+        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
+        let transaction = database.transaction();
+        let snapshot = transaction.snapshot();
+        let mut journal = transaction.start();
+        let metadata = Metadata {};
+        assert!(database
+            .create_container("hello".to_string(), metadata, &mut journal, None)
+            .await
+            .is_ok());
+        let metadata = Metadata {};
+        assert!(database
+            .create_container("hello".to_string(), metadata, &mut journal, None)
+            .await
+            .is_err());
+        drop(journal);
+        drop(snapshot);
+        drop(transaction);
     }
 }

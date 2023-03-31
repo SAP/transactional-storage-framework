@@ -5,10 +5,8 @@
 use super::journal::Anchor;
 use super::sequencer::DeriveClock;
 use super::{Journal, Sequencer, Transaction};
-
-use std::sync::atomic::Ordering::Acquire;
-
 use scc::ebr;
+use std::sync::atomic::Ordering::Acquire;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
 ///
@@ -38,7 +36,7 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
         transaction: Option<&'t Transaction<'s, S>>,
         journal: Option<&'j Journal<'s, 't, S>>,
     ) -> Snapshot<'s, 't, 'j, S> {
-        let tracker = sequencer.issue(Acquire);
+        let tracker = sequencer.track(Acquire);
         Snapshot {
             tracker,
             transaction: transaction.map(|transaction| (transaction, transaction.clock())),
