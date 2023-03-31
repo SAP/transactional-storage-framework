@@ -8,15 +8,18 @@
 //!
 //! # [`Database`]
 //! [`Database`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
-//!
-//! # [`Transaction`]
-//! [`Transaction`] represents a database transaction.
 
 mod container;
 pub use container::Container;
 
+mod database;
+pub use database::Database;
+
 mod error;
 pub use error::Error;
+
+mod lock_table;
+pub use lock_table::LockTable;
 
 mod journal;
 pub use journal::Journal;
@@ -33,11 +36,8 @@ pub use sequencer::{AtomicCounter, Sequencer};
 mod snapshot;
 pub use snapshot::Snapshot;
 
-mod database;
-pub use database::Database;
-
 mod transaction;
-pub use transaction::{InDoubtTransaction, Transaction};
+pub use transaction::{Committable, Transaction};
 
 pub mod version;
 pub use version::{RecordVersion, Version};

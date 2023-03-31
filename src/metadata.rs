@@ -4,5 +4,5 @@
 
 /// [`Metadata`] is associated with a [`Container`](super::Container), describing the specification
 /// of the [`Container`](super::Container).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Metadata {}

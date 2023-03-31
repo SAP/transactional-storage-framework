@@ -142,7 +142,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Prepares the [Transaction] for commit.
     ///
-    /// It returns a [`InDoubtTransaction`], giving one last chance to roll back the prepared
+    /// It returns a [`Committable`], giving one last chance to roll back the prepared
     /// transaction.
     ///
     /// # Errors
@@ -164,14 +164,14 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn prepare(self) -> Result<InDoubtTransaction<'s, S>, Error> {
+    pub async fn prepare(self) -> Result<Committable<'s, S>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_clock = self.sequencer().get(Relaxed);
         anchor_mut_ref.state.store(1, Release);
-        Ok(InDoubtTransaction {
+        Ok(Committable {
             transaction: Some(self),
         })
     }
@@ -268,7 +268,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
 
     /// Post-processes its transaction commit.
     ///
-    /// Only a `InDoubtTransaction` instance is allowed to call this function.
+    /// Only a `Committable` instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) -> S::Clock {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
@@ -292,17 +292,16 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
     }
 }
 
-/// [`InDoubtTransaction`] gives one last chance of rolling back the transaction.
+/// [`Committable`] gives one last chance of rolling back the transaction.
 ///
 /// The transaction is bound to be rolled back if no actions are taken before dropping the
-/// [`InDoubtTransaction`] instance. On the other hands, the transaction stays uncommitted until the
-/// [`InDoubtTransaction`] instance is dropped.
-#[allow(clippy::module_name_repetitions)]
-pub struct InDoubtTransaction<'s, S: Sequencer> {
+/// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
+/// [`Committable`] instance is dropped or awaited.
+pub struct Committable<'s, S: Sequencer> {
     transaction: Option<Transaction<'s, S>>,
 }
 
-impl<'s, S: Sequencer> Future for InDoubtTransaction<'s, S> {
+impl<'s, S: Sequencer> Future for Committable<'s, S> {
     type Output = Result<S::Clock, Error>;
 
     #[inline]
@@ -315,21 +314,26 @@ impl<'s, S: Sequencer> Future for InDoubtTransaction<'s, S> {
     }
 }
 
-/// [Transaction] state.
+/// [`Transaction`] state.
 pub enum State {
     /// The transaction is active.
     Active,
+
     /// The transaction is being committed.
     Committing,
+
     /// The transaction is committed.
     Committed,
+
     /// The transaction is being rolled back.
     RollingBack,
+
     /// The transaction is rolled back.
     RolledBack,
 }
 
 impl From<State> for usize {
+    #[inline]
     fn from(v: State) -> usize {
         match v {
             State::Active => 0,

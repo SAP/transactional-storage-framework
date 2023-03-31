@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use scc::ebr;
 
-/// The [Version] trait stipulates interfaces of versioned database objects.
+/// The [`Version`] trait stipulates interfaces of versioned database objects.
 ///
 /// All the versioned database objects in a [Database](super::Database) must implement the trait.
 pub trait Version<S: Sequencer> {
@@ -129,7 +129,7 @@ pub trait Version<S: Sequencer> {
     }
 }
 
-/// [Owner] is a mandatory field in a [Version] in order for the [Version] to be correctly
+/// [`Owner`] is a mandatory field in a [`Version`] in order for the [`Version`] to be correctly
 /// locked and updated.
 #[derive(Debug, Default)]
 pub struct Owner<S: Sequencer>(ebr::AtomicArc<JournalAnchor<S>>);

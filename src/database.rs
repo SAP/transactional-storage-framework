@@ -4,8 +4,8 @@
 
 use super::overseer::{Overseer, Task};
 use super::{
-    AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer, Sequencer, Snapshot,
-    Transaction,
+    AtomicCounter, Container, Error, Journal, LockTable, Metadata, PersistenceLayer, Sequencer,
+    Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
 use std::time::Instant;
@@ -24,6 +24,9 @@ pub struct Database<S: Sequencer = AtomicCounter> {
 
     /// The container map.
     container_map: HashIndex<String, ebr::Arc<Container<S>>>,
+
+    /// The lock table.
+    lock_table: LockTable,
 
     /// A background thread waking up timed out tasks and deleting unreachable database objects.
     overseer: Overseer,
@@ -46,6 +49,7 @@ impl<S: Sequencer> Database<S> {
             sequencer: S::default(),
             persistence_layer: None,
             container_map: HashIndex::default(),
+            lock_table: LockTable::default(),
             overseer: Overseer::spawn(),
         }
     }
@@ -68,6 +72,7 @@ impl<S: Sequencer> Database<S> {
             sequencer: S::default(),
             persistence_layer: Some(persistence_layer),
             container_map: HashIndex::default(),
+            lock_table: LockTable::default(),
             overseer: Overseer::spawn(),
         }
     }
@@ -138,7 +143,7 @@ impl<S: Sequencer> Database<S> {
     ///
     /// let database = Database::default();
     /// let name = "hello".to_string();
-    /// let metadata = Metadata {};
+    /// let metadata = Metadata::default();
     /// let transaction = database.transaction();
     /// let mut journal = transaction.start();
     /// async {
@@ -154,6 +159,7 @@ impl<S: Sequencer> Database<S> {
         _journal: &'j mut Journal<'s, 't, S>,
         _deadline: Option<Instant>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
+        let _: &LockTable = &self.lock_table;
         let container = ebr::Arc::new(Container::new(metadata));
         match self
             .container_map
@@ -178,7 +184,7 @@ impl<S: Sequencer> Database<S> {
     ///
     /// let database = Database::default();
     /// let name = "hello";
-    /// let metadata = Metadata {};
+    /// let metadata = Metadata::default();
     /// let new_name = "hi".to_string();
     /// let transaction = database.transaction();
     /// let mut journal = transaction.start();
@@ -225,7 +231,7 @@ impl<S: Sequencer> Database<S> {
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let name = "hello";
-    /// let metadata = Metadata {};
+    /// let metadata = Metadata::default();
     /// async {
     ///     let mut journal = transaction.start();
     ///     let create_result =
@@ -264,7 +270,7 @@ impl<S: Sequencer> Database<S> {
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let name = "hello";
-    /// let metadata = Metadata {};
+    /// let metadata = Metadata::default();
     /// async {
     ///     let mut journal = transaction.start();
     ///     let create_result =
@@ -317,6 +323,7 @@ impl Default for Database<AtomicCounter> {
             sequencer: AtomicCounter::default(),
             persistence_layer: None,
             container_map: HashIndex::default(),
+            lock_table: LockTable::default(),
             overseer: Overseer::spawn(),
         }
     }
@@ -345,12 +352,12 @@ mod test {
         let transaction = database.transaction();
         let snapshot = transaction.snapshot();
         let mut journal = transaction.start();
-        let metadata = Metadata {};
+        let metadata = Metadata::default();
         assert!(database
             .create_container("hello".to_string(), metadata, &mut journal, None)
             .await
             .is_ok());
-        let metadata = Metadata {};
+        let metadata = Metadata::default();
         assert!(database
             .create_container("hello".to_string(), metadata, &mut journal, None)
             .await
