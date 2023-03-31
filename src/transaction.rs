@@ -5,9 +5,12 @@
 use super::journal::Annals;
 use super::{Database, Error, Journal, Sequencer, Snapshot};
 use scc::ebr;
+use std::future::Future;
+use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicPtr, AtomicUsize};
+use std::task::{Context, Poll};
 
 /// [`Transaction`] is the atomic unit of work for all types of database operations.
 ///
@@ -137,13 +140,14 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         Ok(clock)
     }
 
-    /// Commits the changes made by the [Transaction].
+    /// Prepares the [Transaction] for commit.
     ///
-    /// It returns a [`InDoubtTransaction`], giving one last chance to roll back the transaction.
+    /// It returns a [`InDoubtTransaction`], giving one last chance to roll back the prepared
+    /// transaction.
     ///
     /// # Errors
     ///
-    /// If the transaction cannot be committed, an error is returned.
+    /// If the transaction could not be prepared for commit, an [`Error`] is returned.
     ///
     /// # Examples
     ///
@@ -152,9 +156,15 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// transaction.commit();
+    /// async {
+    ///     if let Ok(indoubt_transaction) = transaction.prepare().await {
+    ///         assert!(indoubt_transaction.await.is_ok());
+    ///     }
+    /// };
     /// ```
-    pub fn commit(self) -> Result<InDoubtTransaction<'s, S>, Error> {
+    #[allow(clippy::unused_async)]
+    #[inline]
+    pub async fn prepare(self) -> Result<InDoubtTransaction<'s, S>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
@@ -166,6 +176,29 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         })
     }
 
+    /// Commits the [Transaction].
+    ///
+    /// # Errors
+    ///
+    /// If the transaction cannot be committed, an [`Error`] is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tss::{Database, Transaction};
+    ///
+    /// let database = Database::default();
+    /// let mut transaction = database.transaction();
+    /// async {
+    ///     assert!(transaction.commit().await.is_ok());
+    /// };
+    /// ```
+    #[inline]
+    pub async fn commit(self) -> Result<S::Clock, Error> {
+        let indoubt_transaction = self.prepare().await?;
+        indoubt_transaction.await
+    }
+
     /// Rolls back the changes made by the [Transaction].
     ///
     /// # Examples
@@ -175,9 +208,13 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// transaction.rollback();
+    /// async {
+    ///     transaction.rollback().await;
+    /// };
     /// ```
-    pub fn rollback(mut self) {
+    #[allow(clippy::unused_async)]
+    #[inline]
+    pub async fn rollback(mut self) {
         self.anchor.state.store(State::RollingBack.into(), Release);
         let _result = self.rewind(0);
         self.anchor.state.store(State::RolledBack.into(), Release);
@@ -185,7 +222,6 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Creates a new [`Transaction`].
-    #[inline]
     pub(crate) fn new(database: &'s Database<S>) -> Transaction<'s, S> {
         Transaction {
             database,
@@ -234,13 +270,23 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     ///
     /// Only a `InDoubtTransaction` instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
-    fn post_process(self) {
+    fn post_process(self) -> S::Clock {
+        debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
+
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
+        let commit_clock = self.sequencer().advance(Release);
+        anchor_mut_ref.commit_clock = commit_clock;
+        anchor_mut_ref.state.store(State::Committed.into(), Release);
+
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
         drop(self);
+
+        commit_clock
     }
 }
 
 impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
+    #[inline]
     fn drop(&mut self) {
         let _result = self.rewind(0);
     }
@@ -248,7 +294,7 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
 
 /// [`InDoubtTransaction`] gives one last chance of rolling back the transaction.
 ///
-/// The transaction is bound to be committed if no actions are taken before dropping the
+/// The transaction is bound to be rolled back if no actions are taken before dropping the
 /// [`InDoubtTransaction`] instance. On the other hands, the transaction stays uncommitted until the
 /// [`InDoubtTransaction`] instance is dropped.
 #[allow(clippy::module_name_repetitions)]
@@ -256,67 +302,15 @@ pub struct InDoubtTransaction<'s, S: Sequencer> {
     transaction: Option<Transaction<'s, S>>,
 }
 
-impl<'s, S: Sequencer> InDoubtTransaction<'s, S> {
-    /// Commits the transaction, and returns the assigned commit snapshot of the transaction.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{AtomicCounter, Database, Sequencer, Transaction};
-    ///
-    /// let database = Database::default();
-    ///
-    /// let mut transaction = database.transaction();
-    /// if let Ok(rubicon) = transaction.commit() {
-    ///     assert_ne!(rubicon.commit(), <AtomicCounter as Sequencer>::Clock::default());
-    /// };
-    /// ```
-    pub fn commit(mut self) -> S::Clock {
-        self.transaction
-            .take()
-            .map_or_else(S::Clock::default, Self::post_process)
-    }
+impl<'s, S: Sequencer> Future for InDoubtTransaction<'s, S> {
+    type Output = Result<S::Clock, Error>;
 
-    /// Rolls back the transaction.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{Database, Transaction};
-    ///
-    /// let database = Database::default();
-    /// let mut transaction = database.transaction();
-    /// if let Ok(rubicon) = transaction.commit() {
-    ///     rubicon.rollback();
-    /// };
-    /// ```
-    pub fn rollback(mut self) {
-        if let Some(transaction) = self.transaction.take() {
-            transaction.rollback();
-        }
-    }
-
-    /// Commits the transaction.
-    fn post_process(transaction: Transaction<S>) -> S::Clock {
-        debug_assert_eq!(
-            transaction.anchor.state.load(Relaxed),
-            State::Committing.into()
-        );
-
-        let anchor_mut_ref = unsafe { &mut *(addr_of!(*transaction.anchor) as *mut Anchor<S>) };
-        let commit_snapshot = transaction.sequencer().advance(Release);
-        anchor_mut_ref.commit_clock = commit_snapshot;
-        anchor_mut_ref.state.store(State::Committed.into(), Release);
-        transaction.post_process();
-        commit_snapshot
-    }
-}
-
-impl<'s, S: Sequencer> Drop for InDoubtTransaction<'s, S> {
-    /// Post-processes the transaction that is not explicitly rolled back.
-    fn drop(&mut self) {
-        if let Some(transaction) = self.transaction.take() {
-            Self::post_process(transaction);
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(commit_clock) = self.transaction.take().map(Transaction::post_process) {
+            Poll::Ready(Ok(commit_clock))
+        } else {
+            Poll::Pending
         }
     }
 }
@@ -407,8 +401,8 @@ mod test {
     use std::thread;
     use std::time::Duration;
 
-    #[test]
-    fn visibility() {
+    #[tokio::test]
+    async fn visibility() {
         static mut DATABASE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
@@ -458,14 +452,14 @@ mod test {
         assert!(thread_handle.join().is_ok());
 
         if let Ok(transaction) = Arc::try_unwrap(transaction) {
-            assert!(transaction.commit().is_ok());
+            assert!(transaction.commit().await.is_ok());
         } else {
             unreachable!();
         }
     }
 
-    #[test]
-    fn rewind() {
+    #[tokio::test]
+    async fn rewind() {
         static mut DATABASE: Option<Database<AtomicCounter>> = None;
         static INIT: Once = Once::new();
 
@@ -554,11 +548,11 @@ mod test {
             .is_ok());
         assert_eq!(journal.submit(), 1);
 
-        assert!(transaction.commit().is_ok());
+        assert!(transaction.commit().await.is_ok());
     }
 
-    #[test]
-    fn wait_queue() {
+    #[tokio::test]
+    async fn wait_queue() {
         let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
         let num_threads = 16;
@@ -585,7 +579,7 @@ mod test {
         assert!(result.is_ok());
         assert_eq!(journal.submit(), 1);
         barrier.wait();
-        assert!(transaction.commit().is_ok());
+        assert!(transaction.commit().await.is_ok());
         barrier.wait();
 
         thread_handles
@@ -596,8 +590,8 @@ mod test {
         assert!(versioned_object.predate(&snapshot, &ebr::Barrier::new()));
     }
 
-    #[test]
-    fn time_out() {
+    #[tokio::test]
+    async fn time_out() {
         let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
 
@@ -676,7 +670,7 @@ mod test {
             .is_ok());
         drop(journal);
 
-        transaction.rollback();
+        transaction.rollback().await;
 
         assert!(thread.join().is_ok());
     }
