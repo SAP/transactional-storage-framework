@@ -2,10 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::journal::Anchor;
-use super::sequencer::DeriveClock;
 use super::{Journal, Sequencer, Transaction};
-use scc::ebr;
 use std::sync::atomic::Ordering::Acquire;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
@@ -24,8 +21,11 @@ use std::sync::atomic::Ordering::Acquire;
 ///     transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
+    #[allow(dead_code)]
     tracker: S::Tracker,
+    #[allow(dead_code)]
     transaction: Option<(&'t Transaction<'s, S>, usize)>,
+    #[allow(dead_code)]
     journal: Option<&'j Journal<'s, 't, S>>,
 }
 
@@ -42,15 +42,5 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
             transaction: transaction.map(|transaction| (transaction, transaction.clock())),
             journal,
         }
-    }
-
-    /// Returns `true` if the given transaction record is visible.
-    pub(super) fn visible(&self, journal_anchor: &Anchor<S>, barrier: &ebr::Barrier) -> bool {
-        journal_anchor.visible(
-            self.tracker.clock(),
-            self.transaction,
-            self.journal,
-            barrier,
-        )
     }
 }

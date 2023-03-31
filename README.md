@@ -10,6 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/SAP/transactional-storage-framework/tss.yml?branch=main)
 
 **The project is currently work-in-progress.**
+
 **The whole code base is currently undergoing extensive renovation.**
 
 `Transactional Storage Framework` is a software framework providing methods and type traits for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
@@ -64,44 +65,7 @@ let database_snapshot = database.snapshot();
 
 let transaction = database.transaction();
 let transaction_snapshot = transaction.snapshot();
-let mut journal = transaction.start();
-assert!(storage
-    .create_directory("/thomas/eats/apples", &transaction_snapshot, &mut journal, None)
-    .is_ok());
-
-// journal_snapshot includes changes pending in the journal.
-let journal_snapshot = journal.snapshot();
-assert!(storage
-    .get("/thomas/eats/apples", &journal_snapshot)
-    .is_some());
-drop(journal_snapshot);
-journal.submit();
-
-// storage_snapshot had been taken before the transaction started.
-assert!(storage
-    .get("/thomas/eats/apples", &storage_snapshot)
-    .is_none());
-// transaction_snapshot had been taken before the journal started.
-assert!(storage
-    .get("/thomas/eats/apples", &transaction_snapshot)
-    .is_none());
-
-let storage_snapshot = storage.snapshot();
-
-drop(transaction_snapshot);
-assert!(transaction.commit().await.is_ok());
-
-// storage_snapshot had been taken before the transaction was committed.
-assert!(storage
-    .get("/thomas/eats/apples", &storage_snapshot)
-    .is_none());
-
-let storage_snapshot = storage.snapshot();
-
-// storage_snapshot was taken after the transaction had been committed.
-assert!(storage
-    .get("/thomas/eats/apples", &storage_snapshot)
-    .is_some());
+let journal = transaction.start();
 ```
 
 ## Logger

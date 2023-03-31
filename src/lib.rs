@@ -39,9 +39,6 @@ pub use snapshot::Snapshot;
 mod transaction;
 pub use transaction::{Committable, Transaction};
 
-pub mod version;
-pub use version::{RecordVersion, Version};
-
 mod overseer;
 
 mod tests;
