@@ -6,23 +6,14 @@
 
 //! Transactional Storage Framework
 //!
-//! # [`Storage`]
-//! [`Storage`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
-//!
-//! # [`Container`]
-//! [`Container`] is hierarchical data container that a [`Storage`] manages.
-//!
-//! # [`DataPlane`]
-//! [`DataPlane`] defines interfaces between [`Container`] and actual data.
+//! # [`Database`]
+//! [`Database`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
 //!
 //! # [`Transaction`]
-//! [`Transaction`] represents a storage transaction.
+//! [`Transaction`] represents a database transaction.
 
 mod container;
 pub use container::Container;
-
-mod data_plane;
-pub use data_plane::{DataPlane, RelationalTable};
 
 mod error;
 pub use error::Error;
@@ -30,14 +21,11 @@ pub use error::Error;
 mod journal;
 pub use journal::Journal;
 
-mod logger;
-pub use logger::{FileLogger, Log, Logger};
+mod persistence_layer;
+pub use persistence_layer::{FileLogger, Log, PersistenceLayer};
 
-mod record;
-pub use record::Record;
-
-mod layout;
-pub use layout::Layout;
+mod metadata;
+pub use metadata::Metadata;
 
 pub mod sequencer;
 pub use sequencer::{AtomicCounter, Sequencer};
@@ -45,13 +33,15 @@ pub use sequencer::{AtomicCounter, Sequencer};
 mod snapshot;
 pub use snapshot::Snapshot;
 
-mod storage;
-pub use storage::Storage;
+mod database;
+pub use database::Database;
 
 mod transaction;
-pub use transaction::{Rubicon, Transaction};
+pub use transaction::{InDoubtTransaction, Transaction};
 
 pub mod version;
 pub use version::{RecordVersion, Version};
+
+mod overseer;
 
 mod tests;

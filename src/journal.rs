@@ -16,6 +16,7 @@ use scc::ebr;
 /// [Journal] keeps the change history.
 ///
 /// Locks and log records are accumulated in a [Journal].
+#[derive(Debug)]
 pub struct Journal<'s, 't, S: Sequencer> {
     transaction: &'t Transaction<'s, S>,
     record: Option<Box<Annals<S>>>,
@@ -30,9 +31,9 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Log, Storage, Transaction};
+    /// use tss::{AtomicCounter, Log, Database, Transaction};
     ///
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     /// let journal = transaction.start();
     /// assert_eq!(journal.submit(), 1);
@@ -49,10 +50,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Database, Version};
     ///
     /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -63,7 +64,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// ```
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
-        Snapshot::new(
+        Snapshot::from_parts(
             self.transaction.sequencer(),
             Some(self.transaction),
             Some(self),
@@ -84,10 +85,10 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, RecordVersion, Storage, Version};
+    /// use tss::{AtomicCounter, RecordVersion, Database, Version};
     ///
     /// let versioned_object: RecordVersion<usize> = RecordVersion::default();
-    /// let storage: Storage<AtomicCounter> = Storage::new(None);
+    /// let storage: Database<AtomicCounter> = Database::default();
     /// let mut transaction = storage.transaction();
     ///
     /// let mut journal = transaction.start();
@@ -120,7 +121,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
         }
 
         // The versioned object is not ready for versioning.
-        Err(Error::Fail)
+        Err(Error::SerializationFailure)
     }
 
     /// Creates a new [Journal].
@@ -146,6 +147,7 @@ impl<'s, 't, S: Sequencer> Drop for Journal<'s, 't, S> {
 }
 
 /// [Annals] consists of locks acquired and log records generated with the [Journal].
+#[derive(Debug)]
 pub(super) struct Annals<S: Sequencer> {
     anchor: ebr::Arc<Anchor<S>>,
     locks: Vec<Locker<S>>,
@@ -191,6 +193,7 @@ impl<S: Sequencer> Drop for Annals<S> {
 ///
 /// [Cell](super::version::Owner) may point to it if the [Journal] owns the
 /// [Version].
+#[derive(Debug)]
 pub struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     wait_queue: (Mutex<(bool, usize)>, Condvar),
@@ -345,14 +348,13 @@ impl<S: Sequencer> Anchor<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sequencer::AtomicCounter;
     use crate::version::RecordVersion;
-    use crate::{Storage, Version};
+    use crate::{Database, Version};
 
     #[test]
     fn journal() {
         let versioned_object = RecordVersion::default();
-        let storage: Storage<AtomicCounter> = Storage::new(None);
+        let storage = Database::default();
         let transaction = storage.transaction();
 
         let mut journal = transaction.start();

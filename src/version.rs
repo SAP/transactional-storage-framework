@@ -21,7 +21,7 @@ use scc::ebr;
 
 /// The [Version] trait stipulates interfaces of versioned database objects.
 ///
-/// All the versioned database objects in a [Storage](super::Storage) must implement the trait.
+/// All the versioned database objects in a [Database](super::Database) must implement the trait.
 pub trait Version<S: Sequencer> {
     /// The type of the versioned data.
     type Data: Send + Sync;
@@ -37,7 +37,7 @@ pub trait Version<S: Sequencer> {
     ///
     /// The owner field must not be dropped on its own, otherwise a [Locker] may gain access to
     /// freed memory. [Version] is meant to be garbage-collected by a correctly implemented
-    /// garbage collector in its associated [Storage](super::Storage).
+    /// garbage collector in its associated [Database](super::Database).
     fn owner_field(&self) -> &Owner<S>;
 
     /// Returns its data.
@@ -90,7 +90,7 @@ pub trait Version<S: Sequencer> {
             let log = writer(data_mut_ref)?;
             return Ok(log);
         }
-        Err(Error::Fail)
+        Err(Error::UnexpectedState)
     }
 
     /// Returns `true` if the [Version] predates the [Snapshot].
@@ -131,7 +131,7 @@ pub trait Version<S: Sequencer> {
 
 /// [Owner] is a mandatory field in a [Version] in order for the [Version] to be correctly
 /// locked and updated.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Owner<S: Sequencer>(ebr::AtomicArc<JournalAnchor<S>>);
 
 impl<S: Sequencer> Owner<S> {
@@ -168,6 +168,7 @@ impl<S: Sequencer> Drop for Owner<S> {
 /// It semantically owns the [Version] while the `Rust` compiler cannot deduce anything related
 /// to a database `MVCC` mechanism, and therefore instantiating a [Locker] requires calls to
 /// [transmute](std::mem::transmute) to prolong lifetimes of references.
+#[derive(Debug)]
 pub struct Locker<S: Sequencer> {
     /// [Locker] has a reference to the version owner field of the [Version].
     owner_field: &'static Owner<S>,
