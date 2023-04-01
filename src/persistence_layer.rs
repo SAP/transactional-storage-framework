@@ -10,12 +10,12 @@ use std::fmt::Debug;
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sync {
     /// Recovers the database.
     ///
-    /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
+    /// If a specific instant is given, it only recovers the storage up until the time point.
     ///
     /// # Errors
     ///
     /// Returns an [`Error`] if the database could not be recovered.
-    fn recover(&self, until: Option<S::Clock>) -> Result<(), Error>;
+    fn recover(&self, until: Option<S::Instant>) -> Result<(), Error>;
 }
 
 /// Volatile memory device.
@@ -26,7 +26,7 @@ pub struct VolatileDevice<S: Sequencer> {
 
 impl<S: Sequencer> PersistenceLayer<S> for VolatileDevice<S> {
     #[inline]
-    fn recover(&self, _until: Option<<S as Sequencer>::Clock>) -> Result<(), Error> {
+    fn recover(&self, _until: Option<<S as Sequencer>::Instant>) -> Result<(), Error> {
         Ok(())
     }
 }

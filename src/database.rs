@@ -39,7 +39,7 @@ pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
     container_map: HashIndex<String, ebr::Arc<Container<S>>>,
 
     /// The database access controller.
-    access_controller: AccessController,
+    access_controller: AccessController<S>,
 
     /// The persistence layer of the database.
     #[allow(dead_code)]
@@ -132,7 +132,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         _journal: &'j mut Journal<'s, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
-        let _: &AccessController = &self.kernel.access_controller;
+        let _: &AccessController<S> = &self.kernel.access_controller;
         let container = ebr::Arc::new(Container::new(metadata));
         match self
             .kernel

@@ -62,7 +62,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
             self.transaction.sequencer(),
             Some(
                 self.transaction
-                    .transaction_snapshot(self.anchor.creation_clock),
+                    .transaction_snapshot(self.anchor.creation_instant),
             ),
             Some(self.journal_snapshot()),
         )
@@ -75,7 +75,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     ) -> Journal<'s, 't, S, P> {
         Journal {
             transaction,
-            anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.clock())),
+            anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.now())),
         }
     }
 
@@ -87,7 +87,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
 
 impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P> {
     fn drop(&mut self) {
-        if self.anchor.submit_clock() == 0 {
+        if self.anchor.submit_instant() == 0 {
             // Send `anchor` to the garbage collector.
         }
     }
@@ -99,8 +99,8 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P
 pub struct Anchor<S: Sequencer> {
     #[allow(unused)]
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-    creation_clock: usize,
-    submit_clock: AtomicUsize,
+    creation_instant: usize,
+    submit_instant: AtomicUsize,
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
@@ -110,23 +110,26 @@ impl<S: Sequencer> Anchor<S> {
         &self.next
     }
 
-    /// Assigns the transaction local clock when it is submitted.
-    pub(super) fn assign_submit_clock(&self, clock: usize) {
-        debug_assert_ne!(clock, 0);
-        self.submit_clock.store(clock, Release);
+    /// Assigns the instant when the it was submitted to the transaction.
+    pub(super) fn assign_submit_instant(&self, instant: usize) {
+        debug_assert_ne!(instant, 0);
+        self.submit_instant.store(instant, Release);
     }
 
-    /// Reads its submit clock.
-    pub(super) fn submit_clock(&self) -> usize {
-        self.submit_clock.load(Relaxed)
+    /// Reads its submit instant.
+    pub(super) fn submit_instant(&self) -> usize {
+        self.submit_instant.load(Relaxed)
     }
 
     /// Creates a new [`Anchor`].
-    fn new(transaction_anchor: ebr::Arc<TransactionAnchor<S>>, creation_clock: usize) -> Anchor<S> {
+    fn new(
+        transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+        creation_instant: usize,
+    ) -> Anchor<S> {
         Anchor {
             transaction_anchor,
-            creation_clock,
-            submit_clock: AtomicUsize::new(0),
+            creation_instant,
+            submit_instant: AtomicUsize::new(0),
             next: ebr::AtomicArc::null(),
         }
     }

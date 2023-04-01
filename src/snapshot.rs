@@ -2,14 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::sequencer::ToInstant;
 use super::Sequencer;
+use std::cmp;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::Acquire;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
 ///
-/// A [`Snapshot`] has a [`Clock`](Sequencer::Clock) value corresponding to a database snapshot,
-/// and the database snapshot stays stable until the [`Snapshot`] is dropped.
+/// A [`Snapshot`] has a [`Instant`](Sequencer::Instant) value corresponding to a database
+/// snapshot, and the database snapshot stays stable until the [`Snapshot`] is dropped.
 ///
 /// There are three types of [`Snapshot`] which can be created using different methods.
 ///  1. [`Database::snapshot`](super::Database::snapshot) creates a [`Snapshot`] which only
@@ -37,7 +39,7 @@ pub(super) struct TransactionSnapshot<'t> {
     #[allow(dead_code)]
     anchor_addr: usize,
     #[allow(dead_code)]
-    transaction_clock: usize,
+    instant: usize,
     _phantom: PhantomData<&'t ()>,
 }
 
@@ -66,12 +68,26 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
     }
 }
 
+impl<'s, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'s, 't, 'j, S> {
+    #[inline]
+    fn eq(&self, other: &S::Instant) -> bool {
+        self.tracker.to_instant().eq(other)
+    }
+}
+
+impl<'s, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'s, 't, 'j, S> {
+    #[inline]
+    fn partial_cmp(&self, other: &S::Instant) -> Option<cmp::Ordering> {
+        self.tracker.to_instant().partial_cmp(other)
+    }
+}
+
 impl<'t> TransactionSnapshot<'t> {
     /// Creates a new [`TransactionSnapshot`].
-    pub(super) fn new(anchor_addr: usize, transaction_clock: usize) -> TransactionSnapshot<'t> {
+    pub(super) fn new(anchor_addr: usize, instant: usize) -> TransactionSnapshot<'t> {
         TransactionSnapshot {
             anchor_addr,
-            transaction_clock,
+            instant,
             _phantom: PhantomData,
         }
     }
