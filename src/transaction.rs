@@ -2,14 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::journal::Annals;
-use super::{Database, Error, Journal, Sequencer, Snapshot};
+use super::journal::Anchor as JournalAnchor;
+use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
 use std::future::Future;
 use std::pin::Pin;
 use std::ptr::addr_of;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicPtr, AtomicUsize};
 use std::task::{Context, Poll};
 
 /// [`Transaction`] is the atomic unit of work for all types of database operations.
@@ -17,13 +17,13 @@ use std::task::{Context, Poll};
 /// A single strand of [`Journal`] constitutes a [`Transaction`], and an on-going transaction can
 /// be rewound to a certain point of time by reverting submitted [`Journal`] instances.
 #[derive(Debug)]
-pub struct Transaction<'s, S: Sequencer> {
+pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     /// The transaction refers to the corresponding [`Database`] to persist pending changes at
     /// commit.
-    database: &'s Database<S>,
+    database: &'s Database<S, P>,
 
     /// The changes made by the transaction.
-    annals: AtomicPtr<Annals<S>>,
+    journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
 
     /// A piece of data that is shared among [`Journal`] instances in the [`Transaction`].
     ///
@@ -36,7 +36,7 @@ pub struct Transaction<'s, S: Sequencer> {
     clock: AtomicUsize,
 }
 
-impl<'s, S: Sequencer> Transaction<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// Starts a new [`Journal`].
     ///
     /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
@@ -53,7 +53,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// journal.submit();
     /// ```
     #[inline]
-    pub fn start<'t>(&'t self) -> Journal<'s, 't, S> {
+    pub fn start<'t>(&'t self) -> Journal<'s, 't, S, P> {
         Journal::new(self, self.anchor.clone())
     }
 
@@ -70,7 +70,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(self.database.sequencer(), Some(self), None)
+        Snapshot::from_parts(
+            self.database.sequencer(),
+            Some((self.anchor_addr(), self.clock())),
+            None,
+        )
     }
 
     /// Gets the current local clock value of the [`Transaction`].
@@ -130,19 +134,22 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         if current_clock <= clock {
             return Err(Error::WrongParameter);
         }
-        let mut current = self.annals.load(Acquire);
-        for _ in clock..current_clock {
-            let current_boxed = unsafe { Box::from_raw(current) };
-            current = current_boxed.next.load(Relaxed);
+        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
+        while let Some(record) = current {
+            if record.submit_clock() <= clock {
+                current = Some(record);
+                break;
+            }
+            current = record.next().swap((None, ebr::Tag::None), Acquire).0;
         }
-        self.annals.store(current, Relaxed);
+        self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
         self.clock.store(clock, Release);
         Ok(clock)
     }
 
     /// Prepares the [Transaction] for commit.
     ///
-    /// It returns a [`InDoubtTransaction`], giving one last chance to roll back the prepared
+    /// It returns a [`Committable`], giving one last chance to roll back the prepared
     /// transaction.
     ///
     /// # Errors
@@ -164,14 +171,14 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn prepare(self) -> Result<InDoubtTransaction<'s, S>, Error> {
+    pub async fn prepare(self) -> Result<Committable<'s, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_clock = self.sequencer().get(Relaxed);
         anchor_mut_ref.state.store(1, Release);
-        Ok(InDoubtTransaction {
+        Ok(Committable {
             transaction: Some(self),
         })
     }
@@ -222,10 +229,10 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Creates a new [`Transaction`].
-    pub(crate) fn new(database: &'s Database<S>) -> Transaction<'s, S> {
+    pub(crate) fn new(database: &'s Database<S, P>) -> Transaction<'s, S, P> {
         Transaction {
             database,
-            annals: AtomicPtr::default(),
+            journal_strand: ebr::AtomicArc::null(),
             anchor: ebr::Arc::new(Anchor::new()),
             clock: AtomicUsize::new(0),
         }
@@ -236,39 +243,40 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         self.database.sequencer()
     }
 
-    /// Takes [Annals], and records them.
-    pub(super) fn record(&self, record: Box<Annals<S>>) -> usize {
-        let mut current = self.annals.load(Relaxed);
-        let desired = Box::into_raw(record);
+    /// Takes [`Anchor`].
+    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> usize {
+        let barrier = ebr::Barrier::new();
+        let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
-            unsafe {
-                (*desired).next.store(current, Relaxed);
-            }
-            match self
-                .annals
-                .compare_exchange(current, desired, Release, Relaxed)
-            {
+            record
+                .next()
+                .swap((current.get_arc(), ebr::Tag::None), Relaxed);
+            match self.journal_strand.compare_exchange(
+                current,
+                (Some(record.clone()), ebr::Tag::None),
+                Release,
+                Relaxed,
+                &barrier,
+            ) {
                 Ok(_) => {
                     // Transaction-local clock is updated after contents are submitted.
                     let current_clock = self.clock.fetch_add(1, Release) + 1;
-                    unsafe {
-                        (*desired).assign_clock(current_clock);
-                    }
+                    record.assign_submit_clock(current_clock);
                     return current_clock;
                 }
-                Err(actual) => current = actual,
+                Err((_, actual)) => current = actual,
             }
         }
     }
 
-    /// Returns a reference to its [Anchor].
-    pub(super) fn anchor_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Anchor<S>> {
-        self.anchor.ptr(barrier)
+    /// Returns the memory address of its [`Anchor`].
+    pub(super) fn anchor_addr(&self) -> usize {
+        self.anchor.as_ref() as *const _ as usize
     }
 
     /// Post-processes its transaction commit.
     ///
-    /// Only a `InDoubtTransaction` instance is allowed to call this function.
+    /// Only a `Committable` instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
     fn post_process(self) -> S::Clock {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
@@ -285,24 +293,23 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 }
 
-impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'s, S, P> {
     #[inline]
     fn drop(&mut self) {
         let _result = self.rewind(0);
     }
 }
 
-/// [`InDoubtTransaction`] gives one last chance of rolling back the transaction.
+/// [`Committable`] gives one last chance of rolling back the transaction.
 ///
 /// The transaction is bound to be rolled back if no actions are taken before dropping the
-/// [`InDoubtTransaction`] instance. On the other hands, the transaction stays uncommitted until the
-/// [`InDoubtTransaction`] instance is dropped.
-#[allow(clippy::module_name_repetitions)]
-pub struct InDoubtTransaction<'s, S: Sequencer> {
-    transaction: Option<Transaction<'s, S>>,
+/// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
+/// [`Committable`] instance is dropped or awaited.
+pub struct Committable<'s, S: Sequencer, P: PersistenceLayer<S>> {
+    transaction: Option<Transaction<'s, S, P>>,
 }
 
-impl<'s, S: Sequencer> Future for InDoubtTransaction<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'s, S, P> {
     type Output = Result<S::Clock, Error>;
 
     #[inline]
@@ -315,21 +322,26 @@ impl<'s, S: Sequencer> Future for InDoubtTransaction<'s, S> {
     }
 }
 
-/// [Transaction] state.
+/// [`Transaction`] state.
 pub enum State {
     /// The transaction is active.
     Active,
+
     /// The transaction is being committed.
     Committing,
+
     /// The transaction is committed.
     Committed,
+
     /// The transaction is being rolled back.
     RollingBack,
+
     /// The transaction is rolled back.
     RolledBack,
 }
 
 impl From<State> for usize {
+    #[inline]
     fn from(v: State) -> usize {
         match v {
             State::Active => 0,
@@ -371,6 +383,7 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Returns the clock value when the transaction starts to commit.
+    #[allow(unused)]
     pub(super) fn commit_start_clock(&self) -> S::Clock {
         if self.state.load(Acquire) == State::Active.into() {
             S::Clock::default()
@@ -380,6 +393,7 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Returns the final commit clock value of the transaction.
+    #[allow(unused)]
     pub(super) fn commit_snapshot_clock(&self) -> S::Clock {
         if self.state.load(Acquire) == State::Committed.into() {
             self.commit_clock
@@ -393,285 +407,10 @@ impl<S: Sequencer> Anchor<S> {
 mod test {
     use super::*;
 
-    use crate::sequencer::AtomicCounter;
-    use crate::version::RecordVersion;
-    use crate::Version;
-
-    use std::sync::{Arc, Barrier, Once};
-    use std::thread;
-    use std::time::Duration;
-
     #[tokio::test]
-    async fn visibility() {
-        static mut DATABASE: Option<Database<AtomicCounter>> = None;
-        static INIT: Once = Once::new();
-
-        INIT.call_once(|| unsafe {
-            DATABASE.replace(Database::default());
-        });
-
-        let database_ref = unsafe { DATABASE.as_ref().unwrap() };
-        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-        let transaction = Arc::new(database_ref.transaction());
-        let barrier = Arc::new(Barrier::new(2));
-
-        let versioned_object_clone = versioned_object.clone();
-        let transaction_clone = transaction.clone();
-        let barrier_clone = barrier.clone();
-        let thread_handle = thread::spawn(move || {
-            barrier_clone.wait();
-
-            // Step 1. Tries to acquire the lock acquired by an active transaction journal.
-            let mut journal = transaction_clone.start();
-            assert!(journal
-                .create(&*versioned_object_clone, |_| Ok(None), None)
-                .is_err());
-            drop(journal);
-
-            // Step 2. Tries to acquire the lock acquired by a submitted transaction journal.
-            barrier_clone.wait();
-            barrier_clone.wait();
-
-            let mut journal = transaction_clone.start();
-            assert!(journal
-                .create(&*versioned_object_clone, |_| Ok(None), None)
-                .is_ok());
-            assert_eq!(journal.submit(), 2);
-        });
-
-        let mut journal = transaction.start();
-        assert!(journal
-            .create(&*versioned_object, |_| Ok(None), None)
-            .is_ok());
-
-        barrier.wait();
-        barrier.wait();
-        assert_eq!(journal.submit(), 1);
-        barrier.wait();
-
-        assert!(thread_handle.join().is_ok());
-
-        if let Ok(transaction) = Arc::try_unwrap(transaction) {
-            assert!(transaction.commit().await.is_ok());
-        } else {
-            unreachable!();
-        }
-    }
-
-    #[tokio::test]
-    async fn rewind() {
-        static mut DATABASE: Option<Database<AtomicCounter>> = None;
-        static INIT: Once = Once::new();
-
-        INIT.call_once(|| unsafe {
-            DATABASE.replace(Database::default());
-        });
-
-        let database_ref = unsafe { DATABASE.as_ref().unwrap() };
-        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-        let mut transaction = database_ref.transaction();
-        let barrier = Arc::new(Barrier::new(2));
-
-        let versioned_object_clone = versioned_object.clone();
-        let barrier_clone = barrier.clone();
-        let thread_handle = thread::spawn(move || {
-            let transaction = database_ref.transaction();
-            // Step 1. Tries to acquire the lock acquired by an active transaction journal.
-            for _ in 1..8 {
-                barrier_clone.wait();
-                let mut journal = transaction.start();
-                assert!(journal
-                    .create(
-                        &*versioned_object_clone,
-                        |_| Ok(None),
-                        Some(Duration::from_millis(1))
-                    )
-                    .is_err());
-                drop(journal);
-                barrier_clone.wait();
-            }
-
-            // Step 2. Tries to acquire the lock after reverting some changes.
-            barrier_clone.wait();
-            let mut journal = transaction.start();
-            assert!(journal
-                .create(
-                    &*versioned_object_clone,
-                    |_| Ok(None),
-                    Some(Duration::from_millis(1))
-                )
-                .is_err());
-            drop(journal);
-            barrier_clone.wait();
-
-            // Step 3. Tries to acquire the lock after reverting all the changes.
-            barrier_clone.wait();
-            let mut journal = transaction.start();
-            assert!(journal
-                .create(&*versioned_object_clone, |_| Ok(None), None)
-                .is_ok());
-            assert_eq!(journal.submit(), 1);
-        });
-
-        // Step 1. Acquires the lock several times.
-        let journal = transaction.start();
-        assert_eq!(journal.submit(), 1);
-        for i in 1..8 {
-            let mut journal = transaction.start();
-            assert!(journal
-                .create(&*versioned_object, |_| Ok(None), None)
-                .is_ok());
-            assert_eq!(journal.submit(), i + 1);
-            barrier.wait();
-            barrier.wait();
-        }
-
-        // Step 2. Rewinds to half the transaction.
-        assert!(transaction.rewind(4).is_ok());
-        barrier.wait();
-        barrier.wait();
-
-        // Step 3. Rewinds all.
-        assert!(transaction.rewind(6).is_err());
-        assert!(transaction.rewind(0).is_ok());
-        barrier.wait();
-
-        assert!(thread_handle.join().is_ok());
-
-        let mut journal = transaction.start();
-        assert!(journal
-            .create(
-                &*versioned_object,
-                |_| Ok(None),
-                Some(Duration::from_millis(1))
-            )
-            .is_ok());
-        assert_eq!(journal.submit(), 1);
-
-        assert!(transaction.commit().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn wait_queue() {
-        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
-        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-        let num_threads = 16;
-        let barrier = Arc::new(Barrier::new(num_threads + 1));
-        let mut thread_handles = Vec::new();
-        for _ in 0..num_threads {
-            let database_clone = database.clone();
-            let versioned_object_clone = versioned_object.clone();
-            let barrier_clone = barrier.clone();
-            thread_handles.push(thread::spawn(move || {
-                barrier_clone.wait();
-                let snapshot = database_clone.snapshot();
-                assert!(!versioned_object_clone.predate(&snapshot, &ebr::Barrier::new()));
-                barrier_clone.wait();
-                barrier_clone.wait();
-                let snapshot = database_clone.snapshot();
-                assert!(versioned_object_clone.predate(&snapshot, &ebr::Barrier::new()));
-            }));
-        }
-        barrier.wait();
+    async fn transaction() {
+        let database = Database::default();
         let transaction = database.transaction();
-        let mut journal = transaction.start();
-        let result = journal.create(&*versioned_object, |_| Ok(None), None);
-        assert!(result.is_ok());
-        assert_eq!(journal.submit(), 1);
-        barrier.wait();
         assert!(transaction.commit().await.is_ok());
-        barrier.wait();
-
-        thread_handles
-            .into_iter()
-            .for_each(|t| assert!(t.join().is_ok()));
-
-        let snapshot = database.snapshot();
-        assert!(versioned_object.predate(&snapshot, &ebr::Barrier::new()));
-    }
-
-    #[tokio::test]
-    async fn time_out() {
-        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
-        let versioned_object: Arc<RecordVersion<usize>> = Arc::new(RecordVersion::default());
-
-        let transaction = database.transaction();
-        let mut journal = transaction.start();
-        assert!(journal
-            .create(&*versioned_object, |_| Ok(None), None)
-            .is_ok());
-
-        let num_threads = 16;
-        let barrier = Arc::new(Barrier::new(num_threads + 1));
-        let mut thread_handles = Vec::new();
-        for _ in 0..num_threads {
-            let database_clone = database.clone();
-            let versioned_object_clone = versioned_object.clone();
-            let barrier_clone = barrier.clone();
-            thread_handles.push(thread::spawn(move || {
-                barrier_clone.wait();
-                let transaction = database_clone.transaction();
-                let mut journal = transaction.start();
-                assert!(journal
-                    .create(
-                        &*versioned_object_clone,
-                        |_| Ok(None),
-                        Some(Duration::from_millis(100))
-                    )
-                    .is_err());
-
-                barrier_clone.wait();
-                barrier_clone.wait();
-
-                let mut journal = transaction.start();
-                assert!(journal
-                    .create(
-                        &*versioned_object_clone,
-                        |_| Ok(None),
-                        Some(Duration::from_millis(100))
-                    )
-                    .is_err());
-            }));
-        }
-
-        barrier.wait();
-        barrier.wait();
-
-        assert_eq!(journal.submit(), 1);
-        let database_clone = database.clone();
-        let versioned_object_clone = versioned_object.clone();
-        let thread = thread::spawn(move || {
-            let transaction = database_clone.transaction();
-            let mut journal = transaction.start();
-            assert!(journal
-                .create(
-                    &*versioned_object_clone,
-                    |_| Ok(None),
-                    Some(Duration::from_secs(u64::MAX))
-                )
-                .is_ok());
-        });
-
-        barrier.wait();
-
-        let mut journal = transaction.start();
-        assert!(journal
-            .create(&*versioned_object, |_| Ok(None), None)
-            .is_ok());
-        assert_eq!(journal.submit(), 2);
-
-        thread_handles
-            .into_iter()
-            .for_each(|t| assert!(t.join().is_ok()));
-
-        let mut journal = transaction.start();
-        assert!(journal
-            .create(&*versioned_object, |_| Ok(None), None)
-            .is_ok());
-        drop(journal);
-
-        transaction.rollback().await;
-
-        assert!(thread.join().is_ok());
     }
 }

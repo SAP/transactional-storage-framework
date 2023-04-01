@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 /// Developers are able to implement their own sequencing mechanism other than a simple atomic
 /// counter by implementing the [`Sequencer`] trait, for instance, the system timestamp generator
 /// can directly be used, or an efficient hardware-aided counter can also be incorporated.
-pub trait Sequencer: 'static + Debug + Default {
+pub trait Sequencer: 'static + Debug + Default + Send + Sync {
     /// [`Clock`](Sequencer::Clock) is a partially ordered type representing a single point of time
     /// in a system.
     ///

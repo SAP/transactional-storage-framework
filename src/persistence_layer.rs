@@ -2,36 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Container, Error, Sequencer, Transaction};
-use scc::ebr;
+use super::{Error, Sequencer};
 use std::fmt::Debug;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
 /// the persistence layer of the transactional storage system.
-pub trait PersistenceLayer<S: Sequencer>: Debug + Send + Sync {
-    /// Submits the given data to the log buffer.
-    ///
-    /// It returns the start and end log sequence number pair of the submitted data.
-    /// The given transaction is associated to the log data, thereby enabling it to recover transactions.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    fn submit(
-        &self,
-        log_data: Vec<u8>,
-        transaction: &Transaction<S>,
-    ) -> Result<(usize, usize), Error>;
-
-    /// Persists the log buffer up to the given log position.
-    ///
-    /// It returns the max flushed log sequence number.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    fn persist(&self, position: usize) -> Result<usize, Error>;
-
+pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sync {
     /// Recovers the storage.
     ///
     /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
@@ -40,143 +16,17 @@ pub trait PersistenceLayer<S: Sequencer>: Debug + Send + Sync {
     ///
     /// Returns an [`Error`] if the database could not be recovered.
     fn recover(&self, until: Option<S::Clock>) -> Result<(), Error>;
-
-    /// Loads a specific container.
-    ///
-    /// A container can be unloaded from memory without a logger, but it requires a logger to load data.
-    fn load(&self, path: &str) -> Option<ebr::Arc<Container<S>>>;
 }
 
-/// [`LogState`] denotes the state of a log record.
-#[derive(Debug)]
-pub enum LogState {
-    /// The log data is in memory.
-    Memory(Vec<u8>),
-
-    /// The log data is passed to a Logger.
-    ///
-    /// The usize pair is the start and end positions in the log buffer.
-    Pending(usize, usize),
-
-    /// The log data is fully persisted.
-    ///
-    /// The max known persisted log position.
-    Persisted(usize),
+/// Volatile memory device.
+#[derive(Debug, Default)]
+pub struct VolatileDevice<S: Sequencer> {
+    _phantom: std::marker::PhantomData<S>,
 }
 
-/// [`Log`] stores data to be persisted.
-#[derive(Debug)]
-pub struct Log {
-    /// The data stored in the vector is persisted.
-    ///
-    /// log being None indicates that the Log instance is invalid.
-    log: Option<LogState>,
-}
-
-impl Log {
-    /// Creates a new Log.
-    #[must_use]
-    pub fn new() -> Log {
-        Log::default()
-    }
-
-    /// Passes the log data to the logger.
-    ///
-    /// The given transaction can be used by the logger for transaction recovery.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    pub fn submit<S: Sequencer, L: PersistenceLayer<S>>(
-        &mut self,
-        logger: &L,
-        transaction: &Transaction<S>,
-    ) -> Result<(), Error> {
-        if let Some(LogState::Memory(data)) = self.log.take() {
-            match logger.submit(data, transaction) {
-                Ok((start_position, end_position)) => {
-                    self.log
-                        .replace(LogState::Pending(start_position, end_position));
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(error);
-                }
-            }
-        }
-        Err(Error::UnexpectedState)
-    }
-
-    /// Makes sure that the pending log is persisted.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned on failure.
-    pub fn persist<S: Sequencer, L: PersistenceLayer<S>>(
-        &mut self,
-        logger: &L,
-    ) -> Result<(), Error> {
-        if let Some(LogState::Pending(_, end_position)) = self.log.take() {
-            match logger.persist(end_position) {
-                Ok(max_persisted_position) => {
-                    self.log
-                        .replace(LogState::Persisted(max_persisted_position));
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(error);
-                }
-            }
-        }
-        Err(Error::UnexpectedState)
-    }
-}
-
-impl Default for Log {
+impl<S: Sequencer> PersistenceLayer<S> for VolatileDevice<S> {
     #[inline]
-    fn default() -> Log {
-        Log {
-            log: Some(LogState::Memory(Vec::new())),
-        }
-    }
-}
-
-/// [`FileLogger`] is a file-based logger that pushes data into files sequentially.
-///
-/// Checkpoint operations entail log file truncation.
-#[allow(clippy::module_name_repetitions)]
-#[derive(Debug)]
-pub struct FileLogger<S: Sequencer> {
-    _path: String,
-    _invalid_clock: S::Clock,
-}
-
-impl<S: Sequencer> FileLogger<S> {
-    /// Creates  new [`FileLogger`].
-    #[must_use]
-    pub fn new(anchor: &str) -> FileLogger<S> {
-        FileLogger {
-            _path: String::from(anchor),
-            _invalid_clock: S::Clock::default(),
-        }
-    }
-}
-
-impl<S: Sequencer> PersistenceLayer<S> for FileLogger<S> {
-    fn submit(
-        &self,
-        _log_data: Vec<u8>,
-        _transaction: &Transaction<S>,
-    ) -> Result<(usize, usize), Error> {
-        Err(Error::UnexpectedState)
-    }
-    fn persist(&self, _position: usize) -> Result<usize, Error> {
-        Err(Error::UnexpectedState)
-    }
-    fn recover(&self, _until: Option<S::Clock>) -> Result<(), Error> {
+    fn recover(&self, _until: Option<<S as Sequencer>::Clock>) -> Result<(), Error> {
         Ok(())
-    }
-    fn load(&self, _path: &str) -> Option<ebr::Arc<Container<S>>> {
-        None
     }
 }

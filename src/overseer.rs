@@ -2,8 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::database::Kernel;
+use super::{PersistenceLayer, Sequencer};
 use std::convert::Into;
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::Arc;
 use std::thread::{self, available_parallelism, JoinHandle};
 
 /// [`Overseer`] wakes up timed out tasks and deletes unreachable database objects.
@@ -26,11 +29,12 @@ pub enum Task {
 impl Overseer {
     /// Spawns an [`Overseer`].
     #[inline]
-    pub(crate) fn spawn() -> Overseer {
+    pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(kernel: Arc<Kernel<S, P>>) -> Overseer {
         let (sender, receiver) =
             mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into));
         Overseer {
             worker: Some(thread::spawn(move || {
+                let _kernel = kernel;
                 if let Ok(Task::Shutdown) = receiver.recv() {
                     //
                 }
@@ -43,7 +47,7 @@ impl Overseer {
     ///
     /// Returns `false` if it fails to post the task.
     #[inline]
-    pub(crate) fn try_post(&self, task: Task) -> bool {
+    pub(super) fn try_post(&self, task: Task) -> bool {
         self.sender.try_send(task).is_ok()
     }
 }
