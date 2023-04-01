@@ -5,10 +5,9 @@
 use super::snapshot::JournalSnapshot;
 use super::transaction::Anchor as TransactionAnchor;
 use super::{PersistenceLayer, Sequencer, Snapshot, Transaction};
+use scc::ebr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Relaxed, Release};
-
-use scc::ebr;
 
 /// [`Journal`] keeps the change history.
 #[derive(Debug)]

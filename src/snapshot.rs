@@ -31,7 +31,7 @@ pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
     _phantom: PhantomData<&'s ()>,
 }
 
-/// Data representing the current state of the [`Transaction`].
+/// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug)]
 pub(super) struct TransactionSnapshot<'t> {
     #[allow(dead_code)]
@@ -41,7 +41,7 @@ pub(super) struct TransactionSnapshot<'t> {
     _phantom: PhantomData<&'t ()>,
 }
 
-/// Data representing the current state of the [`Journal`].
+/// Data representing the current state of the [`Journal`](super::Transaction).
 #[derive(Clone, Debug)]
 pub(super) struct JournalSnapshot<'t, 'j> {
     #[allow(dead_code)]
