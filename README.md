@@ -15,13 +15,13 @@ SPDX-License-Identifier: Apache-2.0
 
 `Transactional Storage Framework` is a software framework providing methods and type traits for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and several of them allow developers to define desired semantics of actions.
 
-* [tss::Database](#Database)
-* [tss::Container](#Container)
-* [tss::Sequencer](#Sequencer)
-* [tss::Snapshot](#Snapshot)
-* [tss::Transaction](#Transaction)
-* [tss::AccessController](#AccessController)
-* [tss::PersistenceLayer](#PersistenceLayer)
+* [sap_tsf::Database](#Database)
+* [sap_tsf::Container](#Container)
+* [sap_tsf::Sequencer](#Sequencer)
+* [sap_tsf::Snapshot](#Snapshot)
+* [sap_tsf::Transaction](#Transaction)
+* [sap_tsf::AccessController](#AccessController)
+* [sap_tsf::PersistenceLayer](#PersistenceLayer)
 
 This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are useful for scalability testing of a database operation mechanism, because commercial full-fledged database systems usually do not provide a fully isolated environment, thus making it harder for researchers to clearly spot any performance bottleneck. `Transactional Storage Framework` is a modular system that allows any developers or researchers to activate only relevant components in the system to help them test any new innovative methods for a database system.
 
@@ -32,7 +32,7 @@ This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluati
 `Database` is the main module of the whole framework, and it cannot be replaced with a customized module.
 
 ```rust
-use tss::Database;
+use sap_tsf::Database;
 
 let database = Database::default();
 ```
@@ -42,7 +42,7 @@ let database = Database::default();
 `Container` is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string. The layout of a `Container` can be customized via the associated `Metadata`.
 
 ```rust
-use tss::Database;
+use sap_tsf::Database;
 
 let database = Database::default();
 
@@ -66,7 +66,7 @@ let container_handle = database.create_container(name, metadata, &mut journal, N
 `Transaction` represents a set of changes made to a `Database` that can be atomically committed. The module cannot be replaced with a new one, however developers are able to add / modify / remove transactional semantics easily since the interface and code are simple enough to understand.
 
 ```rust
-use tss::Database;
+use sap_tsf::Database;
 
 let database = Database::default();
 let database_snapshot = database.snapshot();

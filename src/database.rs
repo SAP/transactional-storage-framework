@@ -52,7 +52,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, VolatileDevice};
+    /// use sap_tsf::{AtomicCounter, Database, VolatileDevice};
     ///
     /// let database: Database<AtomicCounter> =
     ///     Database::with_persistence_layer(VolatileDevice::default());
@@ -75,7 +75,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::Database;
+    /// use sap_tsf::Database;
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -91,7 +91,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::Database;
+    /// use sap_tsf::Database;
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -112,7 +112,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Metadata};
+    /// use sap_tsf::{Database, Metadata};
     ///
     /// let database = Database::default();
     /// let name = "hello".to_string();
@@ -154,7 +154,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Metadata};
+    /// use sap_tsf::{Database, Metadata};
     ///
     /// let database = Database::default();
     /// let name = "hello";
@@ -201,7 +201,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Metadata};
+    /// use sap_tsf::{Database, Metadata};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -240,7 +240,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Metadata};
+    /// use sap_tsf::{Database, Metadata};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -289,7 +289,7 @@ impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
     /// # Examples
     ///
     /// ```
-    /// use tss::Database;
+    /// use sap_tsf::Database;
     ///
     /// let database = Database::default();
     /// ```
