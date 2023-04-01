@@ -15,7 +15,8 @@ pub struct AccessController<S: Sequencer> {
 
 /// [`ToObjectID`] derives a fixed [`usize`] value for the instance.
 pub trait ToObjectID {
-    /// The returned value should be unique in the process during the lifetime of the instance.
+    /// It must always return the same value for the same `self`, and the value has to be unique in
+    /// the process during the lifetime of `self`.
     fn to_access_id(&self) -> usize;
 }
 

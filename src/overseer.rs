@@ -29,7 +29,9 @@ pub enum Task {
 impl Overseer {
     /// Spawns an [`Overseer`].
     #[inline]
-    pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(kernel: Arc<Kernel<S, P>>) -> Overseer {
+    pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(
+        kernel: Arc<Kernel<S, P>>,
+    ) -> Overseer {
         let (sender, receiver) =
             mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into));
         Overseer {
