@@ -118,7 +118,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// let name = "hello".to_string();
     /// let metadata = Metadata::default();
     /// let transaction = database.transaction();
-    /// let mut journal = transaction.start();
+    /// let mut journal = transaction.journal();
     /// async {
     ///     let result = database.create_container(name, metadata, &mut journal, None).await;
     ///     assert!(result.is_ok());
@@ -161,7 +161,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// let metadata = Metadata::default();
     /// let new_name = "hi".to_string();
     /// let transaction = database.transaction();
-    /// let mut journal = transaction.start();
+    /// let mut journal = transaction.journal();
     /// async {
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
@@ -208,7 +208,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// let name = "hello";
     /// let metadata = Metadata::default();
     /// async {
-    ///     let mut journal = transaction.start();
+    ///     let mut journal = transaction.journal();
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
     ///     assert!(create_result.is_ok());
@@ -247,13 +247,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// let name = "hello";
     /// let metadata = Metadata::default();
     /// async {
-    ///     let mut journal = transaction.start();
+    ///     let mut journal = transaction.journal();
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
     ///     assert!(create_result.is_ok());
     ///     journal.submit();
     ///     let snapshot = transaction.snapshot();
-    ///     let mut journal = transaction.start();
+    ///     let mut journal = transaction.journal();
     ///     let drop_result =
     ///         database.drop_container(name, &snapshot, &mut journal, None).await;
     ///     assert!(drop_result.is_ok());
@@ -328,7 +328,7 @@ mod test {
         let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
         let transaction = database.transaction();
         let snapshot = transaction.snapshot();
-        let mut journal = transaction.start();
+        let mut journal = transaction.journal();
         let metadata = Metadata::default();
         assert!(database
             .create_container("hello".to_string(), metadata, &mut journal, None)

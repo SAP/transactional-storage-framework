@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
+use super::snapshot::TransactionSnapshot;
 use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
 use std::future::Future;
@@ -12,7 +13,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::task::{Context, Poll};
 
-/// [`Transaction`] is the atomic unit of work for all types of database operations.
+/// [`Transaction`] is the atomic unit of work in a [`Database`].
 ///
 /// A single strand of [`Journal`] constitutes a [`Transaction`], and an on-going transaction can
 /// be rewound to a certain point of time by reverting submitted [`Journal`] instances.
@@ -25,9 +26,9 @@ pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     /// The changes made by the transaction.
     journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
 
-    /// A piece of data that is shared among [`Journal`] instances in the [`Transaction`].
+    /// A piece of data that is shared between [`Journal`] and [`Transaction`].
     ///
-    /// It outlives the [`Transaction`].
+    /// It outlives the [`Transaction`], and it is dropped when no database objects refer to it.
     anchor: ebr::Arc<Anchor<S>>,
 
     /// The transaction-local clock generator.
@@ -37,7 +38,7 @@ pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
-    /// Starts a new [`Journal`].
+    /// Creates a new [`Journal`].
     ///
     /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
     /// permanent, the [`Journal`] has to be submitted to the [`Transaction`].
@@ -49,11 +50,11 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
-    /// let journal = transaction.start();
+    /// let journal = transaction.journal();
     /// journal.submit();
     /// ```
     #[inline]
-    pub fn start<'t>(&'t self) -> Journal<'s, 't, S, P> {
+    pub fn journal<'t>(&'t self) -> Journal<'s, 't, S, P> {
         Journal::new(self, self.anchor.clone())
     }
 
@@ -72,7 +73,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::from_parts(
             self.database.sequencer(),
-            Some((self.anchor_addr(), self.clock())),
+            Some(self.transaction_snapshot(self.clock())),
             None,
         )
     }
@@ -89,7 +90,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
-    /// let journal = transaction.start();
+    /// let journal = transaction.journal();
     /// let clock = journal.submit();
     ///
     /// assert_eq!(transaction.clock(), 1);
@@ -120,7 +121,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// assert!(result.is_err());
     ///
     /// for _ in 0..3 {
-    ///     let journal = transaction.start();
+    ///     let journal = transaction.journal();
     ///     journal.submit();
     /// }
     ///
@@ -270,8 +271,9 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     }
 
     /// Returns the memory address of its [`Anchor`].
-    pub(super) fn anchor_addr(&self) -> usize {
-        self.anchor.as_ref() as *const _ as usize
+    pub(super) fn transaction_snapshot(&self, clock: usize) -> TransactionSnapshot {
+        debug_assert!(clock <= self.clock());
+        TransactionSnapshot::new(self.anchor.as_ref() as *const _ as usize, clock)
     }
 
     /// Post-processes its transaction commit.

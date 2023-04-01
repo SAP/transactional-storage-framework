@@ -6,9 +6,9 @@ use super::{Error, Sequencer};
 use std::fmt::Debug;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
-/// the persistence layer of the transactional storage system.
+/// the persistence layer of the database.
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sync {
-    /// Recovers the storage.
+    /// Recovers the database.
     ///
     /// If a sequencer clock value is given, it only recovers the storage up until the given time point.
     ///
