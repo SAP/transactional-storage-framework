@@ -13,23 +13,23 @@ SPDX-License-Identifier: Apache-2.0
 
 **The whole code base is currently undergoing extensive renovation.**
 
-`Transactional Storage Framework` is a software framework providing methods and type traits for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and each of them allows freedom to developers to define desired semantics of actions.
+`Transactional Storage Framework` is a software framework providing methods and type traits for a complete transactional storage system. It is aimed at enthusiastic developers and academic researchers wanting to implement and test new transactional mechanisms on a concrete code base. It consists of multiple abstract modules as follows, and several of them allow developers to define desired semantics of actions.
 
 * [tss::Database](#Database)
 * [tss::Container](#Container)
 * [tss::Sequencer](#Sequencer)
 * [tss::Snapshot](#Snapshot)
 * [tss::Transaction](#Transaction)
-* [tss::Logger](#Logger)
-* [tss::LockTable](#LockTable)
+* [tss::AccessController](#AccessController)
+* [tss::PersistenceLayer](#PersistenceLayer)
 
-This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are useful for scalability testing of a database operation mechanism, because commercial full-fledged database systems usually do not provide a fully isolated environment, thus making it harder to clearly spot any performance bottleneck. `Transactional Storage Framework` is a modular system that allows any developers or researchers to activate only relevant components in the system to help them test any new innovative methods for a database system.
+This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluation of concurrency control on real(ly) large multi-socket hardware"[1]</cite>. The authors of the paper wrote a toy program to conduct a series of experiments on a large machine in order to observe hot-spots caused by the large number of processors. It turns out that small, toy programs are useful for scalability testing of a database operation mechanism, because commercial full-fledged database systems usually do not provide a fully isolated environment, thus making it harder for researchers to clearly spot any performance bottleneck. `Transactional Storage Framework` is a modular system that allows any developers or researchers to activate only relevant components in the system to help them test any new innovative methods for a database system.
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
 ## Database
 
-`Database` is the main module of the whole framework.
+`Database` is the main module of the whole framework, and it cannot be replaced with a customized module.
 
 ```rust
 use tss::Database;
@@ -39,7 +39,7 @@ let database = Database::default();
 
 ## Container
 
-`Container` is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string.
+`Container` is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string. The layout of a `Container` can be customized via the associated `Metadata`.
 
 ```rust
 use tss::Database;
@@ -53,9 +53,17 @@ let mut journal = transaction.start();
 let container_handle = database.create_container(name, metadata, &mut journal, None).await;
 ```
 
+## Sequencer
+
+`Sequencer` defines the logical flow of time in `Database`. The default `Sequencer` is based on an atomic integer counter, however it is free to install a new customized `Sequencer` module, e.g., an implementation of `Vector Clock`, as long as the generated values are partially ordered.
+
+## Snapshot
+
+`Snapshot` is not a replaceable module, but the implementation is highly dependent on the `Sequencer` module.
+
 ## Transaction
 
-`Transaction` represents a set of changes made to a `Database` that can be atomically committed. Developers and researchers are able to add / modify / remove transactional semantics easily as the database actions are implemented in a highly flexible way. The logging format is not explicitly specified, and therefore developers can freely define the log structure, or even omit logging. The database changes made carried out by a transaction can be partially reverted by using the rewinding mechanism. Every change made in a transaction must be submitted, and the submitted change can be discarded without fully rolling back the transaction.
+`Transaction` represents a set of changes made to a `Database` that can be atomically committed. The module cannot be replaced with a new one, however developers are able to add / modify / remove transactional semantics easily since the interface and code are simple enough to understand.
 
 ```rust
 use tss::Database;
@@ -68,25 +76,12 @@ let transaction_snapshot = transaction.snapshot();
 let journal = transaction.start();
 ```
 
-## Logger
+## AccessController
 
-`Logger` is an abstract module for implementing write-ahead-logging mechanisms.
+`AccessController` maps a record onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the record.
 
-```rust
-pub trait Logger<S: Sequencer> {
-    fn new(anchor: &str) -> Self;
-    fn submit(
-        &self,
-        log_data: Vec<u8>,
-        transaction: &Transaction<S>,
-    ) -> Result<(usize, usize), Error>;
-    fn persist(&self, position: usize) -> Result<usize, Error>;
-    fn recover(&self, until: Option<S::Clock>) -> Option<ContainerHandle<S>>;
-}
-```
+## PersistenceLayer
 
-## LockTable
-
-`LockTable` is a map expressing the state of a record.
+`PersistenceLayer` is an abstract module for implementing write-ahead-logging mechanisms and point-in-time-recovery.
 
 ## [Changelog](https://github.com/SAP/transactional-storage-framework/blob/main/CHANGELOG.md)

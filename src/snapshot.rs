@@ -31,8 +31,9 @@ pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
     _phantom: PhantomData<&'s ()>,
 }
 
+/// Data representing the current state of the [`Transaction`].
 #[derive(Clone, Debug)]
-struct TransactionSnapshot<'t> {
+pub(super) struct TransactionSnapshot<'t> {
     #[allow(dead_code)]
     anchor_addr: usize,
     #[allow(dead_code)]
@@ -40,8 +41,9 @@ struct TransactionSnapshot<'t> {
     _phantom: PhantomData<&'t ()>,
 }
 
+/// Data representing the current state of the [`Journal`].
 #[derive(Clone, Debug)]
-struct JournalSnapshot<'t, 'j> {
+pub(super) struct JournalSnapshot<'t, 'j> {
     #[allow(dead_code)]
     anchor_addr: usize,
     _phantom: PhantomData<(&'t (), &'j ())>,
@@ -51,23 +53,35 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
     /// Creates a new [`Snapshot`].
     pub(super) fn from_parts(
         sequencer: &'s S,
-        transaction_snapshot: Option<(usize, usize)>,
-        journal_snapshot: Option<usize>,
+        transaction_snapshot: Option<TransactionSnapshot<'t>>,
+        journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
     ) -> Snapshot<'s, 't, 'j, S> {
         let tracker = sequencer.track(Acquire);
         Snapshot {
             tracker,
-            transaction_snapshot: transaction_snapshot.map(|(anchor_addr, transaction_clock)| {
-                TransactionSnapshot {
-                    anchor_addr,
-                    transaction_clock,
-                    _phantom: PhantomData,
-                }
-            }),
-            journal_snapshot: journal_snapshot.map(|anchor_addr| JournalSnapshot {
-                anchor_addr,
-                _phantom: PhantomData,
-            }),
+            transaction_snapshot,
+            journal_snapshot,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'t> TransactionSnapshot<'t> {
+    /// Creates a new [`TransactionSnapshot`].
+    pub(super) fn new(anchor_addr: usize, transaction_clock: usize) -> TransactionSnapshot<'t> {
+        TransactionSnapshot {
+            anchor_addr,
+            transaction_clock,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'t, 'j> JournalSnapshot<'t, 'j> {
+    /// Creates a new [`JournalSnapshot`].
+    pub(super) fn new(anchor_addr: usize) -> JournalSnapshot<'t, 'j> {
+        JournalSnapshot {
+            anchor_addr,
             _phantom: PhantomData,
         }
     }

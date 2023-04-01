@@ -13,8 +13,8 @@ pub struct AccessController {
     _table: HashMap<usize, Entry>,
 }
 
-/// [`ToAccessID`] derives a fixed [`usize`] value for the instance.
-pub trait ToAccessID {
+/// [`ToObjectID`] derives a fixed [`usize`] value for the instance.
+pub trait ToObjectID {
     /// The returned value should be unique in the process during the lifetime of the instance.
     fn to_access_id(&self) -> usize;
 }
@@ -23,7 +23,11 @@ impl AccessController {
     /// Tries to gain read access to the database object.
     #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
-    pub async fn try_read<S: Sequencer>(&self, _snapshot: Snapshot<'_, '_, '_, S>) -> bool {
+    pub async fn try_read<O: ToObjectID, S: Sequencer>(
+        &self,
+        _object: &O,
+        _snapshot: Snapshot<'_, '_, '_, S>,
+    ) -> bool {
         unimplemented!()
     }
 
@@ -37,9 +41,9 @@ impl AccessController {
     /// An [`Error`] is returned if the transaction could not take ownership.
     #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
-    pub async fn take_ownership<S: Sequencer, P: PersistenceLayer<S>>(
+    pub async fn take_ownership<O: ToObjectID, S: Sequencer, P: PersistenceLayer<S>>(
         &self,
-        _id: usize,
+        _object: &O,
         _journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
@@ -53,9 +57,9 @@ impl AccessController {
     /// An [`Error`] is returned if the lock could not be acquired.
     #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
-    pub async fn lock_exclusive<S: Sequencer, P: PersistenceLayer<S>>(
+    pub async fn lock_exclusive<O: ToObjectID, S: Sequencer, P: PersistenceLayer<S>>(
         &self,
-        _id: usize,
+        _object: &O,
         _journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
@@ -69,9 +73,9 @@ impl AccessController {
     /// An [`Error`] is returned if the lock could not be acquired.
     #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
-    pub async fn lock_shared<S: Sequencer, P: PersistenceLayer<S>>(
+    pub async fn lock_shared<O: ToObjectID, S: Sequencer, P: PersistenceLayer<S>>(
         &self,
-        _id: usize,
+        _object: &O,
         _journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
