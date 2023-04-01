@@ -46,7 +46,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -63,7 +63,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -86,7 +86,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Journal, Transaction};
+    /// use sap_tsf::{Database, Journal, Transaction};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -113,7 +113,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
@@ -160,7 +160,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
@@ -193,7 +193,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
@@ -212,7 +212,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();

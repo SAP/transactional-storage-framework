@@ -30,7 +30,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::{Database, Transaction};
+    /// use sap_tsf::{Database, Transaction};
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
@@ -49,7 +49,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use tss::Database;
+    /// use sap_tsf::Database;
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
