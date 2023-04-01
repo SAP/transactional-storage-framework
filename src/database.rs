@@ -4,10 +4,11 @@
 
 use super::overseer::{Overseer, Task};
 use super::{
-    AtomicCounter, Container, Error, Journal, LockTable, Metadata, PersistenceLayer, Sequencer,
-    Snapshot, Transaction,
+    AccessController, AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer,
+    Sequencer, Snapshot, Transaction, VolatileDevice,
 };
 use scc::{ebr, HashIndex};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// [`Database`] represents a single stand-alone transactional database.
@@ -15,88 +16,58 @@ use std::time::Instant;
 /// [`Database`] provides the interface for users to interact with each individual transactional
 /// [`Container`] in it.
 #[derive(Debug)]
-pub struct Database<S: Sequencer = AtomicCounter> {
+pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = VolatileDevice<S>> {
+    /// The kernel of the database.
+    ///
+    /// The kernel of the database has to be allocated on the heap in order to provide stable
+    /// memory addresses of some data while allowing the [`Database`] to be moved freely.
+    kernel: Arc<Kernel<S, P>>,
+
+    /// A background thread waking up timed out tasks and deleting unreachable database objects.
+    ///
+    /// `overseer` has access to `kernel` by holding a strong reference to it.
+    overseer: Overseer,
+}
+
+/// The core of [`Database`].
+#[derive(Debug)]
+pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
     /// The logical clock generator of the [`Database`].
     sequencer: S,
-
-    /// The persistence layer of the database.
-    persistence_layer: Option<Box<dyn PersistenceLayer<S>>>,
 
     /// The container map.
     container_map: HashIndex<String, ebr::Arc<Container<S>>>,
 
-    /// The lock table.
-    lock_table: LockTable,
+    /// The database access controller.
+    access_controller: AccessController,
 
-    /// A background thread waking up timed out tasks and deleting unreachable database objects.
-    overseer: Overseer,
+    /// The persistence layer of the database.
+    #[allow(dead_code)]
+    persistence_layer: P,
 }
 
-impl<S: Sequencer> Database<S> {
-    /// Creates an empty [`Database`] instance.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{AtomicCounter, Database, FileLogger};
-    ///
-    /// let database: Database<AtomicCounter> = Database::new();
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn new() -> Database<S> {
-        Database {
-            sequencer: S::default(),
-            persistence_layer: None,
-            container_map: HashIndex::default(),
-            lock_table: LockTable::default(),
-            overseer: Overseer::spawn(),
-        }
-    }
-
+impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Creates a new [`Database`] instance from the specified [`PersistenceLayer`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use tss::{AtomicCounter, Database, FileLogger};
+    /// use tss::{AtomicCounter, Database, VolatileDevice};
     ///
-    /// let persistence_layer = Box::new(FileLogger::new("/home/dba/db"));
     /// let database: Database<AtomicCounter> =
-    ///     Database::with_persistence_layer(persistence_layer);
+    ///     Database::with_persistence_layer(VolatileDevice::default());
     /// ```
     #[inline]
     #[must_use]
-    pub fn with_persistence_layer(persistence_layer: Box<dyn PersistenceLayer<S>>) -> Database<S> {
-        Database {
+    pub fn with_persistence_layer(persistence_layer: P) -> Database<S, P> {
+        let kernel = Arc::new(Kernel {
             sequencer: S::default(),
-            persistence_layer: Some(persistence_layer),
             container_map: HashIndex::default(),
-            lock_table: LockTable::default(),
-            overseer: Overseer::spawn(),
-        }
-    }
-
-    /// Sets a [`PersistenceLayer`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tss::{FileLogger, Database};
-    ///
-    /// let mut database = Database::default();
-    /// let persistence_layer = Box::new(FileLogger::new("/home/dba/db"));
-    /// assert!(database.set_persistence_layer(Some(persistence_layer)).is_none());
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn set_persistence_layer(
-        &mut self,
-        persistence_layer: Option<Box<dyn PersistenceLayer<S>>>,
-    ) -> Option<Box<dyn PersistenceLayer<S>>> {
-        let old_persistence_layer = self.persistence_layer.take();
-        self.persistence_layer = persistence_layer;
-        old_persistence_layer
+            access_controller: AccessController::default(),
+            persistence_layer,
+        });
+        let overseer = Overseer::spawn(kernel.clone());
+        Database { kernel, overseer }
     }
 
     /// Starts a [`Transaction`].
@@ -110,7 +81,8 @@ impl<S: Sequencer> Database<S> {
     /// let transaction = database.transaction();
     /// ```
     #[inline]
-    pub fn transaction(&self) -> Transaction<S> {
+    #[must_use]
+    pub fn transaction(&self) -> Transaction<S, P> {
         Transaction::new(self)
     }
 
@@ -126,8 +98,9 @@ impl<S: Sequencer> Database<S> {
     /// let snapshot = database.snapshot();
     /// ```
     #[inline]
+    #[must_use]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(&self.sequencer, None, None)
+        Snapshot::from_parts(&self.kernel.sequencer, None, None)
     }
 
     /// Creates a new empty [`Container`].
@@ -156,12 +129,13 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: String,
         metadata: Metadata,
-        _journal: &'j mut Journal<'s, 't, S>,
+        _journal: &'j mut Journal<'s, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<ebr::Arc<Container<S>>, Error> {
-        let _: &LockTable = &self.lock_table;
+        let _: &AccessController = &self.kernel.access_controller;
         let container = ebr::Arc::new(Container::new(metadata));
         match self
+            .kernel
             .container_map
             .insert_async(name, container.clone())
             .await
@@ -202,11 +176,12 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: &str,
         new_name: String,
-        _journal: &'j mut Journal<'s, 't, S>,
+        _journal: &'j mut Journal<'s, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<(), Error> {
-        if let Some(container) = self.container_map.read(name, |_, c| c.clone()) {
+        if let Some(container) = self.kernel.container_map.read(name, |_, c| c.clone()) {
             if self
+                .kernel
                 .container_map
                 .insert_async(new_name, container)
                 .await
@@ -250,7 +225,7 @@ impl<S: Sequencer> Database<S> {
         name: &str,
         _snapshot: &'r Snapshot<'s, 't, 'j, S>,
     ) -> Option<&'r Container<S>> {
-        self.container_map.read(name, |_, c| unsafe {
+        self.kernel.container_map.read(name, |_, c| unsafe {
             // The `Container` survives as long as the `Snapshot` is valid.
             std::mem::transmute::<&Container<S>, &'r Container<S>>(&**c)
         })
@@ -289,10 +264,10 @@ impl<S: Sequencer> Database<S> {
         &'s self,
         name: &str,
         _snapshot: &Snapshot<'s, 't, 'j, S>,
-        _journal: &'j mut Journal<'s, 't, S>,
+        _journal: &'j mut Journal<'s, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<(), Error> {
-        if self.container_map.remove_async(name).await {
+        if self.kernel.container_map.remove_async(name).await {
             Ok(())
         } else {
             Err(Error::NotFound)
@@ -300,15 +275,16 @@ impl<S: Sequencer> Database<S> {
     }
 
     /// Returns a reference to its [`Sequencer`].
-    pub(crate) fn sequencer(&self) -> &S {
-        &self.sequencer
+    pub(super) fn sequencer(&self) -> &S {
+        &self.kernel.sequencer
     }
 }
 
-impl Default for Database<AtomicCounter> {
+impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
     /// Creates an empty default [`Database`] instance.
     ///
-    /// The type of the [`Sequencer`] is [`AtomicCounter`].
+    /// The type of the [`Sequencer`] is [`AtomicCounter`], and the persistence layer is of
+    /// [`VolatileDevice`].
     ///
     /// # Examples
     ///
@@ -319,17 +295,18 @@ impl Default for Database<AtomicCounter> {
     /// ```
     #[inline]
     fn default() -> Self {
-        Database {
+        let kernel = Arc::new(Kernel {
             sequencer: AtomicCounter::default(),
-            persistence_layer: None,
             container_map: HashIndex::default(),
-            lock_table: LockTable::default(),
-            overseer: Overseer::spawn(),
-        }
+            access_controller: AccessController::default(),
+            persistence_layer: VolatileDevice::default(),
+        });
+        let overseer = Overseer::spawn(kernel.clone());
+        Database { kernel, overseer }
     }
 }
 
-impl<S: Sequencer> Drop for Database<S> {
+impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     #[inline]
     fn drop(&mut self) {
         while !self.overseer.try_post(Task::Shutdown) {

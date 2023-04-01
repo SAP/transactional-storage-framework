@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::{Database, Error, Journal, Sequencer, Snapshot};
+use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,10 +17,10 @@ use std::task::{Context, Poll};
 /// A single strand of [`Journal`] constitutes a [`Transaction`], and an on-going transaction can
 /// be rewound to a certain point of time by reverting submitted [`Journal`] instances.
 #[derive(Debug)]
-pub struct Transaction<'s, S: Sequencer> {
+pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     /// The transaction refers to the corresponding [`Database`] to persist pending changes at
     /// commit.
-    database: &'s Database<S>,
+    database: &'s Database<S, P>,
 
     /// The changes made by the transaction.
     journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
@@ -36,7 +36,7 @@ pub struct Transaction<'s, S: Sequencer> {
     clock: AtomicUsize,
 }
 
-impl<'s, S: Sequencer> Transaction<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// Starts a new [`Journal`].
     ///
     /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
@@ -53,7 +53,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// journal.submit();
     /// ```
     #[inline]
-    pub fn start<'t>(&'t self) -> Journal<'s, 't, S> {
+    pub fn start<'t>(&'t self) -> Journal<'s, 't, S, P> {
         Journal::new(self, self.anchor.clone())
     }
 
@@ -70,7 +70,11 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(self.database.sequencer(), Some(self), None)
+        Snapshot::from_parts(
+            self.database.sequencer(),
+            Some((self.anchor_addr(), self.clock())),
+            None,
+        )
     }
 
     /// Gets the current local clock value of the [`Transaction`].
@@ -167,7 +171,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     /// ```
     #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn prepare(self) -> Result<Committable<'s, S>, Error> {
+    pub async fn prepare(self) -> Result<Committable<'s, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         // Assigns a new logical clock.
@@ -225,7 +229,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 
     /// Creates a new [`Transaction`].
-    pub(crate) fn new(database: &'s Database<S>) -> Transaction<'s, S> {
+    pub(crate) fn new(database: &'s Database<S, P>) -> Transaction<'s, S, P> {
         Transaction {
             database,
             journal_strand: ebr::AtomicArc::null(),
@@ -265,10 +269,9 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
         }
     }
 
-    /// Returns a reference to its [Anchor].
-    #[allow(dead_code)]
-    pub(super) fn anchor_ptr<'b>(&self, barrier: &'b ebr::Barrier) -> ebr::Ptr<'b, Anchor<S>> {
-        self.anchor.ptr(barrier)
+    /// Returns the memory address of its [`Anchor`].
+    pub(super) fn anchor_addr(&self) -> usize {
+        self.anchor.as_ref() as *const _ as usize
     }
 
     /// Post-processes its transaction commit.
@@ -290,7 +293,7 @@ impl<'s, S: Sequencer> Transaction<'s, S> {
     }
 }
 
-impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'s, S, P> {
     #[inline]
     fn drop(&mut self) {
         let _result = self.rewind(0);
@@ -302,11 +305,11 @@ impl<'s, S: Sequencer> Drop for Transaction<'s, S> {
 /// The transaction is bound to be rolled back if no actions are taken before dropping the
 /// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
 /// [`Committable`] instance is dropped or awaited.
-pub struct Committable<'s, S: Sequencer> {
-    transaction: Option<Transaction<'s, S>>,
+pub struct Committable<'s, S: Sequencer, P: PersistenceLayer<S>> {
+    transaction: Option<Transaction<'s, S, P>>,
 }
 
-impl<'s, S: Sequencer> Future for Committable<'s, S> {
+impl<'s, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'s, S, P> {
     type Output = Result<S::Clock, Error>;
 
     #[inline]

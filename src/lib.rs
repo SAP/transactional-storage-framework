@@ -18,14 +18,14 @@ pub use database::Database;
 mod error;
 pub use error::Error;
 
-mod lock_table;
-pub use lock_table::LockTable;
+mod access_controller;
+pub use access_controller::AccessController;
 
 mod journal;
 pub use journal::Journal;
 
 mod persistence_layer;
-pub use persistence_layer::{FileLogger, Log, PersistenceLayer};
+pub use persistence_layer::{PersistenceLayer, VolatileDevice};
 
 mod metadata;
 pub use metadata::Metadata;

@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::transaction::Anchor as TransactionAnchor;
-use super::{Sequencer, Snapshot, Transaction};
-
+use super::{PersistenceLayer, Sequencer, Snapshot, Transaction};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::sync::{Condvar, Mutex};
@@ -14,12 +13,12 @@ use scc::ebr;
 
 /// [`Journal`] keeps the change history.
 #[derive(Debug)]
-pub struct Journal<'s, 't, S: Sequencer> {
-    transaction: &'t Transaction<'s, S>,
+pub struct Journal<'s, 't, S: Sequencer, P: PersistenceLayer<S>> {
+    transaction: &'t Transaction<'s, S, P>,
     anchor: ebr::Arc<Anchor<S>>,
 }
 
-impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
+impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     /// Submits the [`Journal`], thereby advancing the logical clock of the corresponding
     /// [`Transaction`].
     ///
@@ -56,16 +55,16 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
         Snapshot::from_parts(
             self.transaction.sequencer(),
-            Some(self.transaction),
-            Some(self),
+            Some((self.transaction.anchor_addr(), self.transaction.clock())),
+            Some(self.anchor.as_ref() as *const _ as usize),
         )
     }
 
     /// Creates a new [Journal].
     pub(super) fn new(
-        transaction: &'t Transaction<'s, S>,
+        transaction: &'t Transaction<'s, S, P>,
         transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-    ) -> Journal<'s, 't, S> {
+    ) -> Journal<'s, 't, S, P> {
         Journal {
             transaction,
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.clock())),
@@ -73,7 +72,7 @@ impl<'s, 't, S: Sequencer> Journal<'s, 't, S> {
     }
 }
 
-impl<'s, 't, S: Sequencer> Drop for Journal<'s, 't, S> {
+impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P> {
     fn drop(&mut self) {
         // Send `anchor` to the garbage collector.
     }
