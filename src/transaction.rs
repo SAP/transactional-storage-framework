@@ -73,7 +73,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::from_parts(
             self.database.sequencer(),
-            Some(self.transaction_snapshot(self.clock())),
+            Some(self.transaction_snapshot(self.now())),
             None,
         )
     }
@@ -91,24 +91,24 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let journal = transaction.journal();
-    /// let clock = journal.submit();
+    /// let instant = journal.submit();
     ///
-    /// assert_eq!(transaction.clock(), 1);
-    /// assert_eq!(clock, 1);
+    /// assert_eq!(transaction.now(), 1);
+    /// assert_eq!(instant, 1);
     /// ```
     #[inline]
-    pub fn clock(&self) -> usize {
+    pub fn now(&self) -> usize {
         self.clock.load(Acquire)
     }
 
     /// Rewinds the [`Transaction`] to the given point of time.
     ///
-    /// All the changes made between the latest transaction clock and the given one are rolled
-    /// back. It requires a mutable reference, thus ensuring exclusivity.
+    /// All the changes made after the specified instant are rolled back. It requires a mutable
+    /// reference, thus ensuring exclusivity.
     ///
     /// # Errors
     ///
-    /// If an invalid clock value is supplied, an error is returned.
+    /// If an invalid instant is supplied, an error is returned.
     ///
     /// # Examples
     ///
@@ -127,25 +127,25 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     ///
     /// let result = transaction.rewind(1);
     /// assert!(result.is_ok());
-    /// assert_eq!(transaction.clock(), 1);
+    /// assert_eq!(transaction.now(), 1);
     /// ```
     #[inline]
-    pub fn rewind(&mut self, clock: usize) -> Result<usize, Error> {
-        let current_clock = self.clock.load(Acquire);
-        if current_clock <= clock {
+    pub fn rewind(&mut self, instant: usize) -> Result<usize, Error> {
+        let current_instant = self.clock.load(Acquire);
+        if current_instant <= instant {
             return Err(Error::WrongParameter);
         }
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
-            if record.submit_clock() <= clock {
+            if record.submit_instant() <= instant {
                 current = Some(record);
                 break;
             }
             current = record.next().swap((None, ebr::Tag::None), Acquire).0;
         }
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
-        self.clock.store(clock, Release);
-        Ok(clock)
+        self.clock.store(instant, Release);
+        Ok(instant)
     }
 
     /// Prepares the [Transaction] for commit.
@@ -175,9 +175,8 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     pub async fn prepare(self) -> Result<Committable<'s, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
-        // Assigns a new logical clock.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
-        anchor_mut_ref.prepare_clock = self.sequencer().get(Relaxed);
+        anchor_mut_ref.prepare_instant = self.sequencer().now(Relaxed);
         anchor_mut_ref.state.store(1, Release);
         Ok(Committable {
             transaction: Some(self),
@@ -202,7 +201,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// };
     /// ```
     #[inline]
-    pub async fn commit(self) -> Result<S::Clock, Error> {
+    pub async fn commit(self) -> Result<S::Instant, Error> {
         let indoubt_transaction = self.prepare().await?;
         indoubt_transaction.await
     }
@@ -261,9 +260,9 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
             ) {
                 Ok(_) => {
                     // Transaction-local clock is updated after contents are submitted.
-                    let current_clock = self.clock.fetch_add(1, Release) + 1;
-                    record.assign_submit_clock(current_clock);
-                    return current_clock;
+                    let current_instant = self.clock.fetch_add(1, Release) + 1;
+                    record.assign_submit_instant(current_instant);
+                    return current_instant;
                 }
                 Err((_, actual)) => current = actual,
             }
@@ -271,27 +270,27 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     }
 
     /// Returns the memory address of its [`Anchor`].
-    pub(super) fn transaction_snapshot(&self, clock: usize) -> TransactionSnapshot {
-        debug_assert!(clock <= self.clock());
-        TransactionSnapshot::new(self.anchor.as_ref() as *const _ as usize, clock)
+    pub(super) fn transaction_snapshot(&self, instant: usize) -> TransactionSnapshot {
+        debug_assert!(instant <= self.now());
+        TransactionSnapshot::new(self.anchor.as_ref() as *const _ as usize, instant)
     }
 
     /// Post-processes its transaction commit.
     ///
     /// Only a `Committable` instance is allowed to call this function.
     /// Once the transaction is post-processed, the transaction cannot be rolled back.
-    fn post_process(self) -> S::Clock {
+    fn post_process(self) -> S::Instant {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
-        let commit_clock = self.sequencer().advance(Release);
-        anchor_mut_ref.commit_clock = commit_clock;
+        let commit_instant = self.sequencer().advance(Release);
+        anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
 
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
         drop(self);
 
-        commit_clock
+        commit_instant
     }
 }
 
@@ -312,12 +311,12 @@ pub struct Committable<'s, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 impl<'s, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'s, S, P> {
-    type Output = Result<S::Clock, Error>;
+    type Output = Result<S::Instant, Error>;
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(commit_clock) = self.transaction.take().map(Transaction::post_process) {
-            Poll::Ready(Ok(commit_clock))
+        if let Some(commit_instant) = self.transaction.take().map(Transaction::post_process) {
+            Poll::Ready(Ok(commit_instant))
         } else {
             Poll::Pending
         }
@@ -368,39 +367,39 @@ pub(super) struct Anchor<S: Sequencer> {
     ///  * 4: aborted.
     state: AtomicUsize,
 
-    /// The clock value when a commit is issued.
-    prepare_clock: S::Clock,
+    /// The instant when the commit has begun.
+    prepare_instant: S::Instant,
 
-    /// The clock value when the commit is completed.
-    commit_clock: S::Clock,
+    /// The instant when the commit is completed.
+    commit_instant: S::Instant,
 }
 
 impl<S: Sequencer> Anchor<S> {
     fn new() -> Anchor<S> {
         Anchor {
             state: AtomicUsize::new(0),
-            prepare_clock: S::Clock::default(),
-            commit_clock: S::Clock::default(),
+            prepare_instant: S::Instant::default(),
+            commit_instant: S::Instant::default(),
         }
     }
 
-    /// Returns the clock value when the transaction starts to commit.
+    /// Returns the instant when the transaction was being prepared for commit.
     #[allow(unused)]
-    pub(super) fn commit_start_clock(&self) -> S::Clock {
+    pub(super) fn prepare_instant(&self) -> S::Instant {
         if self.state.load(Acquire) == State::Active.into() {
-            S::Clock::default()
+            S::Instant::default()
         } else {
-            self.prepare_clock
+            self.prepare_instant
         }
     }
 
-    /// Returns the final commit clock value of the transaction.
+    /// Returns the instant when the transaction has been committed.
     #[allow(unused)]
-    pub(super) fn commit_snapshot_clock(&self) -> S::Clock {
+    pub(super) fn commit_instant(&self) -> S::Instant {
         if self.state.load(Acquire) == State::Committed.into() {
-            self.commit_clock
+            self.commit_instant
         } else {
-            S::Clock::default()
+            S::Instant::default()
         }
     }
 }
