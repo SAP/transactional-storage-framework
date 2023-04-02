@@ -6,7 +6,6 @@ use super::journal::Anchor as JournalAnchor;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
-use std::collections::BTreeSet;
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -110,15 +109,43 @@ impl<S: Sequencer> AccessController<S> {
     /// # Errors
     ///
     /// An [`Error`] is returned if the lock could not be acquired.
-    #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
     pub async fn share<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,
-        _object: &O,
-        _journal: &mut Journal<'_, '_, S, P>,
+        object: &O,
+        journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        unimplemented!()
+        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+            MapEntry::Occupied(entry) => entry,
+            MapEntry::Vacant(entry) => {
+                entry.insert_entry(Entry::Locked(LockMode::SingleShared(
+                    journal.anchor().clone(),
+                )));
+                return Ok(true);
+            }
+        };
+        match entry.get_mut() {
+            Entry::Reserved(_) => {
+                // TODO: wait for the owner to be rolled or committed.
+                Err(Error::Timeout)
+            }
+            Entry::Created(instant) => {
+                *entry.get_mut() = Entry::Locked(LockMode::SharedWithInstant(Box::new((
+                    *instant,
+                    OwnerSet::with_owner(journal.anchor().clone()),
+                ))));
+                Ok(true)
+            }
+            Entry::Locked(_) => {
+                // TODO: try to add the transaction to the owner set.
+                Err(Error::Conflict)
+            }
+            Entry::Deleted(_) => {
+                // Already deleted.
+                Err(Error::SerializationFailure)
+            }
+        }
     }
 
     /// Acquires the exclusive lock on the database object.
@@ -128,15 +155,41 @@ impl<S: Sequencer> AccessController<S> {
     /// # Errors
     ///
     /// An [`Error`] is returned if the lock could not be acquired.
-    #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
     pub async fn lock<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,
-        _object: &O,
-        _journal: &mut Journal<'_, '_, S, P>,
+        object: &O,
+        journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        unimplemented!()
+        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+            MapEntry::Occupied(entry) => entry,
+            MapEntry::Vacant(entry) => {
+                entry.insert_entry(Entry::Locked(LockMode::Exclusive(journal.anchor().clone())));
+                return Ok(true);
+            }
+        };
+        match entry.get_mut() {
+            Entry::Reserved(_) => {
+                // TODO: wait for the owner to be rolled or committed.
+                Err(Error::Timeout)
+            }
+            Entry::Created(instant) => {
+                *entry.get_mut() = Entry::Locked(LockMode::ExclusiveWithInstant(Box::new((
+                    *instant,
+                    journal.anchor().clone(),
+                ))));
+                Ok(true)
+            }
+            Entry::Locked(_) => {
+                // TODO: try to acquire the lock after cleaning up the entry.
+                Err(Error::Conflict)
+            }
+            Entry::Deleted(_) => {
+                // Already deleted.
+                Err(Error::SerializationFailure)
+            }
+        }
     }
 
     /// Takes ownership of the database object for deletion.
@@ -144,22 +197,47 @@ impl<S: Sequencer> AccessController<S> {
     /// # Errors
     ///
     /// An [`Error`] is returned if the transaction could not take ownership.
-    #[allow(clippy::unused_self, clippy::unused_async)]
     #[inline]
     pub async fn mark<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,
-        _object: &O,
-        _journal: &mut Journal<'_, '_, S, P>,
+        object: &O,
+        journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        unimplemented!()
+        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+            MapEntry::Occupied(entry) => entry,
+            MapEntry::Vacant(entry) => {
+                entry.insert_entry(Entry::Locked(LockMode::Marked(journal.anchor().clone())));
+                return Ok(true);
+            }
+        };
+        match entry.get_mut() {
+            Entry::Reserved(_) => {
+                // TODO: wait for the owner to be rolled or committed.
+                Err(Error::Timeout)
+            }
+            Entry::Created(instant) => {
+                *entry.get_mut() = Entry::Locked(LockMode::MarkedWithInstant(Box::new((
+                    *instant,
+                    journal.anchor().clone(),
+                ))));
+                Ok(true)
+            }
+            Entry::Locked(_) => {
+                // TODO: try to mark it after cleaning up the entry.
+                Err(Error::Conflict)
+            }
+            Entry::Deleted(_) => {
+                // Already deleted.
+                Err(Error::SerializationFailure)
+            }
+        }
     }
 }
 
 #[derive(Debug)]
 enum Entry<S: Sequencer> {
     /// The database object is prepared to be created.
-    #[allow(dead_code)]
     Reserved(ebr::Arc<JournalAnchor<S>>),
 
     /// The database object was created at the instant.
@@ -167,7 +245,6 @@ enum Entry<S: Sequencer> {
     Created(S::Instant),
 
     /// The database object is locked.
-    #[allow(dead_code)]
     Locked(LockMode<S>),
 
     /// The database object was deleted at the instant.
@@ -178,24 +255,19 @@ enum Entry<S: Sequencer> {
 #[derive(Debug)]
 enum LockMode<S: Sequencer> {
     /// The database object is locked shared by a single transaction.
-    #[allow(dead_code)]
     SingleShared(ebr::Arc<JournalAnchor<S>>),
 
     /// The database object which may not be visible to some readers is shared by one or more
     /// transactions.
-    #[allow(dead_code)]
     SharedWithInstant(Box<(S::Instant, OwnerSet<S>)>),
 
     /// The database object is locked by the transaction.
-    #[allow(dead_code)]
     Exclusive(ebr::Arc<JournalAnchor<S>>),
 
     /// The database object which may not be visible to some readers is locked by the transaction.
-    #[allow(dead_code)]
     ExclusiveWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
 
     /// The database object is being deleted by the transaction.
-    #[allow(dead_code)]
     Marked(ebr::Arc<JournalAnchor<S>>),
 
     /// The database object which may not be visible to some readers is being deleted by the
@@ -207,7 +279,14 @@ enum LockMode<S: Sequencer> {
 #[derive(Debug)]
 struct OwnerSet<S: Sequencer> {
     #[allow(dead_code)]
-    set: BTreeSet<ebr::Arc<JournalAnchor<S>>>,
+    set: Vec<ebr::Arc<JournalAnchor<S>>>,
+}
+
+impl<S: Sequencer> OwnerSet<S> {
+    /// Creates a new [`OwnerSet`] with a single owner inserted.
+    fn with_owner(owner: ebr::Arc<JournalAnchor<S>>) -> OwnerSet<S> {
+        OwnerSet { set: vec![owner] }
+    }
 }
 
 #[cfg(test)]
@@ -224,7 +303,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn reserve() {
+    async fn empty_reserve() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -238,5 +317,47 @@ mod test {
 
         let snapshot = database.snapshot();
         assert!(access_controller.read(&0, &snapshot, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn empty_share() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .share(&0, &mut journal, None)
+            .await
+            .unwrap());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn empty_lock() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .lock(&0, &mut journal, None)
+            .await
+            .unwrap());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn empty_mark() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .mark(&0, &mut journal, None)
+            .await
+            .unwrap());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
     }
 }
