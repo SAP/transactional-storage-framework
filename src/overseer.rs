@@ -7,7 +7,9 @@ use super::{PersistenceLayer, Sequencer};
 use std::convert::Into;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::Arc;
+use std::task::Waker;
 use std::thread::{self, available_parallelism, JoinHandle};
+use std::time::Instant;
 
 /// [`Overseer`] wakes up timed out tasks and deletes unreachable database objects.
 #[derive(Debug)]
@@ -24,6 +26,10 @@ pub struct Overseer {
 pub enum Task {
     /// The [`Database`](super::Database) is shutting down.
     Shutdown,
+
+    /// The [`Waker`] should be called at the specified deadline.
+    #[allow(dead_code)]
+    WakeUp(Instant, Waker),
 }
 
 impl Overseer {
@@ -37,20 +43,23 @@ impl Overseer {
         Overseer {
             worker: Some(thread::spawn(move || {
                 let _kernel = kernel;
-                if let Ok(Task::Shutdown) = receiver.recv() {
-                    //
+                while let Ok(task) = receiver.recv() {
+                    match task {
+                        Task::Shutdown => break,
+                        Task::WakeUp(_deadline, waker) => {
+                            // TODO: wake up AFTER deadline.
+                            waker.wake();
+                        }
+                    }
                 }
             })),
             sender,
         }
     }
 
-    /// Tries to posts a task.
-    ///
-    /// Returns `false` if it fails to post the task.
-    #[inline]
-    pub(super) fn try_post(&self, task: Task) -> bool {
-        self.sender.try_send(task).is_ok()
+    /// Returns a reference to the [`SyncSender`].
+    pub(super) fn sender(&self) -> &SyncSender<Task> {
+        &self.sender
     }
 }
 

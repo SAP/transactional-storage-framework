@@ -78,7 +78,7 @@ let journal = transaction.start();
 
 ## AccessController
 
-`AccessController` maps a record onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the record.
+`AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object.
 
 ## PersistenceLayer
 

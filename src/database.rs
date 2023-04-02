@@ -36,7 +36,7 @@ pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
     sequencer: S,
 
     /// The container map.
-    container_map: HashIndex<String, ebr::Arc<Container<S>>>,
+    container_map: HashIndex<String, ebr::Arc<Container<S, P>>>,
 
     /// The database access controller.
     access_controller: AccessController<S>,
@@ -125,13 +125,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// };
     /// ```
     #[inline]
-    pub async fn create_container<'s, 't, 'j>(
-        &'s self,
+    pub async fn create_container<'d, 't, 'j>(
+        &'d self,
         name: String,
         metadata: Metadata,
-        _journal: &'j mut Journal<'s, 't, S, P>,
+        _journal: &'j mut Journal<'d, 't, S, P>,
         _deadline: Option<Instant>,
-    ) -> Result<ebr::Arc<Container<S>>, Error> {
+    ) -> Result<ebr::Arc<Container<S, P>>, Error> {
         let _: &AccessController<S> = &self.kernel.access_controller;
         let container = ebr::Arc::new(Container::new(metadata));
         match self
@@ -172,11 +172,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// };
     /// ```
     #[inline]
-    pub async fn rename_container<'s, 't, 'j>(
-        &'s self,
+    pub async fn rename_container<'d, 't, 'j>(
+        &'d self,
         name: &str,
         new_name: String,
-        _journal: &'j mut Journal<'s, 't, S, P>,
+        _journal: &'j mut Journal<'d, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<(), Error> {
         if let Some(container) = self.kernel.container_map.read(name, |_, c| c.clone()) {
@@ -220,15 +220,16 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// ```
     #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn get_container<'s, 't, 'j, 'r>(
-        &'s self,
+    pub async fn get_container<'d, 't, 'j, 'r>(
+        &'d self,
         name: &str,
-        _snapshot: &'r Snapshot<'s, 't, 'j, S>,
-    ) -> Option<&'r Container<S>> {
-        self.kernel.container_map.read(name, |_, c| unsafe {
-            // The `Container` survives as long as the `Snapshot` is valid.
-            std::mem::transmute::<&Container<S>, &'r Container<S>>(&**c)
-        })
+        _snapshot: &'r Snapshot<'d, 't, 'j, S>,
+    ) -> Option<&'r Container<S, P>> {
+        self.kernel.container_map.read(name, |_, c|
+            // Safety: `snapshot` is the proof that the returned reference stays valid at least for
+            // the lifetime of `snapshot`; even though the container is dropped, the data remains
+            // until it is garbage collected.
+            unsafe { std::mem::transmute::<&Container<S, P>, &'r Container<S, P>>(&**c) })
     }
 
     /// Drops a [`Container`] under the specified name.
@@ -260,11 +261,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// };
     /// ```
     #[inline]
-    pub async fn drop_container<'s, 't, 'j>(
-        &'s self,
+    pub async fn drop_container<'d, 't, 'j>(
+        &'d self,
         name: &str,
-        _snapshot: &Snapshot<'s, 't, 'j, S>,
-        _journal: &'j mut Journal<'s, 't, S, P>,
+        _snapshot: &Snapshot<'d, 't, 'j, S>,
+        _journal: &'j mut Journal<'d, 't, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<(), Error> {
         if self.kernel.container_map.remove_async(name).await {
@@ -277,6 +278,14 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Returns a reference to its [`Sequencer`].
     pub(super) fn sequencer(&self) -> &S {
         &self.kernel.sequencer
+    }
+
+    /// Tries to posts a task.
+    ///
+    /// Returns `false` if it fails to post the task.
+    #[inline]
+    pub(super) fn try_post(&self, task: Task) -> bool {
+        self.overseer.sender().try_send(task).is_ok()
     }
 }
 
@@ -309,7 +318,7 @@ impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
 impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     #[inline]
     fn drop(&mut self) {
-        while !self.overseer.try_post(Task::Shutdown) {
+        while !self.try_post(Task::Shutdown) {
             // Reaching here means that there is a program logic bug.
             debug_assert!(false, "programming logic error");
         }

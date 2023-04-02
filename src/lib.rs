@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(missing_docs, warnings, clippy::all, clippy::pedantic)]
+#![deny(
+    missing_docs,
+    warnings,
+    clippy::all,
+    clippy::pedantic,
+    clippy::undocumented_unsafe_blocks
+)]
 
 //! Transactional Storage Framework
 //!

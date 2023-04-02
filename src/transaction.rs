@@ -19,10 +19,10 @@ use std::task::{Context, Poll};
 /// be rewound to a certain instant by rolling back submitted [`Journal`] instances in reverse
 /// order.
 #[derive(Debug)]
-pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
+pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// The transaction refers to the corresponding [`Database`] to persist pending changes at
     /// commit.
-    database: &'s Database<S, P>,
+    database: &'d Database<S, P>,
 
     /// The changes made by the transaction.
     ///
@@ -36,7 +36,7 @@ pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
-/// `0` as a transaction logical time point value represents an unfinished or rolled back job.
+/// `0` as a transaction logical time point value represents an unfinished job.
 pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 
 /// `usize::MAX` as a transaction logical time point is regarded as an unreachable instant for
@@ -47,7 +47,7 @@ pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 /// can never be visible to any other jobs in the same transaction.
 pub const UNREACHABLE_TRANSACTION_INSTANT: usize = usize::MAX;
 
-impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
+impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// Creates a new [`Journal`].
     ///
     /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
@@ -64,7 +64,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// journal.submit();
     /// ```
     #[inline]
-    pub fn journal<'t>(&'t self) -> Journal<'s, 't, S, P> {
+    pub fn journal<'t>(&'t self) -> Journal<'d, 't, S, P> {
         Journal::new(self, self.anchor.clone())
     }
 
@@ -190,9 +190,10 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// ```
     #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn prepare(self) -> Result<Committable<'s, S, P>, Error> {
+    pub async fn prepare(self) -> Result<Committable<'d, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
+        // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_instant = self.sequencer().now(Relaxed);
         anchor_mut_ref.state.store(1, Release);
@@ -247,7 +248,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     }
 
     /// Creates a new [`Transaction`].
-    pub(crate) fn new(database: &'s Database<S, P>) -> Transaction<'s, S, P> {
+    pub(crate) fn new(database: &'d Database<S, P>) -> Transaction<'d, S, P> {
         Transaction {
             database,
             journal_strand: ebr::AtomicArc::null(),
@@ -256,7 +257,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     }
 
     /// Returns a reference to its associated [Sequencer].
-    pub(super) fn sequencer(&self) -> &'s S {
+    pub(super) fn sequencer(&self) -> &'d S {
         self.database.sequencer()
     }
 
@@ -292,6 +293,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     fn post_process(self) -> S::Instant {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
+        // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         let commit_instant = self.sequencer().advance(Release);
         anchor_mut_ref.commit_instant = commit_instant;
@@ -304,7 +306,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     }
 }
 
-impl<'s, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'s, S, P> {
+impl<'d, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'d, S, P> {
     #[inline]
     fn drop(&mut self) {
         let _result = self.rewind(0);
@@ -316,11 +318,11 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'s, S, P> {
 /// The transaction is bound to be rolled back if no actions are taken before dropping the
 /// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
 /// [`Committable`] instance is dropped or awaited.
-pub struct Committable<'s, S: Sequencer, P: PersistenceLayer<S>> {
-    transaction: Option<Transaction<'s, S, P>>,
+pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
+    transaction: Option<Transaction<'d, S, P>>,
 }
 
-impl<'s, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'s, S, P> {
+impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> {
     type Output = Result<S::Instant, Error>;
 
     #[inline]
@@ -404,12 +406,11 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Returns the instant when the transaction has been committed.
-    #[allow(unused)]
-    pub(super) fn commit_instant(&self) -> S::Instant {
+    pub(super) fn commit_instant(&self) -> Option<S::Instant> {
         if self.state.load(Acquire) == State::Committed.into() {
-            self.commit_instant
+            Some(self.commit_instant)
         } else {
-            S::Instant::default()
+            None
         }
     }
 }
@@ -424,6 +425,7 @@ mod test {
     fn prolong_transaction<S: Sequencer, P: PersistenceLayer<S>>(
         t: Transaction<S, P>,
     ) -> Transaction<'static, S, P> {
+        // Safety: test-only.
         unsafe { std::mem::transmute(t) }
     }
 

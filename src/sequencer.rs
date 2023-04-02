@@ -197,11 +197,18 @@ pub struct U64Tracker {
     ptr: *const Entry,
 }
 
+impl U64Tracker {
+    fn entry(&self) -> &Entry {
+        // Safety: `self` is holding a strong reference to the entry, therefore the entry is
+        // guaranteed to be valid.
+        unsafe { self.ptr.as_ref().unwrap() }
+    }
+}
+
 impl Clone for U64Tracker {
     #[inline]
     fn clone(&self) -> Self {
-        let entry = unsafe { self.ptr.as_ref().unwrap() };
-        let prev = entry.ref_cnt.fetch_add(1, Relaxed);
+        let prev = self.entry().ref_cnt.fetch_add(1, Relaxed);
         debug_assert_ne!(prev, 0);
         Self { ptr: self.ptr }
     }
@@ -210,21 +217,22 @@ impl Clone for U64Tracker {
 impl ToInstant<AtomicCounter> for U64Tracker {
     #[inline]
     fn to_instant(&self) -> u64 {
-        let entry = unsafe { self.ptr.as_ref().unwrap() };
-        entry.timestamp
+        self.entry().timestamp
     }
 }
 
 impl Drop for U64Tracker {
     #[inline]
     fn drop(&mut self) {
-        let entry = unsafe { self.ptr.as_ref().unwrap() };
-        let prev = entry.ref_cnt.fetch_sub(1, Relaxed);
+        let prev = self.entry().ref_cnt.fetch_sub(1, Relaxed);
         debug_assert_ne!(prev, 0);
     }
 }
 
+// Safety: the instance being pointed by `U64Tracker` is on the heap.
 unsafe impl Send for U64Tracker {}
+
+// Safety: the instance being pointed by `U64Tracker` can be accessed by other threads.
 unsafe impl Sync for U64Tracker {}
 
 #[derive(Debug)]

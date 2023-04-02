@@ -23,41 +23,35 @@ use std::sync::atomic::Ordering::Acquire;
 ///     globally committed data, changes in submitted [`Journal`](super::Journal) instances in the
 ///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
-pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
-    #[allow(dead_code)]
+pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     tracker: S::Tracker,
-    #[allow(dead_code)]
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
-    #[allow(dead_code)]
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    _phantom: PhantomData<&'s ()>,
+    _phantom: PhantomData<&'d ()>,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
-    #[allow(dead_code)]
     anchor_addr: usize,
-    #[allow(dead_code)]
     instant: usize,
     _phantom: PhantomData<&'t ()>,
 }
 
 /// Data representing the current state of the [`Journal`](super::Transaction).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct JournalSnapshot<'t, 'j> {
-    #[allow(dead_code)]
     anchor_addr: usize,
     _phantom: PhantomData<(&'t (), &'j ())>,
 }
 
-impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Creates a new [`Snapshot`].
     pub(super) fn from_parts(
-        sequencer: &'s S,
+        sequencer: &'d S,
         transaction_snapshot: Option<TransactionSnapshot<'t>>,
         journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    ) -> Snapshot<'s, 't, 'j, S> {
+    ) -> Snapshot<'d, 't, 'j, S> {
         let tracker = sequencer.track(Acquire);
         Snapshot {
             tracker,
@@ -66,16 +60,31 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
             _phantom: PhantomData,
         }
     }
+
+    /// Gets the time point value of the database snapshot.
+    pub(super) fn database_snapshot(&self) -> S::Instant {
+        self.tracker.to_instant()
+    }
+
+    /// Gets a reference to its [`TransactionSnapshot`].
+    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
+        self.transaction_snapshot.as_ref()
+    }
+
+    /// Gets a reference to its [`JournalSnapshot`].
+    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
+        self.journal_snapshot.as_ref()
+    }
 }
 
-impl<'s, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn eq(&self, other: &S::Instant) -> bool {
         self.tracker.to_instant().eq(other)
     }
 }
 
-impl<'s, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn partial_cmp(&self, other: &S::Instant) -> Option<cmp::Ordering> {
         self.tracker.to_instant().partial_cmp(other)
@@ -90,6 +99,16 @@ impl<'t> TransactionSnapshot<'t> {
             instant,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<'t> PartialOrd for TransactionSnapshot<'t> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        if self.anchor_addr != other.anchor_addr {
+            return None;
+        }
+        self.instant.partial_cmp(&other.instant)
     }
 }
 
