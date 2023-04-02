@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// [`Error`] defines all the error codes used by the database system.
+#[derive(Debug)]
 pub enum Error {
     /// The operation conflicts with others.
     Conflict,
