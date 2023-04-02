@@ -24,7 +24,6 @@ use std::sync::atomic::Ordering::Acquire;
 ///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
-    #[allow(dead_code)]
     tracker: S::Tracker,
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
@@ -34,9 +33,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
 /// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
-    #[allow(dead_code)]
     anchor_addr: usize,
-    #[allow(dead_code)]
     instant: usize,
     _phantom: PhantomData<&'t ()>,
 }

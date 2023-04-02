@@ -149,5 +149,13 @@ enum SharedOwners<S: Sequencer> {
 
     /// There are multiple owners.
     #[allow(dead_code)]
-    Multiple(BTreeSet<ebr::Arc<JournalAnchor<S>>>),
+    Multiple(ebr::Arc<BTreeSet<ebr::Arc<JournalAnchor<S>>>>),
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::AtomicCounter;
+
+    static_assertions::assert_eq_size!(Entry<AtomicCounter>, [u8; 16]);
 }
