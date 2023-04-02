@@ -16,9 +16,9 @@ use std::time::Instant;
 
 /// [`Journal`] keeps the change history.
 #[derive(Debug)]
-pub struct Journal<'s, 't, S: Sequencer, P: PersistenceLayer<S>> {
+pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     /// [`Journal`] borrows [`Transaction`].
-    transaction: &'t Transaction<'s, S, P>,
+    transaction: &'t Transaction<'d, S, P>,
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
@@ -28,7 +28,6 @@ pub struct Journal<'s, 't, S: Sequencer, P: PersistenceLayer<S>> {
 /// operations.
 #[derive(Debug)]
 pub(super) struct Anchor<S: Sequencer> {
-    #[allow(unused)]
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     creation_instant: usize,
 
@@ -43,12 +42,14 @@ pub(super) struct Anchor<S: Sequencer> {
 /// [`AwaitReadPermission`] is returned by [`Anchor`] if it is unclear whether a reader can read
 /// the changes in the [`Journal`] or not instantly.
 #[derive(Debug)]
-pub(super) struct AwaitReadPermission {
+pub(super) struct AwaitReadPermission<S: Sequencer> {
+    transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+    database_snapshot: S::Instant,
     #[allow(dead_code)]
     deadline: Instant,
 }
 
-impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
+impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// Submits the [`Journal`] to the [`Transaction`].
     ///
     /// The logical clock of the corresponding [`Transaction`] advances towards the next time
@@ -86,7 +87,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     /// let snapshot = journal.snapshot();
     /// ```
     #[must_use]
-    pub fn snapshot<'r>(&'r self) -> Snapshot<'s, 't, 'r, S> {
+    pub fn snapshot<'r>(&'r self) -> Snapshot<'d, 't, 'r, S> {
         Snapshot::from_parts(
             self.transaction.sequencer(),
             Some(
@@ -99,9 +100,9 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
 
     /// Creates a new [`Journal`].
     pub(super) fn new(
-        transaction: &'t Transaction<'s, S, P>,
+        transaction: &'t Transaction<'d, S, P>,
         transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-    ) -> Journal<'s, 't, S, P> {
+    ) -> Journal<'d, 't, S, P> {
         Journal {
             transaction,
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.now())),
@@ -114,7 +115,7 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
     }
 }
 
-impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P> {
+impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
     fn drop(&mut self) {
         if self.anchor.submit_instant() == 0 {
             // Send `anchor` to the garbage collector.
@@ -123,12 +124,12 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P
 }
 
 impl<S: Sequencer> Anchor<S> {
-    /// Checks the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
+    /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
     pub(super) fn grant_read_access(
         &self,
         snapshot: &Snapshot<'_, '_, '_, S>,
         _deadline: Option<Instant>,
-    ) -> Result<bool, AwaitReadPermission> {
+    ) -> Result<bool, AwaitReadPermission<S>> {
         if let Some(journal_snapshot) = snapshot.journal_snapshot() {
             if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
                 // It comes from the same transaction, and same journal.
@@ -148,10 +149,7 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
-            if commit_instant <= snapshot.database_snapshot() {
-                // The reader has started after the transaction was committed.
-                return Ok(true);
-            }
+            return Ok(commit_instant <= snapshot.database_snapshot());
         }
 
         // TODO: implement it!
@@ -198,12 +196,22 @@ impl<S: Sequencer> Anchor<S> {
     }
 }
 
-impl Future for AwaitReadPermission {
+impl<S: Sequencer> Future for AwaitReadPermission<S> {
     type Output = Result<bool, Error>;
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
+            return Poll::Ready(Ok(commit_instant <= self.database_snapshot));
+        }
+
+        if self.deadline < Instant::now() {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+
+        // TODO: no busy-wait.
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 

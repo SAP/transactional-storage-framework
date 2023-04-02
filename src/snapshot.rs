@@ -23,12 +23,12 @@ use std::sync::atomic::Ordering::Acquire;
 ///     globally committed data, changes in submitted [`Journal`](super::Journal) instances in the
 ///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
-pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
+pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     #[allow(dead_code)]
     tracker: S::Tracker,
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    _phantom: PhantomData<&'s ()>,
+    _phantom: PhantomData<&'d ()>,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
@@ -48,13 +48,13 @@ pub(super) struct JournalSnapshot<'t, 'j> {
     _phantom: PhantomData<(&'t (), &'j ())>,
 }
 
-impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Creates a new [`Snapshot`].
     pub(super) fn from_parts(
-        sequencer: &'s S,
+        sequencer: &'d S,
         transaction_snapshot: Option<TransactionSnapshot<'t>>,
         journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    ) -> Snapshot<'s, 't, 'j, S> {
+    ) -> Snapshot<'d, 't, 'j, S> {
         let tracker = sequencer.track(Acquire);
         Snapshot {
             tracker,
@@ -80,14 +80,14 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
     }
 }
 
-impl<'s, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn eq(&self, other: &S::Instant) -> bool {
         self.tracker.to_instant().eq(other)
     }
 }
 
-impl<'s, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'s, 't, 'j, S> {
+impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn partial_cmp(&self, other: &S::Instant) -> Option<cmp::Ordering> {
         self.tracker.to_instant().partial_cmp(other)
