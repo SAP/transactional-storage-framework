@@ -4,6 +4,7 @@
 
 use super::journal::Anchor as JournalAnchor;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
+use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -19,7 +20,7 @@ pub struct AccessController<S: Sequencer> {
 pub trait ToObjectID {
     /// It must always return the same value for the same `self`, and the value has to be unique in
     /// the process during the lifetime of `self`.
-    fn to_access_id(&self) -> usize;
+    fn to_object_id(&self) -> usize;
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -41,7 +42,7 @@ impl<S: Sequencer> AccessController<S> {
     ) -> Result<bool, Error> {
         if let Some((mut visibility, await_visibility)) = self
             .table
-            .read_async(&object.to_access_id(), |_, entry| match entry {
+            .read_async(&object.to_object_id(), |_, entry| match entry {
                 Entry::Reserved(owner) => {
                     // The database object is being created.
                     match owner.grant_read_access(snapshot, deadline) {
@@ -79,16 +80,27 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// # Errors
     ///
-    /// An [`Error`] is returned if memory allocation failed or the identifier of the database
-    /// object is not unique in the process.
-    #[allow(clippy::unused_self, clippy::unused_async)]
+    /// An [`Error`] is returned if memory allocation failed, the database object was already
+    /// created and globally visible, or another transaction has not completed creating the
+    /// database object until the deadline is reached.
     #[inline]
     pub async fn reserve<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,
-        _object: &O,
-        _journal: &mut Journal<'_, '_, S, P>,
+        object: &O,
+        journal: &mut Journal<'_, '_, S, P>,
+        _deadline: Option<Instant>,
     ) -> Result<(), Error> {
-        unimplemented!()
+        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+            MapEntry::Occupied(entry) => entry,
+            MapEntry::Vacant(entry) => {
+                entry.insert_entry(Entry::Reserved(journal.anchor().clone()));
+                return Ok(());
+            }
+        };
+        if let Entry::Reserved(_owner) = entry.get_mut() {
+            // TODO: wait for the owner to be rolled or committed.
+        }
+        Err(Error::SerializationFailure)
     }
 
     /// Acquires a shared lock on the database object.
@@ -201,7 +213,30 @@ struct OwnerSet<S: Sequencer> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::AtomicCounter;
+    use crate::{AtomicCounter, Database};
 
     static_assertions::assert_eq_size!(Entry<AtomicCounter>, [u8; 16]);
+
+    impl ToObjectID for usize {
+        fn to_object_id(&self) -> usize {
+            *self
+        }
+    }
+
+    #[tokio::test]
+    async fn reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert!(access_controller.read(&0, &snapshot, None).await.unwrap());
+    }
 }
