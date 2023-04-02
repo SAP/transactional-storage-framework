@@ -2,13 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::snapshot::JournalSnapshot;
+use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
-use super::{PersistenceLayer, Sequencer, Snapshot, Transaction};
+use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
 use scc::ebr;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::Instant;
 
 /// [`Journal`] keeps the change history.
 #[derive(Debug)]
@@ -18,6 +22,30 @@ pub struct Journal<'s, 't, S: Sequencer, P: PersistenceLayer<S>> {
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
+}
+
+/// [`Anchor`] is a piece of data that outlives its associated [`Journal`] allowing asynchronous
+/// operations.
+#[derive(Debug)]
+pub(super) struct Anchor<S: Sequencer> {
+    #[allow(unused)]
+    transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+    creation_instant: usize,
+
+    /// The transaction instant when the [`Journal`] was submitted.
+    ///
+    /// This being `zero` represents a state where the changes made by the [`Journal`] cannot be
+    /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
+    submit_instant: AtomicUsize,
+    next: ebr::AtomicArc<Anchor<S>>,
+}
+
+/// [`AwaitReadPermission`] is returned by [`Anchor`] if it is unclear whether a reader can read
+/// the changes in the [`Journal`] or not instantly.
+#[derive(Debug)]
+pub(super) struct AwaitReadPermission {
+    #[allow(dead_code)]
+    deadline: Instant,
 }
 
 impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'s, 't, S, P> {
@@ -94,23 +122,42 @@ impl<'s, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'s, 't, S, P
     }
 }
 
-/// [`Anchor`] is a piece of data that outlives its associated [`Journal`] allowing asynchronous
-/// operations.
-#[derive(Debug)]
-pub struct Anchor<S: Sequencer> {
-    #[allow(unused)]
-    transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-    creation_instant: usize,
-
-    /// The transaction instant when the [`Journal`] was submitted.
-    ///
-    /// This being `zero` represents a state where the changes made by the [`Journal`] cannot be
-    /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
-    submit_instant: AtomicUsize,
-    next: ebr::AtomicArc<Anchor<S>>,
-}
-
 impl<S: Sequencer> Anchor<S> {
+    /// Checks the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
+    pub(super) fn grant_read_access(
+        &self,
+        snapshot: &Snapshot<'_, '_, '_, S>,
+        _deadline: Option<Instant>,
+    ) -> Result<bool, AwaitReadPermission> {
+        if let Some(journal_snapshot) = snapshot.journal_snapshot() {
+            if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
+                // It comes from the same transaction, and same journal.
+                return Ok(true);
+            }
+        }
+
+        if let Some(transaction_snapshot) = snapshot.transaction_snapshot() {
+            if TransactionSnapshot::new(
+                self.transaction_anchor.as_ptr() as usize,
+                self.creation_instant,
+            ) <= *transaction_snapshot
+            {
+                // It comes from the same transaction, and a newer journal.
+                return Ok(true);
+            }
+        }
+
+        if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
+            if commit_instant <= snapshot.database_snapshot() {
+                // The reader has started after the transaction was committed.
+                return Ok(true);
+            }
+        }
+
+        // TODO: implement it!
+        unimplemented!()
+    }
+
     /// Sets the next [`Anchor`].
     pub(super) fn set_next(
         &self,
@@ -148,6 +195,15 @@ impl<S: Sequencer> Anchor<S> {
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
             next: ebr::AtomicArc::null(),
         }
+    }
+}
+
+impl Future for AwaitReadPermission {
+    type Output = Result<bool, Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        todo!()
     }
 }
 

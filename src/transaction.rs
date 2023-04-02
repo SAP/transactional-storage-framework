@@ -36,7 +36,7 @@ pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
-/// `0` as a transaction logical time point value represents an unfinished or rolled back job.
+/// `0` as a transaction logical time point value represents an unfinished job.
 pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 
 /// `usize::MAX` as a transaction logical time point is regarded as an unreachable instant for
@@ -404,12 +404,11 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Returns the instant when the transaction has been committed.
-    #[allow(unused)]
-    pub(super) fn commit_instant(&self) -> S::Instant {
+    pub(super) fn commit_instant(&self) -> Option<S::Instant> {
         if self.state.load(Acquire) == State::Committed.into() {
-            self.commit_instant
+            Some(self.commit_instant)
         } else {
-            S::Instant::default()
+            None
         }
     }
 }

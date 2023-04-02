@@ -26,15 +26,13 @@ use std::sync::atomic::Ordering::Acquire;
 pub struct Snapshot<'s, 't, 'j, S: Sequencer> {
     #[allow(dead_code)]
     tracker: S::Tracker,
-    #[allow(dead_code)]
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
-    #[allow(dead_code)]
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
     _phantom: PhantomData<&'s ()>,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
     #[allow(dead_code)]
     anchor_addr: usize,
@@ -44,9 +42,8 @@ pub(super) struct TransactionSnapshot<'t> {
 }
 
 /// Data representing the current state of the [`Journal`](super::Transaction).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct JournalSnapshot<'t, 'j> {
-    #[allow(dead_code)]
     anchor_addr: usize,
     _phantom: PhantomData<(&'t (), &'j ())>,
 }
@@ -65,6 +62,21 @@ impl<'s, 't, 'j, S: Sequencer> Snapshot<'s, 't, 'j, S> {
             journal_snapshot,
             _phantom: PhantomData,
         }
+    }
+
+    /// Gets the time point value of the database snapshot.
+    pub(super) fn database_snapshot(&self) -> S::Instant {
+        self.tracker.to_instant()
+    }
+
+    /// Gets a reference to its [`TransactionSnapshot`].
+    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
+        self.transaction_snapshot.as_ref()
+    }
+
+    /// Gets a reference to its [`JournalSnapshot`].
+    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
+        self.journal_snapshot.as_ref()
     }
 }
 
@@ -90,6 +102,16 @@ impl<'t> TransactionSnapshot<'t> {
             instant,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<'t> PartialOrd for TransactionSnapshot<'t> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        if self.anchor_addr != other.anchor_addr {
+            return None;
+        }
+        self.instant.partial_cmp(&other.instant)
     }
 }
 

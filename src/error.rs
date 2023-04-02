@@ -13,6 +13,9 @@ pub enum Error {
     /// The operation failed to be serialized with others.
     SerializationFailure,
 
+    /// The operation was timed out.
+    Timeout,
+
     /// The operation encountered the target database object being in an unexpected state.
     UnexpectedState,
 
