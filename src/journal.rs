@@ -4,10 +4,11 @@
 
 use super::snapshot::JournalSnapshot;
 use super::transaction::Anchor as TransactionAnchor;
+use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{PersistenceLayer, Sequencer, Snapshot, Transaction};
 use scc::ebr;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{Relaxed, Release};
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// [`Journal`] keeps the change history.
 #[derive(Debug)]
@@ -100,20 +101,35 @@ pub struct Anchor<S: Sequencer> {
     #[allow(unused)]
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     creation_instant: usize,
+
+    /// The transaction instant when the [`Journal`] was submitted.
+    ///
+    /// This being `zero` represents a state where the changes made by the [`Journal`] cannot be
+    /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
     submit_instant: AtomicUsize,
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
 impl<S: Sequencer> Anchor<S> {
-    /// Returns a reference to the `next` field.
-    pub(super) fn next(&self) -> &ebr::AtomicArc<Anchor<S>> {
-        &self.next
+    /// Sets the next [`Anchor`].
+    pub(super) fn set_next(
+        &self,
+        next: Option<ebr::Arc<Anchor<S>>>,
+        order: Ordering,
+    ) -> Option<ebr::Arc<Anchor<S>>> {
+        let new_submit_instant = next
+            .as_ref()
+            .map_or(UNFINISHED_TRANSACTION_INSTANT + 1, |a| {
+                a.submit_instant().min(UNREACHABLE_TRANSACTION_INSTANT - 1) + 1
+            });
+        self.submit_instant.store(new_submit_instant, order);
+        self.next.swap((next, ebr::Tag::None), order).0
     }
 
-    /// Assigns the instant when the it was submitted to the transaction.
-    pub(super) fn assign_submit_instant(&self, instant: usize) {
-        debug_assert_ne!(instant, 0);
-        self.submit_instant.store(instant, Release);
+    /// Rolls back the changes contained in the associated [`Journal`].
+    pub(super) fn rollback(&self) {
+        self.submit_instant
+            .store(UNFINISHED_TRANSACTION_INSTANT, Relaxed);
     }
 
     /// Reads its submit instant.
@@ -129,7 +145,7 @@ impl<S: Sequencer> Anchor<S> {
         Anchor {
             transaction_anchor,
             creation_instant,
-            submit_instant: AtomicUsize::new(0),
+            submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
             next: ebr::AtomicArc::null(),
         }
     }
