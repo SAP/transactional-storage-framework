@@ -86,6 +86,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// let journal = transaction.journal();
     /// let snapshot = journal.snapshot();
     /// ```
+    #[inline]
     #[must_use]
     pub fn snapshot<'r>(&'r self) -> Snapshot<'d, 't, 'r, S> {
         Snapshot::from_parts(
@@ -96,6 +97,14 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
             ),
             Some(self.journal_snapshot()),
         )
+    }
+
+    /// Returns a reference to its [`Anchor`].
+    #[inline]
+    #[must_use]
+    #[allow(dead_code)]
+    pub(super) fn anchor(&self) -> &ebr::Arc<Anchor<S>> {
+        &self.anchor
     }
 
     /// Creates a new [`Journal`].

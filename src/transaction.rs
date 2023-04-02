@@ -193,6 +193,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub async fn prepare(self) -> Result<Committable<'d, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
+        // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         anchor_mut_ref.prepare_instant = self.sequencer().now(Relaxed);
         anchor_mut_ref.state.store(1, Release);
@@ -292,6 +293,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     fn post_process(self) -> S::Instant {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
+        // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         let commit_instant = self.sequencer().advance(Release);
         anchor_mut_ref.commit_instant = commit_instant;
@@ -423,6 +425,7 @@ mod test {
     fn prolong_transaction<S: Sequencer, P: PersistenceLayer<S>>(
         t: Transaction<S, P>,
     ) -> Transaction<'static, S, P> {
+        // Safety: test-only.
         unsafe { std::mem::transmute(t) }
     }
 

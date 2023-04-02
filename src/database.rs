@@ -36,7 +36,7 @@ pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
     sequencer: S,
 
     /// The container map.
-    container_map: HashIndex<String, ebr::Arc<Container<S>>>,
+    container_map: HashIndex<String, ebr::Arc<Container<S, P>>>,
 
     /// The database access controller.
     access_controller: AccessController<S>,
@@ -131,7 +131,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         metadata: Metadata,
         _journal: &'j mut Journal<'d, 't, S, P>,
         _deadline: Option<Instant>,
-    ) -> Result<ebr::Arc<Container<S>>, Error> {
+    ) -> Result<ebr::Arc<Container<S, P>>, Error> {
         let _: &AccessController<S> = &self.kernel.access_controller;
         let container = ebr::Arc::new(Container::new(metadata));
         match self
@@ -224,11 +224,12 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         &'d self,
         name: &str,
         _snapshot: &'r Snapshot<'d, 't, 'j, S>,
-    ) -> Option<&'r Container<S>> {
-        self.kernel.container_map.read(name, |_, c| unsafe {
-            // The `Container` survives as long as the `Snapshot` is valid.
-            std::mem::transmute::<&Container<S>, &'r Container<S>>(&**c)
-        })
+    ) -> Option<&'r Container<S, P>> {
+        self.kernel.container_map.read(name, |_, c|
+            // Safety: `snapshot` is the proof that the returned reference stays valid at least for
+            // the lifetime of `snapshot`; even though the container is dropped, the data remains
+            // until it is garbage collected.
+            unsafe { std::mem::transmute::<&Container<S, P>, &'r Container<S, P>>(&**c) })
     }
 
     /// Drops a [`Container`] under the specified name.

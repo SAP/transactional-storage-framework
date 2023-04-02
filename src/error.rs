@@ -10,6 +10,9 @@ pub enum Error {
     /// The desired resource could not be found in the database.
     NotFound,
 
+    /// Memory allocation failed.
+    OutOfMemory,
+
     /// The operation failed to be serialized with others.
     SerializationFailure,
 
