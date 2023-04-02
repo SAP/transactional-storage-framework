@@ -16,7 +16,8 @@ use std::task::{Context, Poll};
 /// [`Transaction`] is the atomic unit of work in a [`Database`].
 ///
 /// A single strand of [`Journal`] constitutes a [`Transaction`], and an on-going transaction can
-/// be rewound to a certain point of time by reverting submitted [`Journal`] instances.
+/// be rewound to a certain instant by rolling back submitted [`Journal`] instances in reverse
+/// order.
 #[derive(Debug)]
 pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     /// The transaction refers to the corresponding [`Database`] to persist pending changes at
@@ -24,18 +25,27 @@ pub struct Transaction<'s, S: Sequencer, P: PersistenceLayer<S>> {
     database: &'s Database<S, P>,
 
     /// The changes made by the transaction.
+    ///
+    /// [`Transaction`] assigns each submitted [`Journal`] a logical time point value in increasing
+    /// order.
     journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
 
     /// A piece of data that is shared between [`Journal`] and [`Transaction`].
     ///
     /// It outlives the [`Transaction`], and it is dropped when no database objects refer to it.
     anchor: ebr::Arc<Anchor<S>>,
-
-    /// The transaction-local clock generator.
-    ///
-    /// The clock value is updated whenever a [`Journal`] is submitted.
-    clock: AtomicUsize,
 }
+
+/// `0` as a transaction logical time point value represents an unfinished or rolled back job.
+pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
+
+/// `usize::MAX` as a transaction logical time point is regarded as an unreachable instant for
+/// transactions, thus disallowing readers to see changes corresponding to the time point.
+///
+/// [`Transaction`] cannot generated a clock value that is equal to or greater than
+/// [`UNREACHABLE_TRANSACTION_INSTANT`], and changes made at [`UNREACHABLE_TRANSACTION_INSTANT`]
+/// can never be visible to any other jobs in the same transaction.
+pub const UNREACHABLE_TRANSACTION_INSTANT: usize = usize::MAX;
 
 impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// Creates a new [`Journal`].
@@ -60,6 +70,10 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
 
     /// Captures the current state of the [`Database`] and the [`Transaction`] as a [`Snapshot`].
     ///
+    /// If the number of submitted [`Journal`] instances is equal to or greater than
+    /// `usize::MAX`, recent changes in the transaction will not be visible to the [`Snapshot`]
+    /// since they cannot be expressed as a `usize` value.
+    ///
     /// # Examples
     ///
     /// ```
@@ -81,7 +95,10 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// Gets the current local clock value of the [`Transaction`].
     ///
     /// The returned value amounts to the number of submitted [`Journal`] instances in the
-    /// [`Transaction`].
+    /// [`Transaction`] if the number is less than `usize::MAX`. This implies that, if more than
+    /// `usize::MAX` [`Journal`] instances have been submitted to the transaction, recent changes
+    /// will never be visible to any other jobs in the transaction, since this method cannot return
+    /// any value that is equal to or greater than `usize::MAX`.
     ///
     /// # Examples
     ///
@@ -98,17 +115,21 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     /// ```
     #[inline]
     pub fn now(&self) -> usize {
-        self.clock.load(Acquire)
+        self.journal_strand
+            .load(Acquire, &ebr::Barrier::new())
+            .as_ref()
+            .map_or(UNFINISHED_TRANSACTION_INSTANT, |j| {
+                let submit_instant = j.submit_instant().min(UNREACHABLE_TRANSACTION_INSTANT - 1);
+                debug_assert_ne!(submit_instant, UNFINISHED_TRANSACTION_INSTANT);
+                submit_instant
+            })
     }
 
     /// Rewinds the [`Transaction`] to the given point of time.
     ///
-    /// All the changes made after the specified instant are rolled back. It requires a mutable
-    /// reference, thus ensuring exclusivity.
-    ///
-    /// # Errors
-    ///
-    /// If an invalid instant is supplied, an error is returned.
+    /// All the changes made after the specified instant are rolled back and returns the updated
+    /// clock value. It requires a mutable reference to the [`Transaction`], thus ensuring
+    /// exclusivity.
     ///
     /// # Examples
     ///
@@ -117,35 +138,32 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// let result = transaction.rewind(1);
-    /// assert!(result.is_err());
+    /// assert_eq!(transaction.rewind(1), 0);
     ///
     /// for _ in 0..3 {
     ///     let journal = transaction.journal();
     ///     journal.submit();
     /// }
     ///
-    /// let result = transaction.rewind(1);
-    /// assert!(result.is_ok());
-    /// assert_eq!(transaction.now(), 1);
+    /// assert_eq!(transaction.now(), 3);
+    /// assert_eq!(transaction.rewind(4), 3);
+    /// assert_eq!(transaction.rewind(3), 3);
+    /// assert_eq!(transaction.rewind(1), 1);
     /// ```
     #[inline]
-    pub fn rewind(&mut self, instant: usize) -> Result<usize, Error> {
-        let current_instant = self.clock.load(Acquire);
-        if current_instant <= instant {
-            return Err(Error::WrongParameter);
-        }
+    pub fn rewind(&mut self, instant: usize) -> usize {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             if record.submit_instant() <= instant {
                 current = Some(record);
                 break;
             }
-            current = record.next().swap((None, ebr::Tag::None), Acquire).0;
+            record.rollback();
+            current = record.set_next(None, Relaxed);
         }
+        let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
-        self.clock.store(instant, Release);
-        Ok(instant)
+        new_instant
     }
 
     /// Prepares the [Transaction] for commit.
@@ -234,7 +252,6 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
             database,
             journal_strand: ebr::AtomicArc::null(),
             anchor: ebr::Arc::new(Anchor::new()),
-            clock: AtomicUsize::new(0),
         }
     }
 
@@ -248,9 +265,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
-            record
-                .next()
-                .swap((current.get_arc(), ebr::Tag::None), Relaxed);
+            record.set_next(current.get_arc(), Relaxed);
             match self.journal_strand.compare_exchange(
                 current,
                 (Some(record.clone()), ebr::Tag::None),
@@ -258,12 +273,7 @@ impl<'s, S: Sequencer, P: PersistenceLayer<S>> Transaction<'s, S, P> {
                 Relaxed,
                 &barrier,
             ) {
-                Ok(_) => {
-                    // Transaction-local clock is updated after contents are submitted.
-                    let current_instant = self.clock.fetch_add(1, Release) + 1;
-                    record.assign_submit_instant(current_instant);
-                    return current_instant;
-                }
+                Ok(_) => return record.submit_instant(),
                 Err((_, actual)) => current = actual,
             }
         }
@@ -407,11 +417,61 @@ impl<S: Sequencer> Anchor<S> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    /// Helper that prolongs the lifetime of a [`Transaction`] to send it to a spawned task.
+    fn prolong_transaction<S: Sequencer, P: PersistenceLayer<S>>(
+        t: Transaction<S, P>,
+    ) -> Transaction<'static, S, P> {
+        unsafe { std::mem::transmute(t) }
+    }
 
     #[tokio::test]
     async fn transaction() {
         let database = Database::default();
         let transaction = database.transaction();
         assert!(transaction.commit().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn rewind() {
+        let num_tasks = 16;
+        let barrier = Arc::new(Barrier::new(num_tasks));
+        let database = Arc::new(Database::default());
+        let mut transaction = Arc::new(prolong_transaction(database.transaction()));
+        let mut task_handles = Vec::with_capacity(num_tasks);
+        for _ in 0..num_tasks {
+            let barrier_clone = barrier.clone();
+            let transaction_clone = transaction.clone();
+            task_handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                for i in 0..num_tasks {
+                    assert!(transaction_clone.now() >= i);
+                    let journal = transaction_clone.journal();
+                    assert!(journal.submit() > i);
+                }
+            }));
+        }
+        for r in futures::future::join_all(task_handles).await {
+            assert!(r.is_ok());
+        }
+
+        let num_submitted_journals = transaction.now();
+        for i in 0..num_submitted_journals {
+            assert_eq!(
+                Arc::get_mut(&mut transaction)
+                    .unwrap()
+                    .rewind(num_submitted_journals - i - 1),
+                num_submitted_journals - i - 1
+            );
+            assert_eq!(
+                Arc::get_mut(&mut transaction)
+                    .unwrap()
+                    .rewind(UNREACHABLE_TRANSACTION_INSTANT),
+                num_submitted_journals - i - 1
+            );
+        }
+        assert_eq!(transaction.now(), UNFINISHED_TRANSACTION_INSTANT);
     }
 }

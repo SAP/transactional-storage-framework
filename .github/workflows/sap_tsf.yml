@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: TSS
+name: SAP-transactional-storage-framework
 
 on:
   push:
