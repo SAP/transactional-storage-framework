@@ -443,7 +443,7 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
-    /// Returns the instant when the transaction has been committed.
+    /// Returns the instant when the transaction has been committed or rolled back.
     pub(super) fn eot_instant(&self) -> Option<S::Instant> {
         let state = self.state.load(Acquire);
         if state == State::Committed.into() || state == State::RolledBack.into() {
