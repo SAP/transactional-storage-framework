@@ -325,7 +325,6 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
 mod test {
     use crate::sequencer::AtomicCounter;
     use crate::{Database, Metadata};
-
     use std::sync::Arc;
 
     #[tokio::test]

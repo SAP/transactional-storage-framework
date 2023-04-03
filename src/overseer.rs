@@ -120,27 +120,29 @@ impl Drop for Overseer {
 mod test {
     use super::*;
     use crate::Database;
-
     use std::future::Future;
     use std::sync::mpsc::SyncSender;
     use std::task::Poll;
     use std::time::Instant;
 
-    struct AfterNSec<'d>(Instant, Duration, &'d SyncSender<Task>);
+    struct AfterNSecs<'d>(Instant, u64, &'d SyncSender<Task>);
 
-    impl<'d> Future for AfterNSec<'d> {
+    impl<'d> Future for AfterNSecs<'d> {
         type Output = ();
 
         fn poll(
             self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> Poll<Self::Output> {
-            if self.0 + self.1 < Instant::now() {
+            if self.0 + Duration::from_secs(self.1) < Instant::now() {
                 Poll::Ready(())
             } else {
                 if self
                     .2
-                    .try_send(Task::WakeUp(self.0 + self.1, cx.waker().clone()))
+                    .try_send(Task::WakeUp(
+                        self.0 + Duration::from_secs(self.1),
+                        cx.waker().clone(),
+                    ))
                     .is_err()
                 {
                     cx.waker().wake_by_ref();
@@ -154,11 +156,11 @@ mod test {
     async fn overseer() {
         let database = Database::default();
         let now = Instant::now();
-        let after1sec = AfterNSec(now, Duration::from_secs(1), database.message_sender());
-        let after2sec = AfterNSec(now, Duration::from_secs(2), database.message_sender());
+        let after1sec = AfterNSecs(now, 1, database.message_sender());
+        let after2secs = AfterNSecs(now, 2, database.message_sender());
         after1sec.await;
         assert!(now.elapsed() > Duration::from_millis(128));
-        after2sec.await;
+        after2secs.await;
         assert!(now.elapsed() > Duration::from_millis(256));
     }
 }
