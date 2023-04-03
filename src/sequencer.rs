@@ -245,50 +245,46 @@ struct Entry {
 #[cfg(test)]
 mod test {
     use super::*;
-
     use std::sync::atomic::Ordering::Release;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
-    #[test]
-    fn atomic_counter() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn atomic_counter() {
         let atomic_counter: Arc<AtomicCounter> = Arc::new(AtomicCounter {
             clock: AtomicU64::new(1),
             list: Queue::default(),
         });
-
-        let num_threads = 16;
-        let mut thread_handles = Vec::with_capacity(num_threads);
-        let barrier = Arc::new(Barrier::new(num_threads));
-        for _ in 0..num_threads {
-            let atomic_counter_cloned = atomic_counter.clone();
-            let barrier_cloned = barrier.clone();
-            thread_handles.push(thread::spawn(move || {
-                barrier_cloned.wait();
+        let num_tasks = 16;
+        let mut task_handles = Vec::with_capacity(num_tasks);
+        let barrier = Arc::new(Barrier::new(num_tasks));
+        for _ in 0..num_tasks {
+            let atomic_counter_clone = atomic_counter.clone();
+            let barrier_clone = barrier.clone();
+            task_handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
                 for _ in 0..4096 {
-                    let advanced = atomic_counter_cloned.advance(Release);
-                    let current = atomic_counter_cloned.now(Acquire);
+                    let advanced = atomic_counter_clone.advance(Release);
+                    let current = atomic_counter_clone.now(Acquire);
                     assert!(advanced <= current);
 
-                    let tracker = atomic_counter_cloned.track(Acquire);
+                    let tracker = atomic_counter_clone.track(Acquire);
                     assert!(current <= tracker.to_instant());
 
-                    let min = atomic_counter_cloned.min(Relaxed);
+                    let min = atomic_counter_clone.min(Relaxed);
                     assert!(min <= tracker.to_instant());
 
                     drop(tracker);
 
-                    let advanced = atomic_counter_cloned.advance(Release);
-                    let current = atomic_counter_cloned.now(Acquire);
+                    let advanced = atomic_counter_clone.advance(Release);
+                    let current = atomic_counter_clone.now(Acquire);
                     assert!(advanced <= current);
                 }
-                barrier_cloned.wait();
             }));
         }
-
-        thread_handles
-            .into_iter()
-            .for_each(|t| assert!(t.join().is_ok()));
+        for r in futures::future::join_all(task_handles).await {
+            assert!(r.is_ok());
+        }
         assert_eq!(atomic_counter.min(Acquire), atomic_counter.now(Acquire));
     }
 }
