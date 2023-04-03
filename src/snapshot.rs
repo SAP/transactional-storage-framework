@@ -2,11 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::overseer::Task;
 use super::sequencer::ToInstant;
 use super::Sequencer;
 use std::cmp;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::Acquire;
+use std::sync::mpsc::SyncSender;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
 ///
@@ -25,9 +27,10 @@ use std::sync::atomic::Ordering::Acquire;
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     tracker: S::Tracker,
+    #[allow(dead_code)]
+    message_sender: &'d SyncSender<Task>,
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    _phantom: PhantomData<&'d ()>,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
@@ -49,29 +52,35 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Creates a new [`Snapshot`].
     pub(super) fn from_parts(
         sequencer: &'d S,
+        message_sender: &'d SyncSender<Task>,
         transaction_snapshot: Option<TransactionSnapshot<'t>>,
         journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
     ) -> Snapshot<'d, 't, 'j, S> {
         let tracker = sequencer.track(Acquire);
         Snapshot {
             tracker,
+            message_sender,
             transaction_snapshot,
             journal_snapshot,
-            _phantom: PhantomData,
         }
     }
 
-    /// Gets the time point value of the database snapshot.
+    /// Returns the time point value of the database snapshot.
     pub(super) fn database_snapshot(&self) -> S::Instant {
         self.tracker.to_instant()
     }
 
-    /// Gets a reference to its [`TransactionSnapshot`].
+    /// Returns a reference to the message sender.
+    pub(super) fn message_sender(&self) -> &SyncSender<Task> {
+        self.message_sender
+    }
+
+    /// Returns a reference to its [`TransactionSnapshot`].
     pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
         self.transaction_snapshot.as_ref()
     }
 
-    /// Gets a reference to its [`JournalSnapshot`].
+    /// Returns a reference to its [`JournalSnapshot`].
     pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
         self.journal_snapshot.as_ref()
     }

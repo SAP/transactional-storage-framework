@@ -8,6 +8,7 @@ use super::{
     Sequencer, Snapshot, Transaction, VolatileDevice,
 };
 use scc::{ebr, HashIndex};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -100,7 +101,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     #[inline]
     #[must_use]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(&self.kernel.sequencer, None, None)
+        Snapshot::from_parts(&self.kernel.sequencer, self.message_sender(), None, None)
     }
 
     /// Creates a new empty [`Container`].
@@ -280,12 +281,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         &self.kernel.sequencer
     }
 
-    /// Tries to posts a task.
-    ///
-    /// Returns `false` if it fails to post the task.
+    /// Returns a message sender to the [`Overseer`].
     #[inline]
-    pub(super) fn try_post(&self, task: Task) -> bool {
-        self.overseer.sender().try_send(task).is_ok()
+    pub(super) fn message_sender(&self) -> &SyncSender<Task> {
+        self.overseer.message_sender()
     }
 }
 
@@ -318,10 +317,7 @@ impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
 impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     #[inline]
     fn drop(&mut self) {
-        while !self.try_post(Task::Shutdown) {
-            // Reaching here means that there is a program logic bug.
-            debug_assert!(false, "programming logic error");
-        }
+        while self.message_sender().send(Task::Shutdown).is_err() {}
     }
 }
 

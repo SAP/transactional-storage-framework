@@ -31,7 +31,8 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync {
     /// across threads and awaits frequently. [`PartialEq`] and [`PartialOrd`] allow developers to
     /// implement a floating-point, or a `Vector Clock` generator.
     ///
-    /// The [`Default`] value is regarded as `⊥`.
+    /// The [`Default`] value is regarded as `⊥`, and the value is not allowed to be used by a
+    /// transaction as its commit time point value.
     type Instant: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
 
     /// [`Tracker`](Sequencer::Tracker) allows the sequencer to track every actively used
