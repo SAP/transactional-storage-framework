@@ -39,40 +39,39 @@ impl<S: Sequencer> AccessController<S> {
         snapshot: &Snapshot<'_, '_, '_, S>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        if let Some((mut visibility, await_visibility)) = self
-            .table
-            .read_async(&object.to_object_id(), |_, entry| match entry {
-                Entry::Reserved(owner) => {
-                    // The database object is being created.
-                    match owner.grant_read_access(snapshot, deadline) {
-                        Ok(visibility) => (visibility, None),
-                        Err(await_visibility) => (false, Some(await_visibility)),
+        loop {
+            let await_eot = match self
+                .table
+                .read_async(&object.to_object_id(), |_, entry| match entry {
+                    Entry::Reserved(owner) => {
+                        // The database object is being created.
+                        owner.grant_read_access(snapshot, deadline)
                     }
-                }
-                Entry::Created(instant) => {
-                    // The database object was created at `instant`.
-                    (*snapshot >= *instant, None)
-                }
-                Entry::Locked(_owner) => {
-                    // TODO: usually, the database object being locked does not affect visibility,
-                    // but there are corner cases that have to be addressed precisely.
-                    (true, None)
-                }
-                Entry::Deleted(instant) => {
-                    // The database object was deleted at `instant`.
-                    (*snapshot < *instant, None)
-                }
-            })
-            .await
-        {
-            if let Some(await_visibility) = await_visibility {
-                visibility = await_visibility.await?;
-            }
-            Ok(visibility)
-        } else {
-            // No access control is set.
-            Ok(true)
+                    Entry::Created(instant) => {
+                        // The database object was created at `instant`.
+                        Ok(*snapshot >= *instant)
+                    }
+                    Entry::Locked(_owner) => {
+                        // TODO: usually, the database object being locked does not affect visibility,
+                        // but there are corner cases that have to be addressed precisely.
+                        Ok(true)
+                    }
+                    Entry::Deleted(instant) => {
+                        // The database object was deleted at `instant`.
+                        Ok(*snapshot < *instant)
+                    }
+                })
+                .await
+            {
+                Some(Ok(visibility)) => return Ok(visibility),
+                Some(Err(await_eot)) => await_eot,
+                None => break,
+            };
+            await_eot.await?;
         }
+
+        // No access control is set.
+        Ok(true)
     }
 
     /// Reserves access control data for a database object to create it.
@@ -297,6 +296,9 @@ mod test {
 
     static_assertions::assert_eq_size!(Entry<AtomicCounter>, [u8; 16]);
 
+    const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(256);
+    const TIMEOUT_EXPECTED: Duration = Duration::from_millis(256);
+
     impl ToObjectID for usize {
         fn to_object_id(&self) -> usize {
             *self
@@ -321,7 +323,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn reserve_prepare_read_timeout() {
+    async fn reserve_prepare_read() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -335,13 +337,34 @@ mod test {
         let snapshot = database.snapshot();
         assert_eq!(
             access_controller
-                .read(
-                    &0,
-                    &snapshot,
-                    Some(Instant::now() + Duration::from_micros(16)),
-                )
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
                 .await,
-            Err(Error::Timeout)
+            Ok(false),
+        );
+        drop(prepared);
+    }
+
+    #[tokio::test]
+    async fn reserve_prepare_timeout() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+
+        assert!(database.transaction().commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED),)
+                .await,
+            Err(Error::Timeout),
         );
         drop(prepared);
     }
@@ -363,11 +386,7 @@ mod test {
             let snapshot = database.snapshot();
             database_snapshot = snapshot.database_snapshot();
             access_controller
-                .read(
-                    &0,
-                    &snapshot,
-                    Some(Instant::now() + Duration::from_secs(16)),
-                )
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                 .await
         };
 
@@ -394,11 +413,7 @@ mod test {
         let snapshot = database.snapshot();
         assert_eq!(
             access_controller
-                .read(
-                    &0,
-                    &snapshot,
-                    Some(Instant::now() + Duration::from_secs(16)),
-                )
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
                 .await,
             Ok(false)
         );

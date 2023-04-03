@@ -7,12 +7,14 @@ use super::overseer::Task;
 use super::snapshot::TransactionSnapshot;
 use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
+use scc::Bag;
 use std::future::Future;
 use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::mpsc::SyncSender;
+use std::task::Waker;
 use std::task::{Context, Poll};
 
 /// [`Transaction`] is the atomic unit of work in a [`Database`].
@@ -244,9 +246,8 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     #[allow(clippy::unused_async)]
     #[inline]
     pub async fn rollback(mut self) {
-        self.anchor.state.store(State::RollingBack.into(), Release);
-        let _result = self.rewind(0);
-        self.anchor.state.store(State::RolledBack.into(), Release);
+        self.rollback_internal();
+        // TODO: asynchronously persist the fact.
         drop(self);
     }
 
@@ -297,8 +298,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// Post-processes its transaction commit.
     ///
     /// Only a `Committable` instance is allowed to call this function.
-    /// Once the transaction is post-processed, the transaction cannot be rolled back.
-    fn post_process(self) -> S::Instant {
+    fn commit_internal(&mut self) -> S::Instant {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
         // Safety: it is the sole writer of its own `anchor`.
@@ -307,20 +307,37 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         debug_assert_ne!(commit_instant, S::Instant::default());
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
+        self.anchor.wake_up();
 
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
-        drop(self);
 
         commit_instant
+    }
+
+    /// Rolls back all the changes.
+    fn rollback_internal(&mut self) {
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::Committed.into());
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::RollingBack.into());
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::RolledBack.into());
+
+        self.anchor.state.store(State::RollingBack.into(), Release);
+        self.anchor.wake_up();
+
+        let result = self.rewind(0);
+        debug_assert_eq!(result, 0);
+
+        self.anchor.state.store(State::RolledBack.into(), Release);
     }
 }
 
 impl<'d, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'d, S, P> {
     #[inline]
     fn drop(&mut self) {
-        self.anchor.state.store(State::RollingBack.into(), Release);
-        let _result = self.rewind(0);
-        self.anchor.state.store(State::RolledBack.into(), Release);
+        let state = self.anchor.state.load(Relaxed);
+        if state == State::Active.into() || state == State::Committing.into() {
+            self.rollback_internal();
+            // TODO: send a piece of information to the `Overseer` to persist the fact.
+        }
     }
 }
 
@@ -338,7 +355,8 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(commit_instant) = self.transaction.take().map(Transaction::post_process) {
+        if let Some(commit_instant) = self.transaction.take().map(|mut t| t.commit_internal()) {
+            // TODO: persist the fact that the transaction was committed.
             Poll::Ready(Ok(commit_instant))
         } else {
             Poll::Pending
@@ -347,6 +365,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
 }
 
 /// [`Transaction`] state.
+#[derive(Clone, Copy, Eq, Debug, Ord, PartialEq, PartialOrd)]
 pub enum State {
     /// The transaction is active.
     Active,
@@ -395,6 +414,9 @@ pub(super) struct Anchor<S: Sequencer> {
 
     /// The instant when the commit is completed.
     commit_instant: S::Instant,
+
+    /// An unordered bag of [`Waker`] for readers.
+    waiting_readers: Bag<Waker>,
 }
 
 impl<S: Sequencer> Anchor<S> {
@@ -403,25 +425,43 @@ impl<S: Sequencer> Anchor<S> {
             state: AtomicUsize::new(0),
             prepare_instant: S::Instant::default(),
             commit_instant: S::Instant::default(),
+            waiting_readers: Bag::default(),
         }
     }
 
     /// Returns the instant when the transaction was being prepared for commit.
-    #[allow(unused)]
-    pub(super) fn prepare_instant(&self) -> S::Instant {
-        if self.state.load(Acquire) == State::Active.into() {
-            S::Instant::default()
+    pub(super) fn prepare_instant(&self) -> Option<S::Instant> {
+        if self.state.load(Acquire) == State::Committing.into() {
+            Some(self.prepare_instant)
         } else {
-            self.prepare_instant
+            None
         }
     }
 
     /// Returns the instant when the transaction has been committed.
-    pub(super) fn commit_instant(&self) -> Option<S::Instant> {
+    pub(super) fn eot_instant(&self) -> Option<S::Instant> {
         if self.state.load(Acquire) >= State::Committed.into() {
             Some(self.commit_instant)
         } else {
             None
+        }
+    }
+
+    /// Waiting for the transaction to be committed or rolled back.
+    pub(super) fn wait_eot(&self, waker: Waker) -> Option<S::Instant> {
+        self.waiting_readers.push(waker);
+        if let Some(commit_instant) = self.eot_instant() {
+            self.wake_up();
+            Some(commit_instant)
+        } else {
+            None
+        }
+    }
+
+    /// Wakes up every [`Waker`] stored in the [`Anchor`].
+    fn wake_up(&self) {
+        while let Some(waker) = self.waiting_readers.pop() {
+            waker.wake();
         }
     }
 }

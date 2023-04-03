@@ -41,12 +41,11 @@ pub(super) struct Anchor<S: Sequencer> {
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
-/// [`AwaitReadPermission`] is returned by [`Anchor`] if it is unclear whether a reader can read
-/// the changes in the [`Journal`] or not instantly.
+/// [`AwaitEOT`] is returned by [`Anchor`] for the caller to await the final transaction state if
+/// the transaction is being committed.
 #[derive(Debug)]
-pub(super) struct AwaitReadPermission<'d, S: Sequencer> {
+pub(super) struct AwaitEOT<'d, S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-    database_snapshot: S::Instant,
     message_sender: &'d SyncSender<Task>,
     deadline: Instant,
 }
@@ -137,11 +136,11 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 
 impl<S: Sequencer> Anchor<S> {
     /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
-    pub(super) fn grant_read_access<'s>(
+    pub(super) fn grant_read_access<'d>(
         &self,
-        snapshot: &'s Snapshot<'_, '_, '_, S>,
+        snapshot: &'d Snapshot<'_, '_, '_, S>,
         deadline: Option<Instant>,
-    ) -> Result<bool, AwaitReadPermission<'s, S>> {
+    ) -> Result<bool, AwaitEOT<'d, S>> {
         if let Some(journal_snapshot) = snapshot.journal_snapshot() {
             if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
                 // It comes from the same transaction, and same journal.
@@ -160,21 +159,36 @@ impl<S: Sequencer> Anchor<S> {
             }
         }
 
-        if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
-            return Ok(commit_instant != S::Instant::default()
-                && commit_instant <= snapshot.database_snapshot());
+        if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
+            return Ok(
+                eot_instant != S::Instant::default() && eot_instant <= snapshot.database_snapshot()
+            );
+        }
+
+        if let Some(prepare_instant) = self.transaction_anchor.prepare_instant() {
+            if prepare_instant >= snapshot.database_snapshot() {
+                return Ok(false);
+            }
         }
 
         if let Some(deadline) = deadline {
-            return Err(AwaitReadPermission {
-                transaction_anchor: self.transaction_anchor.clone(),
-                database_snapshot: snapshot.database_snapshot(),
-                message_sender: snapshot.message_sender(),
-                deadline,
-            });
+            return Err(self.await_eot(snapshot.message_sender(), deadline));
         }
 
         Ok(false)
+    }
+
+    /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
+    pub(super) fn await_eot<'d>(
+        &self,
+        message_sender: &'d SyncSender<Task>,
+        deadline: Instant,
+    ) -> AwaitEOT<'d, S> {
+        AwaitEOT {
+            transaction_anchor: self.transaction_anchor.clone(),
+            message_sender,
+            deadline,
+        }
     }
 
     /// Sets the next [`Anchor`].
@@ -217,20 +231,25 @@ impl<S: Sequencer> Anchor<S> {
     }
 }
 
-impl<'d, S: Sequencer> Future for AwaitReadPermission<'d, S> {
-    type Output = Result<bool, Error>;
+impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
+    type Output = Result<(), Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
-            return Poll::Ready(Ok(
-                commit_instant != S::Instant::default() && commit_instant <= self.database_snapshot
-            ));
-        }
-
-        if self.deadline < Instant::now() {
+        if self.transaction_anchor.eot_instant().is_some() {
+            // The transaction has been committed or rolled back.
+            return Poll::Ready(Ok(()));
+        } else if self.deadline < Instant::now() {
             // The deadline was reached.
             return Poll::Ready(Err(Error::Timeout));
+        } else if self
+            .transaction_anchor
+            .wait_eot(cx.waker().clone())
+            .is_some()
+        {
+            // The transaction has just been committed or rolled back right after the `Waker` was
+            // pushed into the transaction.
+            return Poll::Ready(Ok(()));
         }
 
         if self
