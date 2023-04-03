@@ -306,7 +306,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn reserve() {
+    async fn reserve_read() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -316,10 +316,13 @@ mod test {
             .await
             .is_ok());
         assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
         let snapshot = database.snapshot();
-        assert!(access_controller.read(&0, &snapshot, None).await.unwrap());
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(false),
+        );
     }
 
     #[tokio::test]

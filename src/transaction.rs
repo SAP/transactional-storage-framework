@@ -431,7 +431,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Returns the instant when the transaction was being prepared for commit.
     pub(super) fn prepare_instant(&self) -> Option<S::Instant> {
-        if self.state.load(Acquire) == State::Committing.into() {
+        if self.state.load(Acquire) >= State::Committing.into() {
             Some(self.prepare_instant)
         } else {
             None

@@ -166,13 +166,15 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(prepare_instant) = self.transaction_anchor.prepare_instant() {
-            if prepare_instant >= snapshot.database_snapshot() {
+            if prepare_instant != S::Instant::default()
+                && prepare_instant >= snapshot.database_snapshot()
+            {
                 return Ok(false);
             }
-        }
 
-        if let Some(deadline) = deadline {
-            return Err(self.await_eot(snapshot.message_sender(), deadline));
+            if let Some(deadline) = deadline {
+                return Err(self.await_eot(snapshot.message_sender(), deadline));
+            }
         }
 
         Ok(false)
