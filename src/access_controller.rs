@@ -31,7 +31,9 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// # Errors
     ///
-    /// An [`Error`] is returned if the specified deadline was reached.
+    /// An [`Error`] is returned if the specified deadline was reached or memory allocation failed
+    /// when pushing a [`Waker`](std::task::Waker) into the owner
+    /// [`Transaction`](super::Transaction).
     #[inline]
     pub async fn read<O: ToObjectID>(
         &self,
@@ -51,10 +53,37 @@ impl<S: Sequencer> AccessController<S> {
                         // The database object was created at `instant`.
                         Ok(*snapshot >= *instant)
                     }
-                    Entry::Locked(_owner) => {
-                        // TODO: usually, the database object being locked does not affect visibility,
-                        // but there are corner cases that have to be addressed precisely.
-                        Ok(true)
+                    Entry::Locked(locked) => {
+                        match locked {
+                            LockMode::SingleShared(_) | LockMode::Exclusive(_) => {
+                                // The database object is temporarily locked.
+                                Ok(true)
+                            }
+                            LockMode::SharedWithInstant(owner_set_with_instant) => {
+                                // The database object is temporarily shared, but the creation
+                                // instant has to be checked.
+                                Ok(*snapshot >= owner_set_with_instant.0)
+                            }
+                            LockMode::ExclusiveWithInstant(owner_with_instant) => {
+                                // The database object is temporarily locked, but the creation
+                                // instant has to be checked.
+                                Ok(*snapshot >= owner_with_instant.0)
+                            }
+                            LockMode::Marked(owner) => {
+                                // The database object is being deleted.
+                                owner.grant_read_access(snapshot, deadline)
+                            }
+                            LockMode::MarkedWithInstant(owner_with_instant) => {
+                                if *snapshot >= owner_with_instant.0 {
+                                    // The database object is being deleted.
+                                    owner_with_instant.1.grant_read_access(snapshot, deadline)
+                                } else {
+                                    // The database object was created after the reader had
+                                    // started.
+                                    Ok(false)
+                                }
+                            }
+                        }
                     }
                     Entry::Deleted(instant) => {
                         // The database object was deleted at `instant`.
@@ -115,35 +144,56 @@ impl<S: Sequencer> AccessController<S> {
         journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
-            MapEntry::Occupied(entry) => entry,
-            MapEntry::Vacant(entry) => {
-                entry.insert_entry(Entry::Locked(LockMode::SingleShared(
-                    journal.anchor().clone(),
-                )));
-                return Ok(true);
-            }
-        };
-        match entry.get_mut() {
-            Entry::Reserved(_) => {
-                // TODO: wait for the owner to be rolled or committed.
-                Err(Error::Timeout)
-            }
-            Entry::Created(instant) => {
-                *entry.get_mut() = Entry::Locked(LockMode::SharedWithInstant(Box::new((
-                    *instant,
-                    OwnerSet::with_owner(journal.anchor().clone()),
-                ))));
-                Ok(true)
-            }
-            Entry::Locked(_) => {
-                // TODO: try to add the transaction to the owner set.
-                Err(Error::Conflict)
-            }
-            Entry::Deleted(_) => {
-                // Already deleted.
-                Err(Error::SerializationFailure)
-            }
+        loop {
+            let mut entry = match self.table.entry_async(object.to_object_id()).await {
+                MapEntry::Occupied(entry) => entry,
+                MapEntry::Vacant(entry) => {
+                    entry.insert_entry(Entry::Locked(LockMode::SingleShared(
+                        journal.anchor().clone(),
+                    )));
+                    return Ok(true);
+                }
+            };
+
+            match entry.get_mut() {
+                Entry::Reserved(owner) => {
+                    // The state of the owner needs to be checked.
+                    if let Some(eot_instant) = owner.grant_write_access(journal) {
+                        if eot_instant == S::Instant::default() {
+                            // The transaction was rolled back.
+                            *entry.get_mut() =
+                                Entry::Locked(LockMode::SingleShared(journal.anchor().clone()));
+                            return Ok(true);
+                        }
+                        // The transaction was committed.
+                        *entry.get_mut() = Entry::Locked(LockMode::SharedWithInstant(Box::new((
+                            eot_instant,
+                            OwnerSet::with_owner(journal.anchor().clone()),
+                        ))));
+                        return Ok(true);
+                    }
+                }
+                Entry::Created(instant) => {
+                    // The database object is not owned or locked.
+                    *entry.get_mut() = Entry::Locked(LockMode::SharedWithInstant(Box::new((
+                        *instant,
+                        OwnerSet::with_owner(journal.anchor().clone()),
+                    ))));
+                    return Ok(true);
+                }
+                Entry::Locked(_) => {
+                    // TODO: try to add the transaction to the owner set.
+                    return Err(Error::Conflict);
+                }
+                Entry::Deleted(_) => {
+                    // Already deleted.
+                    return Err(Error::SerializationFailure);
+                }
+            };
+
+            drop(entry);
+
+            // TODO: implement a fair wait queue.
         }
     }
 
@@ -400,6 +450,77 @@ mod test {
     }
 
     #[tokio::test]
+    async fn reserve_commit_share_read() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+
+        let old_snapshot = database.snapshot();
+
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .share(&0, &mut journal, None)
+            .await
+            .unwrap());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
+        );
+        assert_eq!(
+            access_controller
+                .read(&0, &old_snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(false),
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_rollback_share_read() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        transaction.rollback().await;
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .share(&0, &mut journal, None)
+            .await
+            .unwrap());
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
+        );
+    }
+
+    #[tokio::test]
     async fn reserve_rollback_read() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
@@ -423,7 +544,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn share() {
+    async fn share_read() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -433,7 +554,24 @@ mod test {
             .await
             .unwrap());
         assert_eq!(journal.submit(), 1);
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
+        );
+
         assert!(transaction.commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
+        );
     }
 
     #[tokio::test]

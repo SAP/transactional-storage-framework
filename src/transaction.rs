@@ -431,16 +431,22 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Returns the instant when the transaction was being prepared for commit.
     pub(super) fn prepare_instant(&self) -> Option<S::Instant> {
-        if self.state.load(Acquire) >= State::Committing.into() {
+        let state = self.state.load(Acquire);
+        if state == State::Committing.into()
+            || state == State::Committed.into()
+            || state == State::RollingBack.into()
+            || state == State::RolledBack.into()
+        {
             Some(self.prepare_instant)
         } else {
             None
         }
     }
 
-    /// Returns the instant when the transaction has been committed.
+    /// Returns the instant when the transaction has been committed or rolled back.
     pub(super) fn eot_instant(&self) -> Option<S::Instant> {
-        if self.state.load(Acquire) >= State::Committed.into() {
+        let state = self.state.load(Acquire);
+        if state == State::Committed.into() || state == State::RolledBack.into() {
             Some(self.commit_instant)
         } else {
             None

@@ -136,6 +136,11 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 
 impl<S: Sequencer> Anchor<S> {
     /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
+    ///
+    /// # Errors
+    ///
+    /// An [`AwaitEOT`] is returned if the reader might be able to read the database object if the
+    /// transaction is committed.
     pub(super) fn grant_read_access<'d>(
         &self,
         snapshot: &'d Snapshot<'_, '_, '_, S>,
@@ -178,6 +183,19 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         Ok(false)
+    }
+
+    /// Checks if the writer is able to update a piece of data created by the transaction
+    /// represented by `self`.
+    ///
+    /// Returns the instant when the transaction was committed or rolled back if the transaction is
+    /// not active anymore, otherwise `None` is returned.
+    pub(super) fn grant_write_access<P: PersistenceLayer<S>>(
+        &self,
+        _journal: &mut Journal<'_, '_, S, P>,
+    ) -> Option<S::Instant> {
+        // TODO: intra-transaction visibility control.
+        self.transaction_anchor.eot_instant()
     }
 
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
