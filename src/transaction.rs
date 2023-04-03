@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
+use super::overseer::Task;
 use super::snapshot::TransactionSnapshot;
 use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
@@ -11,6 +12,7 @@ use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::mpsc::SyncSender;
 use std::task::{Context, Poll};
 
 /// [`Transaction`] is the atomic unit of work in a [`Database`].
@@ -87,6 +89,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::from_parts(
             self.database.sequencer(),
+            self.database.message_sender(),
             Some(self.transaction_snapshot(self.now())),
             None,
         )
@@ -256,9 +259,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         }
     }
 
-    /// Returns a reference to its associated [Sequencer].
+    /// Returns a reference to its associated [`Sequencer`].
     pub(super) fn sequencer(&self) -> &'d S {
         self.database.sequencer()
+    }
+
+    /// Returns a reference to its message sender.
+    pub(super) fn sender(&self) -> &'d SyncSender<Task> {
+        self.database.message_sender()
     }
 
     /// Takes [`Anchor`].
@@ -296,6 +304,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
         let commit_instant = self.sequencer().advance(Release);
+        debug_assert_ne!(commit_instant, S::Instant::default());
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
 
@@ -309,7 +318,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 impl<'d, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'d, S, P> {
     #[inline]
     fn drop(&mut self) {
+        self.anchor.state.store(State::RollingBack.into(), Release);
         let _result = self.rewind(0);
+        self.anchor.state.store(State::RolledBack.into(), Release);
     }
 }
 
@@ -407,7 +418,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Returns the instant when the transaction has been committed.
     pub(super) fn commit_instant(&self) -> Option<S::Instant> {
-        if self.state.load(Acquire) == State::Committed.into() {
+        if self.state.load(Acquire) >= State::Committed.into() {
             Some(self.commit_instant)
         } else {
             None

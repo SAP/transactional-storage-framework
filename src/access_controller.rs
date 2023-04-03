@@ -293,6 +293,7 @@ impl<S: Sequencer> OwnerSet<S> {
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
+    use std::time::Duration;
 
     static_assertions::assert_eq_size!(Entry<AtomicCounter>, [u8; 16]);
 
@@ -303,7 +304,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn empty_reserve() {
+    async fn reserve() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -320,7 +321,91 @@ mod test {
     }
 
     #[tokio::test]
-    async fn empty_share() {
+    async fn reserve_prepare_read_timeout() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &snapshot,
+                    Some(Instant::now() + Duration::from_micros(16)),
+                )
+                .await,
+            Err(Error::Timeout)
+        );
+        drop(prepared);
+    }
+
+    #[tokio::test]
+    async fn reserve_commit_read() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+        let mut database_snapshot = 0;
+        let reader = async {
+            let snapshot = database.snapshot();
+            database_snapshot = snapshot.database_snapshot();
+            access_controller
+                .read(
+                    &0,
+                    &snapshot,
+                    Some(Instant::now() + Duration::from_secs(16)),
+                )
+                .await
+        };
+
+        let result = futures::join!(prepared, reader);
+        let commit_instant = result.0.unwrap();
+        let visible = result.1.unwrap();
+        assert_eq!(visible, commit_instant <= database_snapshot);
+    }
+
+    #[tokio::test]
+    async fn reserve_rollback_read() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+        drop(prepared);
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &snapshot,
+                    Some(Instant::now() + Duration::from_secs(16)),
+                )
+                .await,
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn share() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -334,7 +419,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn empty_lock() {
+    async fn lock() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();
@@ -348,7 +433,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn empty_mark() {
+    async fn mark() {
         let database = Database::default();
         let access_controller = AccessController::<AtomicCounter>::default();
         let transaction = database.transaction();

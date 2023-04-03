@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::overseer::Task;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
@@ -11,6 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -42,10 +44,10 @@ pub(super) struct Anchor<S: Sequencer> {
 /// [`AwaitReadPermission`] is returned by [`Anchor`] if it is unclear whether a reader can read
 /// the changes in the [`Journal`] or not instantly.
 #[derive(Debug)]
-pub(super) struct AwaitReadPermission<S: Sequencer> {
+pub(super) struct AwaitReadPermission<'d, S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
     database_snapshot: S::Instant,
-    #[allow(dead_code)]
+    message_sender: &'d SyncSender<Task>,
     deadline: Instant,
 }
 
@@ -91,6 +93,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     pub fn snapshot<'r>(&'r self) -> Snapshot<'d, 't, 'r, S> {
         Snapshot::from_parts(
             self.transaction.sequencer(),
+            self.transaction.sender(),
             Some(
                 self.transaction
                     .transaction_snapshot(self.anchor.creation_instant),
@@ -134,11 +137,11 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 
 impl<S: Sequencer> Anchor<S> {
     /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
-    pub(super) fn grant_read_access(
+    pub(super) fn grant_read_access<'s>(
         &self,
-        snapshot: &Snapshot<'_, '_, '_, S>,
-        _deadline: Option<Instant>,
-    ) -> Result<bool, AwaitReadPermission<S>> {
+        snapshot: &'s Snapshot<'_, '_, '_, S>,
+        deadline: Option<Instant>,
+    ) -> Result<bool, AwaitReadPermission<'s, S>> {
         if let Some(journal_snapshot) = snapshot.journal_snapshot() {
             if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
                 // It comes from the same transaction, and same journal.
@@ -158,11 +161,20 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
-            return Ok(commit_instant <= snapshot.database_snapshot());
+            return Ok(commit_instant != S::Instant::default()
+                && commit_instant <= snapshot.database_snapshot());
         }
 
-        // TODO: implement it!
-        unimplemented!()
+        if let Some(deadline) = deadline {
+            return Err(AwaitReadPermission {
+                transaction_anchor: self.transaction_anchor.clone(),
+                database_snapshot: snapshot.database_snapshot(),
+                message_sender: snapshot.message_sender(),
+                deadline,
+            });
+        }
+
+        Ok(false)
     }
 
     /// Sets the next [`Anchor`].
@@ -205,21 +217,30 @@ impl<S: Sequencer> Anchor<S> {
     }
 }
 
-impl<S: Sequencer> Future for AwaitReadPermission<S> {
+impl<'d, S: Sequencer> Future for AwaitReadPermission<'d, S> {
     type Output = Result<bool, Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(commit_instant) = self.transaction_anchor.commit_instant() {
-            return Poll::Ready(Ok(commit_instant <= self.database_snapshot));
+            return Poll::Ready(Ok(
+                commit_instant != S::Instant::default() && commit_instant <= self.database_snapshot
+            ));
         }
 
         if self.deadline < Instant::now() {
+            // The deadline was reached.
             return Poll::Ready(Err(Error::Timeout));
         }
 
-        // TODO: no busy-wait.
-        cx.waker().wake_by_ref();
+        if self
+            .message_sender
+            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .is_err()
+        {
+            // The message channel is congested.
+            cx.waker().wake_by_ref();
+        }
         Poll::Pending
     }
 }
