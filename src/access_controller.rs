@@ -6,6 +6,9 @@ use super::journal::Anchor as JournalAnchor;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
+use std::cmp;
+use std::collections::BTreeSet;
+use std::ops::Deref;
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -31,15 +34,15 @@ pub trait ToObjectID {
 pub(super) enum PromotedAccess<S: Sequencer> {
     /// Promoted to `exclusive` from `shared`.
     #[allow(dead_code)]
-    SharedToExclusive(ebr::Arc<JournalAnchor<S>>),
+    SharedToExclusive(Owner<S>),
 
     /// Promoted to `marked` from `shared`.
     #[allow(dead_code)]
-    SharedToMarked(ebr::Arc<JournalAnchor<S>>),
+    SharedToMarked(Owner<S>),
 
     /// Promoted to `marked` from `exclusive`.
     #[allow(dead_code)]
-    ExclusiveToMarked(ebr::Arc<JournalAnchor<S>>),
+    ExclusiveToMarked(Owner<S>),
 }
 
 #[derive(Debug)]
@@ -59,34 +62,65 @@ enum AccessInfo<S: Sequencer> {
 #[derive(Debug)]
 enum LockMode<S: Sequencer> {
     /// The database object is prepared to be created.
-    Reserved(ebr::Arc<JournalAnchor<S>>),
+    Reserved(Owner<S>),
+
+    /// The database object is prepared to be created, but there are waiting transactions.
+    #[allow(dead_code)]
+    ReservedAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is locked shared by a single transaction.
-    SingleShared(ebr::Arc<JournalAnchor<S>>),
+    Shared(Owner<S>),
 
     /// The database object which may not be visible to some readers is shared by one or more
     /// transactions.
-    SharedWithInstant(Box<(S::Instant, OwnerSet<S>)>),
+    SharedAwaitable(Box<SharedAwaitable<S>>),
 
     /// The database object is locked by the transaction.
-    Exclusive(ebr::Arc<JournalAnchor<S>>),
+    Exclusive(Owner<S>),
 
     /// The database object which may not be visible to some readers is locked by the transaction.
-    ExclusiveWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
+    ExclusiveAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is being deleted by the transaction.
-    Marked(ebr::Arc<JournalAnchor<S>>),
+    Marked(Owner<S>),
 
     /// The database object which may not be visible to some readers is being deleted by the
     /// transaction.
     #[allow(dead_code)]
-    MarkedWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
+    MarkedAwaitable(Box<ExclusiveAwaitable<S>>),
+}
+
+/// An owner of a database object.
+#[derive(Debug)]
+pub(super) struct Owner<S: Sequencer> {
+    /// The address of the owner [`JournalAnchor`](super::journal::Anchor) is used as its
+    /// identification.
+    anchor: ebr::Arc<JournalAnchor<S>>,
 }
 
 #[derive(Debug)]
-struct OwnerSet<S: Sequencer> {
+struct SharedAwaitable<S: Sequencer> {
+    /// The instant when the database object was created.
+    ///
+    /// The value is equal to `S::Instant::default()` if the database object is universally
+    /// visible.
+    creation_instant: S::Instant,
+
+    /// A set of owners.
     #[allow(dead_code)]
-    set: Vec<ebr::Arc<JournalAnchor<S>>>,
+    owner_set: BTreeSet<Owner<S>>,
+}
+
+#[derive(Debug)]
+struct ExclusiveAwaitable<S: Sequencer> {
+    /// The instant when the database object was created.
+    ///
+    /// The value is equal to `S::Instant::default()` if the database object is universally
+    /// visible.
+    creation_instant: S::Instant,
+
+    /// The only owner.
+    owner: Owner<S>,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -118,19 +152,25 @@ impl<S: Sequencer> AccessController<S> {
                                 // The database object is being created.
                                 owner.grant_read_access(snapshot, deadline)
                             }
-                            LockMode::SingleShared(_) | LockMode::Exclusive(_) => {
+                            LockMode::ReservedAwaitable(exclusive_awaitable) => {
+                                // The database object is being created.
+                                exclusive_awaitable
+                                    .owner
+                                    .grant_read_access(snapshot, deadline)
+                            }
+                            LockMode::Shared(_) | LockMode::Exclusive(_) => {
                                 // The database object is temporarily locked.
                                 Ok(true)
                             }
-                            LockMode::SharedWithInstant(owner_set_with_instant) => {
+                            LockMode::SharedAwaitable(shared_awaitable) => {
                                 // The database object is temporarily shared, but the creation
                                 // instant has to be checked.
-                                Ok(*snapshot >= owner_set_with_instant.0)
+                                Ok(*snapshot >= shared_awaitable.creation_instant)
                             }
-                            LockMode::ExclusiveWithInstant(owner_with_instant) => {
+                            LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
                                 // The database object is temporarily locked, but the creation
                                 // instant has to be checked.
-                                Ok(*snapshot >= owner_with_instant.0)
+                                Ok(*snapshot >= exclusive_awaitable.creation_instant)
                             }
                             LockMode::Marked(owner) => {
                                 // The database object is being deleted.
@@ -139,10 +179,13 @@ impl<S: Sequencer> AccessController<S> {
                                 // seeing the database object.
                                 owner.grant_read_access(snapshot, deadline).map(|r| !r)
                             }
-                            LockMode::MarkedWithInstant(owner_with_instant) => {
-                                if *snapshot >= owner_with_instant.0 {
+                            LockMode::MarkedAwaitable(exclusive_awaitable) => {
+                                if *snapshot >= exclusive_awaitable.creation_instant {
                                     // The database object is being deleted.
-                                    owner_with_instant.1.grant_read_access(snapshot, deadline)
+                                    exclusive_awaitable
+                                        .owner
+                                        .anchor
+                                        .grant_read_access(snapshot, deadline)
                                 } else {
                                     // The database object was created after the reader had
                                     // started.
@@ -190,9 +233,7 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Reserved(
-                    journal.anchor().clone(),
-                )));
+                entry.insert_entry(AccessInfo::Locked(LockMode::Reserved(Owner::from(journal))));
                 return Ok(());
             }
         };
@@ -220,9 +261,7 @@ impl<S: Sequencer> AccessController<S> {
             let mut entry = match self.table.entry_async(object.to_object_id()).await {
                 MapEntry::Occupied(entry) => entry,
                 MapEntry::Vacant(entry) => {
-                    entry.insert_entry(AccessInfo::Locked(LockMode::SingleShared(
-                        journal.anchor().clone(),
-                    )));
+                    entry.insert_entry(AccessInfo::Locked(LockMode::Shared(Owner::from(journal))));
                     return Ok(true);
                 }
             };
@@ -235,17 +274,17 @@ impl<S: Sequencer> AccessController<S> {
                             if let Some(eot_instant) = owner.grant_write_access(journal) {
                                 if eot_instant == S::Instant::default() {
                                     // The transaction was rolled back.
-                                    *entry.get_mut() = AccessInfo::Locked(LockMode::SingleShared(
-                                        journal.anchor().clone(),
-                                    ));
+                                    *entry.get_mut() =
+                                        AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
                                     return Ok(true);
                                 }
                                 // The transaction was committed.
-                                *entry.get_mut() =
-                                    AccessInfo::Locked(LockMode::SharedWithInstant(Box::new((
+                                *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
+                                    SharedAwaitable::with_instant_and_owner(
                                         eot_instant,
-                                        OwnerSet::with_owner(journal.anchor().clone()),
-                                    ))));
+                                        Owner::from(journal),
+                                    ),
+                                ));
                                 return Ok(true);
                             }
                         }
@@ -257,10 +296,9 @@ impl<S: Sequencer> AccessController<S> {
                 }
                 AccessInfo::Created(instant) => {
                     // The database object is not owned or locked.
-                    *entry.get_mut() = AccessInfo::Locked(LockMode::SharedWithInstant(Box::new((
-                        *instant,
-                        OwnerSet::with_owner(journal.anchor().clone()),
-                    ))));
+                    *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
+                        SharedAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
+                    ));
                     return Ok(true);
                 }
                 AccessInfo::Deleted(_) => {
@@ -292,9 +330,9 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Exclusive(
-                    journal.anchor().clone(),
-                )));
+                entry.insert_entry(AccessInfo::Locked(LockMode::Exclusive(Owner::from(
+                    journal,
+                ))));
                 return Ok(true);
             }
         };
@@ -304,10 +342,9 @@ impl<S: Sequencer> AccessController<S> {
                 Err(Error::Conflict)
             }
             AccessInfo::Created(instant) => {
-                *entry.get_mut() = AccessInfo::Locked(LockMode::ExclusiveWithInstant(Box::new((
-                    *instant,
-                    journal.anchor().clone(),
-                ))));
+                *entry.get_mut() = AccessInfo::Locked(LockMode::ExclusiveAwaitable(
+                    ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
+                ));
                 Ok(true)
             }
             AccessInfo::Deleted(_) => {
@@ -332,9 +369,7 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Marked(
-                    journal.anchor().clone(),
-                )));
+                entry.insert_entry(AccessInfo::Locked(LockMode::Marked(Owner::from(journal))));
                 return Ok(true);
             }
         };
@@ -344,10 +379,9 @@ impl<S: Sequencer> AccessController<S> {
                 Err(Error::Conflict)
             }
             AccessInfo::Created(instant) => {
-                *entry.get_mut() = AccessInfo::Locked(LockMode::MarkedWithInstant(Box::new((
-                    *instant,
-                    journal.anchor().clone(),
-                ))));
+                *entry.get_mut() = AccessInfo::Locked(LockMode::MarkedAwaitable(
+                    ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
+                ));
                 Ok(true)
             }
             AccessInfo::Deleted(_) => {
@@ -358,10 +392,72 @@ impl<S: Sequencer> AccessController<S> {
     }
 }
 
-impl<S: Sequencer> OwnerSet<S> {
-    /// Creates a new [`OwnerSet`] with a single owner inserted.
-    fn with_owner(owner: ebr::Arc<JournalAnchor<S>>) -> OwnerSet<S> {
-        OwnerSet { set: vec![owner] }
+impl<S: Sequencer> Deref for Owner<S> {
+    type Target = JournalAnchor<S>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.anchor
+    }
+}
+
+impl<S: Sequencer> Eq for Owner<S> {}
+
+impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> From<&mut Journal<'d, 't, S, P>> for Owner<S> {
+    #[inline]
+    fn from(journal: &mut Journal<'d, 't, S, P>) -> Self {
+        Owner {
+            anchor: journal.anchor().clone(),
+        }
+    }
+}
+
+impl<S: Sequencer> PartialEq for Owner<S> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.anchor.as_ptr() == other.anchor.as_ptr()
+    }
+}
+
+impl<S: Sequencer> PartialOrd for Owner<S> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.anchor.as_ptr().partial_cmp(&other.anchor.as_ptr())
+    }
+}
+
+impl<S: Sequencer> Ord for Owner<S> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.anchor.as_ptr().cmp(&other.anchor.as_ptr())
+    }
+}
+
+impl<S: Sequencer> SharedAwaitable<S> {
+    /// Creates a new [`SharedAwaitable`] with a single owner inserted.
+    fn with_instant_and_owner(
+        creation_instant: S::Instant,
+        owner: Owner<S>,
+    ) -> Box<SharedAwaitable<S>> {
+        let mut owner_set = BTreeSet::new();
+        owner_set.insert(owner);
+        Box::new(SharedAwaitable {
+            creation_instant,
+            owner_set,
+        })
+    }
+}
+
+impl<S: Sequencer> ExclusiveAwaitable<S> {
+    /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted.
+    fn with_instant_and_owner(
+        creation_instant: S::Instant,
+        owner: Owner<S>,
+    ) -> Box<ExclusiveAwaitable<S>> {
+        Box::new(ExclusiveAwaitable {
+            creation_instant,
+            owner,
+        })
     }
 }
 
