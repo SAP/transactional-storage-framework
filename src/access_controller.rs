@@ -22,6 +22,73 @@ pub trait ToObjectID {
     fn to_object_id(&self) -> usize;
 }
 
+/// [`PromotedAccess`] is kept inside a [`Journal`] when the [`Journal`] successfully promoted
+/// access permission for a database object.
+///
+/// [`PromotedAccess`] instances kept in a [`Journal`] are used when the [`Journal`] has to be
+/// rolled back, so that the access permission can also be rolled back.
+#[derive(Debug)]
+pub(super) enum PromotedAccess<S: Sequencer> {
+    /// Promoted to `exclusive` from `shared`.
+    #[allow(dead_code)]
+    SharedToExclusive(ebr::Arc<JournalAnchor<S>>),
+
+    /// Promoted to `marked` from `shared`.
+    #[allow(dead_code)]
+    SharedToMarked(ebr::Arc<JournalAnchor<S>>),
+
+    /// Promoted to `marked` from `exclusive`.
+    #[allow(dead_code)]
+    ExclusiveToMarked(ebr::Arc<JournalAnchor<S>>),
+}
+
+#[derive(Debug)]
+enum Entry<S: Sequencer> {
+    /// The database object is prepared to be created.
+    Reserved(ebr::Arc<JournalAnchor<S>>),
+
+    /// The database object was created at the instant.
+    #[allow(dead_code)]
+    Created(S::Instant),
+
+    /// The database object is locked.
+    Locked(LockMode<S>),
+
+    /// The database object was deleted at the instant.
+    #[allow(dead_code)]
+    Deleted(S::Instant),
+}
+
+#[derive(Debug)]
+enum LockMode<S: Sequencer> {
+    /// The database object is locked shared by a single transaction.
+    SingleShared(ebr::Arc<JournalAnchor<S>>),
+
+    /// The database object which may not be visible to some readers is shared by one or more
+    /// transactions.
+    SharedWithInstant(Box<(S::Instant, OwnerSet<S>)>),
+
+    /// The database object is locked by the transaction.
+    Exclusive(ebr::Arc<JournalAnchor<S>>),
+
+    /// The database object which may not be visible to some readers is locked by the transaction.
+    ExclusiveWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
+
+    /// The database object is being deleted by the transaction.
+    Marked(ebr::Arc<JournalAnchor<S>>),
+
+    /// The database object which may not be visible to some readers is being deleted by the
+    /// transaction.
+    #[allow(dead_code)]
+    MarkedWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
+}
+
+#[derive(Debug)]
+struct OwnerSet<S: Sequencer> {
+    #[allow(dead_code)]
+    set: Vec<ebr::Arc<JournalAnchor<S>>>,
+}
+
 impl<S: Sequencer> AccessController<S> {
     /// Tries to gain read access to the database object.
     //
@@ -282,53 +349,6 @@ impl<S: Sequencer> AccessController<S> {
             }
         }
     }
-}
-
-#[derive(Debug)]
-enum Entry<S: Sequencer> {
-    /// The database object is prepared to be created.
-    Reserved(ebr::Arc<JournalAnchor<S>>),
-
-    /// The database object was created at the instant.
-    #[allow(dead_code)]
-    Created(S::Instant),
-
-    /// The database object is locked.
-    Locked(LockMode<S>),
-
-    /// The database object was deleted at the instant.
-    #[allow(dead_code)]
-    Deleted(S::Instant),
-}
-
-#[derive(Debug)]
-enum LockMode<S: Sequencer> {
-    /// The database object is locked shared by a single transaction.
-    SingleShared(ebr::Arc<JournalAnchor<S>>),
-
-    /// The database object which may not be visible to some readers is shared by one or more
-    /// transactions.
-    SharedWithInstant(Box<(S::Instant, OwnerSet<S>)>),
-
-    /// The database object is locked by the transaction.
-    Exclusive(ebr::Arc<JournalAnchor<S>>),
-
-    /// The database object which may not be visible to some readers is locked by the transaction.
-    ExclusiveWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
-
-    /// The database object is being deleted by the transaction.
-    Marked(ebr::Arc<JournalAnchor<S>>),
-
-    /// The database object which may not be visible to some readers is being deleted by the
-    /// transaction.
-    #[allow(dead_code)]
-    MarkedWithInstant(Box<(S::Instant, ebr::Arc<JournalAnchor<S>>)>),
-}
-
-#[derive(Debug)]
-struct OwnerSet<S: Sequencer> {
-    #[allow(dead_code)]
-    set: Vec<ebr::Arc<JournalAnchor<S>>>,
 }
 
 impl<S: Sequencer> OwnerSet<S> {
