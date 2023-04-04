@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::access_controller::PromotedAccess;
+use super::access_controller::{Owner, PromotedAccess};
 use super::overseer::Task;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
@@ -14,7 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::task::{Context, Poll};
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// [`Journal`] keeps the change history.
@@ -53,8 +54,43 @@ pub(super) struct Anchor<S: Sequencer> {
     #[allow(dead_code)]
     promoted_access: HashMap<usize, PromotedAccess<S>>,
 
+    /// A placeholder for asynchronous resource acquisition requests.
+    ///
+    /// The field must be reset before making a new asynchronous request to an
+    /// [`AccessController`](super::AccessController). The data is protected by a [`Mutex`],
+    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yield the
+    /// current executor.
+    access_request_result_placeholder: Mutex<AccessRequestResult<S>>,
+
     /// [`Anchor`] itself is formed as a linked list of [`Anchor`] by the [`Transaction`].
     next: ebr::AtomicArc<Anchor<S>>,
+}
+
+#[derive(Debug)]
+pub(super) struct AwaitAccessPermission<'d, S: Sequencer> {
+    /// The owner.
+    #[allow(dead_code)]
+    owner: Owner<S>,
+
+    /// The message sender to which send a wake up message.
+    message_sender: &'d SyncSender<Task>,
+
+    /// The deadline.
+    deadline: Instant,
+}
+
+/// The result of the current access permission request.
+#[derive(Debug, Default)]
+pub(super) struct AccessRequestResult<S: Sequencer> {
+    /// [`Waker`] to wake up when the result is ready.
+    waker: Option<Waker>,
+
+    /// Result of the resource acquisition attempt.
+    result: Option<Result<bool, Error>>,
+
+    /// Result of promotion.
+    #[allow(dead_code)]
+    promotion_result: Option<PromotedAccess<S>>,
 }
 
 /// [`AwaitEOT`] is returned by an [`Anchor`] for the caller to await the final transaction state
@@ -267,6 +303,22 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
+    /// Clears its [`AccessRequestResult`] field.
+    pub(super) fn clear_access_request_result_placeholder(&self) {
+        // Locking is infallible.
+        let placeholder = self.access_request_result_placeholder.try_lock();
+        debug_assert!(placeholder.is_ok());
+
+        if let Ok(mut placeholder) = placeholder {
+            *placeholder = AccessRequestResult::default();
+        }
+    }
+
+    /// Returns a reference to its [`AccessRequestResult`] field.
+    pub(super) fn access_request_result_placeholder(&self) -> &Mutex<AccessRequestResult<S>> {
+        &self.access_request_result_placeholder
+    }
+
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
     pub(super) fn await_eot<'d>(
         &self,
@@ -316,8 +368,53 @@ impl<S: Sequencer> Anchor<S> {
             creation_instant,
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
             promoted_access: HashMap::default(),
+            access_request_result_placeholder: Mutex::default(),
             next: ebr::AtomicArc::null(),
         }
+    }
+}
+
+impl<'d, S: Sequencer> AwaitAccessPermission<'d, S> {
+    pub(super) fn new(
+        owner: Owner<S>,
+        message_sender: &'d SyncSender<Task>,
+        deadline: Instant,
+    ) -> AwaitAccessPermission<'d, S> {
+        AwaitAccessPermission {
+            owner,
+            message_sender,
+            deadline,
+        }
+    }
+}
+
+impl<'d, S: Sequencer> Future for AwaitAccessPermission<'d, S> {
+    type Output = Result<bool, Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.deadline < Instant::now() {
+            // The deadline was reached.
+            return Poll::Ready(Err(Error::Timeout));
+        } else if let Ok(mut placeholder) =
+            self.owner.access_request_result_placeholder().try_lock()
+        {
+            if let Some(result) = placeholder.result.take() {
+                return Poll::Ready(result);
+            }
+            placeholder.waker.replace(cx.waker().clone());
+        } else {
+            cx.waker().wake_by_ref();
+        }
+        if self
+            .message_sender
+            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .is_err()
+        {
+            // The message channel is congested.
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
     }
 }
 

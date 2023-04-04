@@ -3,25 +3,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::journal::WritePermission;
+use super::journal::{AwaitAccessPermission, WritePermission};
 use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
+use scc::hash_map::OccupiedEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
-use std::future::Future;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::sync::mpsc::SyncSender;
-use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
 /// value.
 #[derive(Debug, Default)]
 pub struct AccessController<S: Sequencer> {
-    table: HashMap<usize, AccessInfo<S>>,
+    table: HashMap<usize, ObjectState<S>>,
 }
 
 /// [`ToObjectID`] derives a fixed [`usize`] value for the instance.
@@ -60,7 +58,7 @@ pub(super) struct Owner<S: Sequencer> {
 }
 
 #[derive(Debug)]
-enum AccessInfo<S: Sequencer> {
+enum ObjectState<S: Sequencer> {
     /// The database object is locked.
     Locked(LockMode<S>),
 
@@ -108,15 +106,15 @@ enum LockMode<S: Sequencer> {
 enum Desire<S: Sequencer> {
     /// Desires to acquire a shared lock on the database object.
     #[allow(dead_code)]
-    Shared(Owner<S>, Option<Waker>),
+    Shared(Owner<S>),
 
     /// Desires to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
-    Exclusive(Owner<S>, Option<Waker>),
+    Exclusive(Owner<S>),
 
     /// Desires to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
-    Marked(Owner<S>, Option<Waker>),
+    Marked(Owner<S>),
 }
 
 #[derive(Debug, Default)]
@@ -158,27 +156,6 @@ struct ExclusiveAwaitable<S: Sequencer> {
     wait_queue: WaitQueue<S>,
 }
 
-#[derive(Debug)]
-struct AwaitAccessPermission<'a, 'd, S: Sequencer> {
-    /// The [`AccessController`].
-    #[allow(dead_code)]
-    access_controller: &'a AccessController<S>,
-
-    /// The identifier of the desired object.
-    #[allow(dead_code)]
-    object_id: usize,
-
-    /// The owner.
-    #[allow(dead_code)]
-    owner: Owner<S>,
-
-    /// The message sender to which send a wake up message.
-    message_sender: &'d SyncSender<Task>,
-
-    /// The deadline.
-    deadline: Instant,
-}
-
 impl<S: Sequencer> AccessController<S> {
     /// Tries to gain read access to the database object.
     //
@@ -202,7 +179,7 @@ impl<S: Sequencer> AccessController<S> {
             let await_eot = match self
                 .table
                 .read_async(&object.to_object_id(), |_, entry| match entry {
-                    AccessInfo::Locked(locked) => {
+                    ObjectState::Locked(locked) => {
                         match locked {
                             LockMode::Reserved(owner) => {
                                 // The database object is being created.
@@ -250,11 +227,11 @@ impl<S: Sequencer> AccessController<S> {
                             }
                         }
                     }
-                    AccessInfo::Created(instant) => {
+                    ObjectState::Created(instant) => {
                         // The database object was created at `instant`.
                         Ok(*snapshot >= *instant)
                     }
-                    AccessInfo::Deleted(instant) => {
+                    ObjectState::Deleted(instant) => {
                         // The database object was deleted at `instant`.
                         Ok(*snapshot < *instant)
                     }
@@ -289,11 +266,13 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Reserved(Owner::from(journal))));
+                entry.insert_entry(ObjectState::Locked(LockMode::Reserved(Owner::from(
+                    journal,
+                ))));
                 return Ok(());
             }
         };
-        if let AccessInfo::Locked(locked) = entry.get_mut() {
+        if let ObjectState::Locked(locked) = entry.get_mut() {
             // TODO: wait for the owner to be rolled or committed.
             match locked {
                 LockMode::Reserved(owner) => {
@@ -306,7 +285,7 @@ impl<S: Sequencer> AccessController<S> {
                         WritePermission::RolledBack => {
                             // The transaction or the owner journal was rolled back.
                             *entry.get_mut() =
-                                AccessInfo::Locked(LockMode::Reserved(Owner::from(journal)));
+                                ObjectState::Locked(LockMode::Reserved(Owner::from(journal)));
                             return Ok(());
                         }
                         WritePermission::Linearizable => {
@@ -352,20 +331,20 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Shared(Owner::from(journal))));
+                entry.insert_entry(ObjectState::Locked(LockMode::Shared(Owner::from(journal))));
                 return Ok(true);
             }
         };
 
         match entry.get_mut() {
-            AccessInfo::Locked(locked) => {
+            ObjectState::Locked(locked) => {
                 match locked {
                     LockMode::Reserved(owner) => {
                         // The state of the owner needs to be checked.
                         match owner.grant_write_access(journal) {
                             WritePermission::Committed(commit_instant) => {
                                 // The transaction was committed.
-                                *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
+                                *entry.get_mut() = ObjectState::Locked(LockMode::SharedAwaitable(
                                     SharedAwaitable::with_instant_and_owner(
                                         commit_instant,
                                         Owner::from(journal),
@@ -376,7 +355,7 @@ impl<S: Sequencer> AccessController<S> {
                             WritePermission::RolledBack => {
                                 // The transaction or the owner journal was rolled back.
                                 *entry.get_mut() =
-                                    AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
+                                    ObjectState::Locked(LockMode::Shared(Owner::from(journal)));
                                 Ok(true)
                             }
                             WritePermission::Linearizable => {
@@ -399,14 +378,14 @@ impl<S: Sequencer> AccessController<S> {
                     }
                 }
             }
-            AccessInfo::Created(instant) => {
+            ObjectState::Created(instant) => {
                 // The database object is not owned or locked.
-                *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
+                *entry.get_mut() = ObjectState::Locked(LockMode::SharedAwaitable(
                     SharedAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
                 ));
                 Ok(true)
             }
-            AccessInfo::Deleted(_) => {
+            ObjectState::Deleted(_) => {
                 // Already deleted.
                 Err(Error::SerializationFailure)
             }
@@ -430,24 +409,24 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Exclusive(Owner::from(
+                entry.insert_entry(ObjectState::Locked(LockMode::Exclusive(Owner::from(
                     journal,
                 ))));
                 return Ok(true);
             }
         };
         match entry.get_mut() {
-            AccessInfo::Locked(_) => {
+            ObjectState::Locked(_) => {
                 // TODO: try to acquire the lock after cleaning up the entry.
                 Err(Error::Conflict)
             }
-            AccessInfo::Created(instant) => {
-                *entry.get_mut() = AccessInfo::Locked(LockMode::ExclusiveAwaitable(
+            ObjectState::Created(instant) => {
+                *entry.get_mut() = ObjectState::Locked(LockMode::ExclusiveAwaitable(
                     ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
                 ));
                 Ok(true)
             }
-            AccessInfo::Deleted(_) => {
+            ObjectState::Deleted(_) => {
                 // Already deleted.
                 Err(Error::SerializationFailure)
             }
@@ -469,25 +448,77 @@ impl<S: Sequencer> AccessController<S> {
         let mut entry = match self.table.entry_async(object.to_object_id()).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
-                entry.insert_entry(AccessInfo::Locked(LockMode::Marked(Owner::from(journal))));
+                entry.insert_entry(ObjectState::Locked(LockMode::Marked(Owner::from(journal))));
                 return Ok(true);
             }
         };
         match entry.get_mut() {
-            AccessInfo::Locked(_) => {
+            ObjectState::Locked(_) => {
                 // TODO: try to mark it after cleaning up the entry.
                 Err(Error::Conflict)
             }
-            AccessInfo::Created(instant) => {
-                *entry.get_mut() = AccessInfo::Locked(LockMode::MarkedAwaitable(
+            ObjectState::Created(instant) => {
+                *entry.get_mut() = ObjectState::Locked(LockMode::MarkedAwaitable(
                     ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
                 ));
                 Ok(true)
             }
-            AccessInfo::Deleted(_) => {
+            ObjectState::Deleted(_) => {
                 // Already deleted.
                 Err(Error::SerializationFailure)
             }
+        }
+    }
+
+    /// Awaits access to the database object.
+    #[allow(dead_code)]
+    async fn await_access<'a>(
+        &'a self,
+        mut entry: OccupiedEntry<'a, usize, ObjectState<S>>,
+        desired_access: Desire<S>,
+        message_sender: &SyncSender<Task>,
+        deadline: Instant,
+    ) -> Result<bool, Error> {
+        desired_access
+            .owner()
+            .clear_access_request_result_placeholder();
+        let awaitable =
+            AwaitAccessPermission::new(desired_access.owner().clone(), message_sender, deadline);
+        if let ObjectState::Locked(locked) = entry.get_mut() {
+            match locked {
+                LockMode::Reserved(_) => todo!(),
+                LockMode::ReservedAwaitable(exclusive_awaitable)
+                | LockMode::ExclusiveAwaitable(exclusive_awaitable)
+                | LockMode::MarkedAwaitable(exclusive_awaitable) => {
+                    exclusive_awaitable
+                        .wait_queue
+                        .wait_queue
+                        .push_back(desired_access);
+                }
+                LockMode::Shared(_) => todo!(),
+                LockMode::SharedAwaitable(shared_awaitable) => {
+                    shared_awaitable
+                        .wait_queue
+                        .wait_queue
+                        .push_back(desired_access);
+                }
+                LockMode::Exclusive(_) => todo!(),
+                LockMode::Marked(_) => todo!(),
+            }
+        } else {
+            // The condition must have been checked by the caller.
+            return Err(Error::UnexpectedState);
+        }
+        drop(entry);
+        awaitable.await
+    }
+}
+
+impl<S: Sequencer> Clone for Owner<S> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            anchor: self.anchor.clone(),
         }
     }
 }
@@ -533,6 +564,15 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
     }
 }
 
+impl<S: Sequencer> Desire<S> {
+    /// Returns a reference to its `owner` field.
+    fn owner(&self) -> &Owner<S> {
+        match self {
+            Desire::Shared(owner) | Desire::Exclusive(owner) | Desire::Marked(owner) => owner,
+        }
+    }
+}
+
 impl<S: Sequencer> SharedAwaitable<S> {
     /// Creates a new [`SharedAwaitable`] with a single owner inserted.
     fn with_instant_and_owner(
@@ -563,37 +603,13 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
     }
 }
 
-impl<'a, 'd, S: Sequencer> Future for AwaitAccessPermission<'a, 'd, S> {
-    type Output = Result<(), Error>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.deadline < Instant::now() {
-            // The deadline was reached.
-            return Poll::Ready(Err(Error::Timeout));
-        }
-
-        // TODO: try to acquire the resource.
-
-        if self
-            .message_sender
-            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
-            .is_err()
-        {
-            // The message channel is congested.
-            cx.waker().wake_by_ref();
-        }
-        Poll::Pending
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
     use std::time::Duration;
 
-    static_assertions::assert_eq_size!(AccessInfo<AtomicCounter>, [u8; 16]);
+    static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(256);
     const TIMEOUT_EXPECTED: Duration = Duration::from_millis(256);
@@ -667,6 +683,27 @@ mod test {
         );
         assert_eq!(reserved, Err(Error::Conflict));
         assert!(committed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reserve_rewind_reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        drop(journal);
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

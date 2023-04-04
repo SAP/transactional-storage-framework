@@ -33,11 +33,15 @@ The framework is fully written in Rust, and incorporates state-of-the-art progra
 
 * Asynchronous API: any code that access shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
 * No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
-* Zero busy-loops: no spin-locks and busy-loops to wait for desired resources, even every piece of lock-free code accessing shared data guarantees progress.
+* Zero busy-loops: no spin-locks and busy-loops to wait for desired resources.
 
-## Database
+## Components
 
-`Database` is the main module of the whole framework, and it cannot be replaced with a customized module.
+The framework consists of generic components that can be customizable and pluggable.
+
+### Database
+
+`Database` is the main module of the whole framework. `Database` comes with two type parameters: `S: Sequencer` and `P: PersistenceLayer`.
 
 ```rust
 use sap_tsf::Database;
@@ -86,7 +90,7 @@ let journal = transaction.start();
 
 ## AccessController
 
-`AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object.
+`AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object. In other words, `AccessController` controls locking and versioning of database objects.
 
 ## PersistenceLayer
 
