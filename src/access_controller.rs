@@ -293,9 +293,45 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(());
             }
         };
-        if let AccessInfo::Locked(_) = entry.get_mut() {
+        if let AccessInfo::Locked(locked) = entry.get_mut() {
             // TODO: wait for the owner to be rolled or committed.
+            match locked {
+                LockMode::Reserved(owner) => {
+                    // The state of the owner needs to be checked.
+                    match owner.grant_write_access(journal) {
+                        WritePermission::Committed(_) => {
+                            // The transaction was committed.
+                            return Err(Error::SerializationFailure);
+                        }
+                        WritePermission::RolledBack => {
+                            // The transaction or the owner journal was rolled back.
+                            *entry.get_mut() =
+                                AccessInfo::Locked(LockMode::Reserved(Owner::from(journal)));
+                            return Ok(());
+                        }
+                        WritePermission::Linearizable => {
+                            // Already reserved in a previous journal.
+                            return Ok(());
+                        }
+                        WritePermission::Concurrent => {
+                            // TODO: intra-transaction deadlock - need to check this.
+                            return Err(Error::Deadlock);
+                        }
+                        WritePermission::Rejected => {
+                            // TODO: wait.
+                            return Err(Error::Conflict);
+                        }
+                    }
+                }
+                LockMode::ReservedAwaitable(_) => {
+                    // TODO: wait.
+                    return Err(Error::Conflict);
+                }
+                _ => (),
+            }
         }
+
+        // The database object has already been created or deleted.
         Err(Error::SerializationFailure)
     }
 
@@ -338,7 +374,7 @@ impl<S: Sequencer> AccessController<S> {
                                 Ok(true)
                             }
                             WritePermission::RolledBack => {
-                                // The transaction was rolled back.
+                                // The transaction or the owner journal was rolled back.
                                 *entry.get_mut() =
                                     AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
                                 Ok(true)
@@ -608,6 +644,50 @@ mod test {
             Ok(false),
         );
         drop(prepared);
+    }
+
+    #[tokio::test]
+    async fn reserve_prepare_reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        let (reserved, committed) = futures::join!(
+            access_controller.reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            prepared
+        );
+        assert_eq!(reserved, Err(Error::Conflict));
+        assert!(committed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reserve_rollback_reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        transaction.rollback().await;
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

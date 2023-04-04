@@ -11,7 +11,7 @@ use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
 use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering::{Relaxed, Release};
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::task::{Context, Poll};
@@ -254,8 +254,12 @@ impl<S: Sequencer> Anchor<S> {
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
             if eot_instant == S::Instant::default() {
                 WritePermission::RolledBack
-            } else {
+            } else if self.submit_instant() != 0 {
+                // The journal has stayed in the transaction until the transaction was committed.
                 WritePermission::Committed(eot_instant)
+            } else {
+                // The journal was rolled back before the transaction has been committed.
+                WritePermission::RolledBack
             }
         } else {
             // TODO: intra-transaction visibility control.
@@ -299,7 +303,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Reads its submit instant.
     pub(super) fn submit_instant(&self) -> usize {
-        self.submit_instant.load(Relaxed)
+        self.submit_instant.load(Acquire)
     }
 
     /// Creates a new [`Anchor`].
