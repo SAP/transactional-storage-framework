@@ -4,13 +4,17 @@
 
 use super::journal::Anchor as JournalAnchor;
 use super::journal::WritePermission;
+use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
+use std::future::Future;
 use std::ops::Deref;
-use std::task::Waker;
+use std::pin::Pin;
+use std::sync::mpsc::SyncSender;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -104,15 +108,15 @@ enum LockMode<S: Sequencer> {
 enum Desire<S: Sequencer> {
     /// Desires to acquire a shared lock on the database object.
     #[allow(dead_code)]
-    Shared(Owner<S>, Waker),
+    Shared(Owner<S>, Option<Waker>),
 
     /// Desires to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
-    Exclusive(Owner<S>, Waker),
+    Exclusive(Owner<S>, Option<Waker>),
 
     /// Desires to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
-    Marked(Owner<S>, Waker),
+    Marked(Owner<S>, Option<Waker>),
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +156,27 @@ struct ExclusiveAwaitable<S: Sequencer> {
     /// The wait queue of the database object.
     #[allow(dead_code)]
     wait_queue: WaitQueue<S>,
+}
+
+#[derive(Debug)]
+struct AwaitAccessPermission<'a, 'd, S: Sequencer> {
+    /// The [`AccessController`].
+    #[allow(dead_code)]
+    access_controller: &'a AccessController<S>,
+
+    /// The identifier of the desired object.
+    #[allow(dead_code)]
+    object_id: usize,
+
+    /// The owner.
+    #[allow(dead_code)]
+    owner: Owner<S>,
+
+    /// The message sender to which send a wake up message.
+    message_sender: &'d SyncSender<Task>,
+
+    /// The deadline.
+    deadline: Instant,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -268,9 +293,45 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(());
             }
         };
-        if let AccessInfo::Locked(_) = entry.get_mut() {
+        if let AccessInfo::Locked(locked) = entry.get_mut() {
             // TODO: wait for the owner to be rolled or committed.
+            match locked {
+                LockMode::Reserved(owner) => {
+                    // The state of the owner needs to be checked.
+                    match owner.grant_write_access(journal) {
+                        WritePermission::Committed(_) => {
+                            // The transaction was committed.
+                            return Err(Error::SerializationFailure);
+                        }
+                        WritePermission::RolledBack => {
+                            // The transaction or the owner journal was rolled back.
+                            *entry.get_mut() =
+                                AccessInfo::Locked(LockMode::Reserved(Owner::from(journal)));
+                            return Ok(());
+                        }
+                        WritePermission::Linearizable => {
+                            // Already reserved in a previous journal.
+                            return Ok(());
+                        }
+                        WritePermission::Concurrent => {
+                            // TODO: intra-transaction deadlock - need to check this.
+                            return Err(Error::Deadlock);
+                        }
+                        WritePermission::Rejected => {
+                            // TODO: wait.
+                            return Err(Error::Conflict);
+                        }
+                    }
+                }
+                LockMode::ReservedAwaitable(_) => {
+                    // TODO: wait.
+                    return Err(Error::Conflict);
+                }
+                _ => (),
+            }
         }
+
+        // The database object has already been created or deleted.
         Err(Error::SerializationFailure)
     }
 
@@ -313,7 +374,7 @@ impl<S: Sequencer> AccessController<S> {
                                 Ok(true)
                             }
                             WritePermission::RolledBack => {
-                                // The transaction was rolled back.
+                                // The transaction or the owner journal was rolled back.
                                 *entry.get_mut() =
                                     AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
                                 Ok(true)
@@ -502,6 +563,30 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
     }
 }
 
+impl<'a, 'd, S: Sequencer> Future for AwaitAccessPermission<'a, 'd, S> {
+    type Output = Result<(), Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.deadline < Instant::now() {
+            // The deadline was reached.
+            return Poll::Ready(Err(Error::Timeout));
+        }
+
+        // TODO: try to acquire the resource.
+
+        if self
+            .message_sender
+            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .is_err()
+        {
+            // The message channel is congested.
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -559,6 +644,50 @@ mod test {
             Ok(false),
         );
         drop(prepared);
+    }
+
+    #[tokio::test]
+    async fn reserve_prepare_reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        let (reserved, committed) = futures::join!(
+            access_controller.reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            prepared
+        );
+        assert_eq!(reserved, Err(Error::Conflict));
+        assert!(committed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reserve_rollback_reserve() {
+        let database = Database::default();
+        let access_controller = AccessController::<AtomicCounter>::default();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        transaction.rollback().await;
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

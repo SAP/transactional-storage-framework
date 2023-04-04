@@ -27,6 +27,14 @@ This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluati
 
 [1]: Bang, Tiemo and May, Norman and Petrov, Ilia and Binnig, Carsten, 2020, Association for Computing Machinery
 
+## Overview
+
+The framework is fully written in Rust, and incorporates state-of-the-art programming techniques to maximize the performance while minimizing the memory usage.
+
+* Asynchronous API: any code that access shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
+* No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
+* Zero busy-loops: no spin-locks and busy-loops to wait for desired resources, even every piece of lock-free code accessing shared data guarantees progress.
+
 ## Database
 
 `Database` is the main module of the whole framework, and it cannot be replaced with a customized module.

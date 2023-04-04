@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::database::Kernel;
-use super::{PersistenceLayer, Sequencer};
-use std::collections::BTreeMap;
+use super::{AccessController, PersistenceLayer, Sequencer};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Into;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
@@ -33,6 +33,15 @@ pub enum Task {
     /// The [`Waker`] may be called before the deadline is reached if memory allocation failed in
     /// the [`Overseer`].
     WakeUp(Instant, Waker),
+
+    /// The [`Overseer`] should monitor the database object.
+    #[allow(dead_code)]
+    Monitor(usize),
+
+    /// The [`Overseer`] should scan the access controller entries corresponding to monitored
+    /// database objects.
+    #[allow(dead_code)]
+    ScanAccessController,
 }
 
 /// The default interval that an [`Overseer`] wakes up and checks the status of the database.
@@ -62,9 +71,10 @@ impl Overseer {
     /// Oversees the specified database kernel.
     fn oversee<S: Sequencer, P: PersistenceLayer<S>>(
         receiver: &Receiver<Task>,
-        _kernel: &Kernel<S, P>,
+        kernel: &Kernel<S, P>,
     ) {
         let mut waker_queue: BTreeMap<Instant, Waker> = BTreeMap::default();
+        let mut monitored_database_object_ids: BTreeSet<usize> = BTreeSet::default();
         let mut wait_duration = DEFAULT_CHECK_INTERAL;
         loop {
             if let Ok(task) = receiver.recv_timeout(wait_duration) {
@@ -86,11 +96,32 @@ impl Overseer {
                             }
                         }
                     }
+                    Task::Monitor(object_id) => {
+                        monitored_database_object_ids.insert(object_id);
+                        Self::scan_access_controller(
+                            kernel.access_controller(),
+                            &mut monitored_database_object_ids,
+                        );
+                    }
+                    Task::ScanAccessController => {
+                        Self::scan_access_controller(
+                            kernel.access_controller(),
+                            &mut monitored_database_object_ids,
+                        );
+                    }
                 }
             }
 
             wait_duration = Self::wake_up(&mut waker_queue);
         }
+    }
+
+    /// Scans the access controller and cleans up access control information associated with
+    /// monitored database objects.
+    fn scan_access_controller<S: Sequencer>(
+        _access_controller: &AccessController<S>,
+        _monitored_object_ids: &mut BTreeSet<usize>,
+    ) {
     }
 
     /// Wakes up every expired [`Waker`], and returns the time remaining until the first [`Waker`]

@@ -321,6 +321,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     }
 }
 
+impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
+    /// Returns a reference to its [`AccessController`].
+    pub(super) fn access_controller(&self) -> &AccessController<S> {
+        &self.access_controller
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::sequencer::AtomicCounter;
