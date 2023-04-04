@@ -66,6 +66,33 @@ pub(super) struct AwaitEOT<'d, S: Sequencer> {
     deadline: Instant,
 }
 
+/// Write access permission.
+#[derive(Debug)]
+pub(super) enum WritePermission<S: Sequencer> {
+    /// The owner was committed.
+    ///
+    /// The requester can take ownership.
+    Committed(S::Instant),
+
+    /// The owner was rolled back.
+    RolledBack,
+
+    /// The ownership can be transferred.
+    ///
+    /// The request belongs to the same transaction, and they are linearizable.
+    #[allow(dead_code)]
+    Linearizable,
+
+    /// The ownership cannot be transferred.
+    ///
+    /// The request belongs to the same transaction, but they are not linearizable.
+    #[allow(dead_code)]
+    Concurrent,
+
+    /// The request has to wait.
+    Rejected,
+}
+
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// Submits the [`Journal`] to the [`Transaction`].
     ///
@@ -205,13 +232,30 @@ impl<S: Sequencer> Anchor<S> {
     /// [`Journal`] represented by `self`.
     ///
     /// Returns the instant when the transaction was committed or rolled back if the transaction is
-    /// not active anymore, otherwise `None` is returned.
+    /// not active anymore.
+    ///
+    /// # Errors
+    ///
+    /// A boolean flag indicating that the ownership can be transferred to the [`Journal`] is
+    /// returned if the transaction has yet to be committed or rolled back. If the [`Journal`]
+    /// belongs to the same transaction as the owner, `Some(flag)` is returned; if the owner was
+    /// already submitted to the [`Transaction`] before the specified [`Journal`] was started,
+    /// `Some(true)` if returned. `None` is returned if the transaction and the owner are
+    /// unrelated.
     pub(super) fn grant_write_access<P: PersistenceLayer<S>>(
         &self,
         _journal: &mut Journal<'_, '_, S, P>,
-    ) -> Option<S::Instant> {
-        // TODO: intra-transaction visibility control.
-        self.transaction_anchor.eot_instant()
+    ) -> WritePermission<S> {
+        if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
+            if eot_instant == S::Instant::default() {
+                WritePermission::RolledBack
+            } else {
+                WritePermission::Committed(eot_instant)
+            }
+        } else {
+            // TODO: intra-transaction visibility control.
+            WritePermission::Rejected
+        }
     }
 
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.

@@ -8,6 +8,9 @@ pub enum Error {
     /// The operation conflicts with others.
     Conflict,
 
+    /// The operation causes a deadlock.
+    Deadlock,
+
     /// The desired resource could not be found in the database.
     NotFound,
 

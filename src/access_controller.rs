@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
+use super::journal::WritePermission;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Deref;
+use std::task::Waker;
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -43,6 +45,14 @@ pub(super) enum PromotedAccess<S: Sequencer> {
     /// Promoted to `marked` from `exclusive`.
     #[allow(dead_code)]
     ExclusiveToMarked(Owner<S>),
+}
+
+/// An owner of a database object.
+#[derive(Debug)]
+pub(super) struct Owner<S: Sequencer> {
+    /// The address of the owner [`JournalAnchor`](super::journal::Anchor) is used as its
+    /// identification.
+    anchor: ebr::Arc<JournalAnchor<S>>,
 }
 
 #[derive(Debug)]
@@ -90,12 +100,25 @@ enum LockMode<S: Sequencer> {
     MarkedAwaitable(Box<ExclusiveAwaitable<S>>),
 }
 
-/// An owner of a database object.
 #[derive(Debug)]
-pub(super) struct Owner<S: Sequencer> {
-    /// The address of the owner [`JournalAnchor`](super::journal::Anchor) is used as its
-    /// identification.
-    anchor: ebr::Arc<JournalAnchor<S>>,
+enum Desire<S: Sequencer> {
+    /// Desires to acquire a shared lock on the database object.
+    #[allow(dead_code)]
+    Shared(Owner<S>, Waker),
+
+    /// Desires to acquire the exclusive lock on the database object.
+    #[allow(dead_code)]
+    Exclusive(Owner<S>, Waker),
+
+    /// Desires to acquire the exclusive lock on the database object for deletion.
+    #[allow(dead_code)]
+    Marked(Owner<S>, Waker),
+}
+
+#[derive(Debug, Default)]
+struct WaitQueue<S: Sequencer> {
+    #[allow(dead_code)]
+    wait_queue: VecDeque<Desire<S>>,
 }
 
 #[derive(Debug)]
@@ -109,6 +132,10 @@ struct SharedAwaitable<S: Sequencer> {
     /// A set of owners.
     #[allow(dead_code)]
     owner_set: BTreeSet<Owner<S>>,
+
+    /// The wait queue of the database object.
+    #[allow(dead_code)]
+    wait_queue: WaitQueue<S>,
 }
 
 #[derive(Debug)]
@@ -121,6 +148,10 @@ struct ExclusiveAwaitable<S: Sequencer> {
 
     /// The only owner.
     owner: Owner<S>,
+
+    /// The wait queue of the database object.
+    #[allow(dead_code)]
+    wait_queue: WaitQueue<S>,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -257,59 +288,67 @@ impl<S: Sequencer> AccessController<S> {
         journal: &mut Journal<'_, '_, S, P>,
         _deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        loop {
-            let mut entry = match self.table.entry_async(object.to_object_id()).await {
-                MapEntry::Occupied(entry) => entry,
-                MapEntry::Vacant(entry) => {
-                    entry.insert_entry(AccessInfo::Locked(LockMode::Shared(Owner::from(journal))));
-                    return Ok(true);
-                }
-            };
+        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+            MapEntry::Occupied(entry) => entry,
+            MapEntry::Vacant(entry) => {
+                entry.insert_entry(AccessInfo::Locked(LockMode::Shared(Owner::from(journal))));
+                return Ok(true);
+            }
+        };
 
-            match entry.get_mut() {
-                AccessInfo::Locked(locked) => {
-                    match locked {
-                        LockMode::Reserved(owner) => {
-                            // The state of the owner needs to be checked.
-                            if let Some(eot_instant) = owner.grant_write_access(journal) {
-                                if eot_instant == S::Instant::default() {
-                                    // The transaction was rolled back.
-                                    *entry.get_mut() =
-                                        AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
-                                    return Ok(true);
-                                }
+        match entry.get_mut() {
+            AccessInfo::Locked(locked) => {
+                match locked {
+                    LockMode::Reserved(owner) => {
+                        // The state of the owner needs to be checked.
+                        match owner.grant_write_access(journal) {
+                            WritePermission::Committed(commit_instant) => {
                                 // The transaction was committed.
                                 *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
                                     SharedAwaitable::with_instant_and_owner(
-                                        eot_instant,
+                                        commit_instant,
                                         Owner::from(journal),
                                     ),
                                 ));
-                                return Ok(true);
+                                Ok(true)
+                            }
+                            WritePermission::RolledBack => {
+                                // The transaction was rolled back.
+                                *entry.get_mut() =
+                                    AccessInfo::Locked(LockMode::Shared(Owner::from(journal)));
+                                Ok(true)
+                            }
+                            WritePermission::Linearizable => {
+                                // `Reserved` is stronger than `Shared`, so nothing to do.
+                                Ok(true)
+                            }
+                            WritePermission::Concurrent => {
+                                // TODO: intra-transaction deadlock - need to check this.
+                                Err(Error::Deadlock)
+                            }
+                            WritePermission::Rejected => {
+                                // TODO: wait.
+                                Err(Error::Conflict)
                             }
                         }
-                        _ => {
-                            // TODO: try to add the transaction to the owner set.
-                            return Err(Error::Conflict);
-                        }
+                    }
+                    _ => {
+                        // TODO: try to add the transaction to the owner set.
+                        Err(Error::Conflict)
                     }
                 }
-                AccessInfo::Created(instant) => {
-                    // The database object is not owned or locked.
-                    *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
-                        SharedAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
-                    ));
-                    return Ok(true);
-                }
-                AccessInfo::Deleted(_) => {
-                    // Already deleted.
-                    return Err(Error::SerializationFailure);
-                }
-            };
-
-            drop(entry);
-
-            // TODO: implement a fair wait queue.
+            }
+            AccessInfo::Created(instant) => {
+                // The database object is not owned or locked.
+                *entry.get_mut() = AccessInfo::Locked(LockMode::SharedAwaitable(
+                    SharedAwaitable::with_instant_and_owner(*instant, Owner::from(journal)),
+                ));
+                Ok(true)
+            }
+            AccessInfo::Deleted(_) => {
+                // Already deleted.
+                Err(Error::SerializationFailure)
+            }
         }
     }
 
@@ -412,6 +451,13 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> From<&mut Journal<'d, 't, S, 
     }
 }
 
+impl<S: Sequencer> Ord for Owner<S> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.anchor.as_ptr().cmp(&other.anchor.as_ptr())
+    }
+}
+
 impl<S: Sequencer> PartialEq for Owner<S> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
@@ -426,13 +472,6 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
     }
 }
 
-impl<S: Sequencer> Ord for Owner<S> {
-    #[inline]
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.anchor.as_ptr().cmp(&other.anchor.as_ptr())
-    }
-}
-
 impl<S: Sequencer> SharedAwaitable<S> {
     /// Creates a new [`SharedAwaitable`] with a single owner inserted.
     fn with_instant_and_owner(
@@ -444,6 +483,7 @@ impl<S: Sequencer> SharedAwaitable<S> {
         Box::new(SharedAwaitable {
             creation_instant,
             owner_set,
+            wait_queue: WaitQueue::default(),
         })
     }
 }
@@ -457,6 +497,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant,
             owner,
+            wait_queue: WaitQueue::default(),
         })
     }
 }
