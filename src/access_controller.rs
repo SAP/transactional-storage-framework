@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::journal::WritePermission;
+use super::journal::{AwaitAccessPermission, WritePermission};
 use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
@@ -11,11 +11,8 @@ use scc::hash_map::OccupiedEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
-use std::future::Future;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::sync::mpsc::SyncSender;
-use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -109,15 +106,15 @@ enum LockMode<S: Sequencer> {
 enum Desire<S: Sequencer> {
     /// Desires to acquire a shared lock on the database object.
     #[allow(dead_code)]
-    Shared(Owner<S>, Option<Waker>),
+    Shared(Owner<S>),
 
     /// Desires to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
-    Exclusive(Owner<S>, Option<Waker>),
+    Exclusive(Owner<S>),
 
     /// Desires to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
-    Marked(Owner<S>, Option<Waker>),
+    Marked(Owner<S>),
 }
 
 #[derive(Debug, Default)]
@@ -157,27 +154,6 @@ struct ExclusiveAwaitable<S: Sequencer> {
     /// The wait queue of the database object.
     #[allow(dead_code)]
     wait_queue: WaitQueue<S>,
-}
-
-#[derive(Debug)]
-struct AwaitAccessPermission<'a, 'd, S: Sequencer> {
-    /// The [`AccessController`].
-    #[allow(dead_code)]
-    access_controller: &'a AccessController<S>,
-
-    /// The identifier of the desired object.
-    #[allow(dead_code)]
-    object_id: usize,
-
-    /// The owner.
-    #[allow(dead_code)]
-    owner: Owner<S>,
-
-    /// The message sender to which send a wake up message.
-    message_sender: &'d SyncSender<Task>,
-
-    /// The deadline.
-    deadline: Instant,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -498,18 +474,42 @@ impl<S: Sequencer> AccessController<S> {
     #[allow(dead_code)]
     async fn await_access<'a>(
         &'a self,
-        entry: OccupiedEntry<'a, usize, ObjectState<S>>,
+        mut entry: OccupiedEntry<'a, usize, ObjectState<S>>,
         desired_access: Desire<S>,
         message_sender: &SyncSender<Task>,
         deadline: Instant,
-    ) -> Result<(), Error> {
-        let awaitable = AwaitAccessPermission {
-            access_controller: self,
-            object_id: *entry.key(),
-            owner: desired_access.owner().clone(),
-            message_sender,
-            deadline,
-        };
+    ) -> Result<bool, Error> {
+        desired_access
+            .owner()
+            .clear_access_request_result_placeholder();
+        let awaitable =
+            AwaitAccessPermission::new(desired_access.owner().clone(), message_sender, deadline);
+        if let ObjectState::Locked(locked) = entry.get_mut() {
+            match locked {
+                LockMode::Reserved(_) => todo!(),
+                LockMode::ReservedAwaitable(exclusive_awaitable)
+                | LockMode::ExclusiveAwaitable(exclusive_awaitable)
+                | LockMode::MarkedAwaitable(exclusive_awaitable) => {
+                    exclusive_awaitable
+                        .wait_queue
+                        .wait_queue
+                        .push_back(desired_access);
+                }
+                LockMode::Shared(_) => todo!(),
+                LockMode::SharedAwaitable(shared_awaitable) => {
+                    shared_awaitable
+                        .wait_queue
+                        .wait_queue
+                        .push_back(desired_access);
+                }
+                LockMode::Exclusive(_) => todo!(),
+                LockMode::Marked(_) => todo!(),
+            }
+        } else {
+            // The condition must have been checked by the caller.
+            return Err(Error::UnexpectedState);
+        }
+        drop(entry);
         awaitable.await
     }
 }
@@ -568,9 +568,7 @@ impl<S: Sequencer> Desire<S> {
     /// Returns a reference to its `owner` field.
     fn owner(&self) -> &Owner<S> {
         match self {
-            Desire::Shared(owner, _) | Desire::Exclusive(owner, _) | Desire::Marked(owner, _) => {
-                owner
-            }
+            Desire::Shared(owner) | Desire::Exclusive(owner) | Desire::Marked(owner) => owner,
         }
     }
 }
@@ -602,30 +600,6 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
             owner,
             wait_queue: WaitQueue::default(),
         })
-    }
-}
-
-impl<'a, 'd, S: Sequencer> Future for AwaitAccessPermission<'a, 'd, S> {
-    type Output = Result<(), Error>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.deadline < Instant::now() {
-            // The deadline was reached.
-            return Poll::Ready(Err(Error::Timeout));
-        }
-
-        // TODO: try to acquire the resource.
-
-        if self
-            .message_sender
-            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
-            .is_err()
-        {
-            // The message channel is congested.
-            cx.waker().wake_by_ref();
-        }
-        Poll::Pending
     }
 }
 
