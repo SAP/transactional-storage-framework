@@ -61,8 +61,13 @@ pub(super) struct Anchor<S: Sequencer> {
 /// if the transaction is being committed.
 #[derive(Debug)]
 pub(super) struct AwaitEOT<'d, S: Sequencer> {
+    /// The transaction to be committed or rolled back.
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+
+    /// The message sender to which send a wake up message.
     message_sender: &'d SyncSender<Task>,
+
+    /// The deadline.
     deadline: Instant,
 }
 

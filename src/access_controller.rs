@@ -4,13 +4,17 @@
 
 use super::journal::Anchor as JournalAnchor;
 use super::journal::WritePermission;
+use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
+use std::future::Future;
 use std::ops::Deref;
-use std::task::Waker;
+use std::pin::Pin;
+use std::sync::mpsc::SyncSender;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -104,15 +108,15 @@ enum LockMode<S: Sequencer> {
 enum Desire<S: Sequencer> {
     /// Desires to acquire a shared lock on the database object.
     #[allow(dead_code)]
-    Shared(Owner<S>, Waker),
+    Shared(Owner<S>, Option<Waker>),
 
     /// Desires to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
-    Exclusive(Owner<S>, Waker),
+    Exclusive(Owner<S>, Option<Waker>),
 
     /// Desires to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
-    Marked(Owner<S>, Waker),
+    Marked(Owner<S>, Option<Waker>),
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +156,27 @@ struct ExclusiveAwaitable<S: Sequencer> {
     /// The wait queue of the database object.
     #[allow(dead_code)]
     wait_queue: WaitQueue<S>,
+}
+
+#[derive(Debug)]
+struct AwaitAccessPermission<'a, 'd, S: Sequencer> {
+    /// The [`AccessController`].
+    #[allow(dead_code)]
+    access_controller: &'a AccessController<S>,
+
+    /// The identifier of the desired object.
+    #[allow(dead_code)]
+    object_id: usize,
+
+    /// The owner.
+    #[allow(dead_code)]
+    owner: Owner<S>,
+
+    /// The message sender to which send a wake up message.
+    message_sender: &'d SyncSender<Task>,
+
+    /// The deadline.
+    deadline: Instant,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -499,6 +524,30 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
             owner,
             wait_queue: WaitQueue::default(),
         })
+    }
+}
+
+impl<'a, 'd, S: Sequencer> Future for AwaitAccessPermission<'a, 'd, S> {
+    type Output = Result<(), Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.deadline < Instant::now() {
+            // The deadline was reached.
+            return Poll::Ready(Err(Error::Timeout));
+        }
+
+        // TODO: try to acquire the resource.
+
+        if self
+            .message_sender
+            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .is_err()
+        {
+            // The message channel is congested.
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
     }
 }
 
