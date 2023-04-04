@@ -416,7 +416,7 @@ pub(super) struct Anchor<S: Sequencer> {
     commit_instant: S::Instant,
 
     /// An unordered bag of [`Waker`] for readers.
-    waiting_readers: Bag<Waker>,
+    waiting_readers: Bag<Waker, 4>,
 }
 
 impl<S: Sequencer> Anchor<S> {
@@ -425,7 +425,7 @@ impl<S: Sequencer> Anchor<S> {
             state: AtomicUsize::new(0),
             prepare_instant: S::Instant::default(),
             commit_instant: S::Instant::default(),
-            waiting_readers: Bag::default(),
+            waiting_readers: Bag::new(),
         }
     }
 

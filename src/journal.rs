@@ -2,15 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::access_controller::PromotedAccess;
 use super::overseer::Task;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
-use scc::ebr;
+use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::task::{Context, Poll};
@@ -30,7 +31,10 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
 /// operations.
 #[derive(Debug)]
 pub(super) struct Anchor<S: Sequencer> {
+    /// Points to the key fields of the [`Transaction`].
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+
+    /// The time point when the [`Journal`] was created.
     creation_instant: usize,
 
     /// The transaction instant when the [`Journal`] was submitted.
@@ -38,11 +42,23 @@ pub(super) struct Anchor<S: Sequencer> {
     /// This being `zero` represents a state where the changes made by the [`Journal`] cannot be
     /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
     submit_instant: AtomicUsize,
+
+    /// Promoted access permission is kept in the [`Journal`] to roll back the access when the
+    /// [`Journal`] has to be rolled back.
+    ///
+    /// ## Warning
+    ///
+    /// `promoted_access` cannot be mutably accessed with a mutable reference to an entry in an
+    /// [`AccessController`](super::AccessController) held, otherwise a deadlock may occur.
+    #[allow(dead_code)]
+    promoted_access: HashMap<usize, PromotedAccess<S>>,
+
+    /// [`Anchor`] itself is formed as a linked list of [`Anchor`] by the [`Transaction`].
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
-/// [`AwaitEOT`] is returned by [`Anchor`] for the caller to await the final transaction state if
-/// the transaction is being committed.
+/// [`AwaitEOT`] is returned by an [`Anchor`] for the caller to await the final transaction state
+/// if the transaction is being committed.
 #[derive(Debug)]
 pub(super) struct AwaitEOT<'d, S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
@@ -185,8 +201,8 @@ impl<S: Sequencer> Anchor<S> {
         Ok(false)
     }
 
-    /// Checks if the writer is able to update a piece of data created by the transaction
-    /// represented by `self`.
+    /// Checks if the supplied [`Journal`] is able to update a piece of data created by the
+    /// [`Journal`] represented by `self`.
     ///
     /// Returns the instant when the transaction was committed or rolled back if the transaction is
     /// not active anymore, otherwise `None` is returned.
@@ -229,7 +245,7 @@ impl<S: Sequencer> Anchor<S> {
     /// Rolls back the changes contained in the associated [`Journal`].
     pub(super) fn rollback(&self) {
         self.submit_instant
-            .store(UNFINISHED_TRANSACTION_INSTANT, Relaxed);
+            .store(UNFINISHED_TRANSACTION_INSTANT, Release);
     }
 
     /// Reads its submit instant.
@@ -246,6 +262,7 @@ impl<S: Sequencer> Anchor<S> {
             transaction_anchor,
             creation_instant,
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
+            promoted_access: HashMap::default(),
             next: ebr::AtomicArc::null(),
         }
     }
