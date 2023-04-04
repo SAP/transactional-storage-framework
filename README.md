@@ -31,7 +31,7 @@ This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluati
 
 The framework is fully written in Rust, and incorporates state-of-the-art programming techniques to maximize the performance while minimizing the memory usage.
 
-* Asynchronous API: any code that access shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
+* Asynchronous API: any code that accesses shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
 * No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
 * Zero busy-loops: no spin-locks and busy-loops to wait for desired resources.
 
@@ -49,7 +49,7 @@ use sap_tsf::Database;
 let database = Database::default();
 ```
 
-## Container
+### Container
 
 `Container` is analogous to a database table in database management software. Its data is organized in accordance with the metadata embedded inside the container. Containers are hierarchically managed, and can be uniquely identified by a string. The layout of a `Container` can be customized via the associated `Metadata`.
 
@@ -65,15 +65,15 @@ let mut journal = transaction.start();
 let container_handle = database.create_container(name, metadata, &mut journal, None).await;
 ```
 
-## Sequencer
+### Sequencer
 
 `Sequencer` defines the logical flow of time in `Database`. The default `Sequencer` is based on an atomic integer counter, however it is free to install a new customized `Sequencer` module, e.g., an implementation of `Vector Clock`, as long as the generated values are partially ordered.
 
-## Snapshot
+### Snapshot
 
 `Snapshot` is not a replaceable module, but the implementation is highly dependent on the `Sequencer` module.
 
-## Transaction
+### Transaction
 
 `Transaction` represents a set of changes made to a `Database` that can be atomically committed. The module cannot be replaced with a new one, however developers are able to add / modify / remove transactional semantics easily since the interface and code are simple enough to understand.
 
@@ -88,11 +88,11 @@ let transaction_snapshot = transaction.snapshot();
 let journal = transaction.start();
 ```
 
-## AccessController
+### AccessController
 
 `AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object. In other words, `AccessController` controls locking and versioning of database objects.
 
-## PersistenceLayer
+### PersistenceLayer
 
 `PersistenceLayer` is an abstract module for implementing write-ahead-logging mechanisms and point-in-time-recovery.
 
