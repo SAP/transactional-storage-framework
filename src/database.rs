@@ -281,8 +281,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         &self.kernel.sequencer
     }
 
+    /// Returns a reference to its [`AccessController`].
+    #[allow(dead_code)]
+    pub(super) fn access_controller(&self) -> &AccessController<S> {
+        &self.kernel.access_controller()
+    }
+
     /// Returns a message sender to the [`Overseer`].
-    #[inline]
     pub(super) fn message_sender(&self) -> &SyncSender<Task> {
         self.overseer.message_sender()
     }
