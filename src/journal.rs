@@ -325,8 +325,7 @@ impl<S: Sequencer> Anchor<S> {
     /// # Errors
     ///
     /// An error is returned if the ownership cannot be transferred.
-    #[allow(dead_code)]
-    pub(super) fn grant_ownership_transfer<'d>(
+    pub(super) fn grant_ownership_transfer(
         &self,
         _other: &Anchor<S>,
     ) -> Result<Option<S::Instant>, ()> {
@@ -494,7 +493,9 @@ impl<S: Sequencer> AccessRequestResult<S> {
     ) {
         self.result.replace(result);
         self.promotion_result = promotion_result;
-        self.waker.take().map(|w| w.wake());
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
     }
 }
 
