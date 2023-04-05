@@ -4,16 +4,13 @@
 
 use super::journal::Anchor as JournalAnchor;
 use super::journal::{AwaitResponse, Relationship};
-use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
-use scc::hash_map::OccupiedEntry;
 use scc::{ebr, HashMap};
 use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
 use std::mem::take;
 use std::ops::{Deref, DerefMut};
-use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -79,7 +76,6 @@ pub(super) enum LockMode<S: Sequencer> {
     Reserved(Owner<S>),
 
     /// The database object is prepared to be created, but there are waiting transactions.
-    #[allow(dead_code)]
     ReservedAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is locked shared by a single transaction.
@@ -107,7 +103,6 @@ pub(super) enum LockMode<S: Sequencer> {
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
     /// A request to reserve a database object.
-    #[allow(dead_code)]
     Reserve(Owner<S>),
 
     /// A request to acquire a shared lock on the database object.
@@ -128,8 +123,7 @@ pub(super) enum Request<S: Sequencer> {
 pub(super) struct SharedAwaitable<S: Sequencer> {
     /// The instant when the database object was created.
     ///
-    /// The value is equal to `S::Instant::default()` if the database object is universally
-    /// visible.
+    /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
 
     /// A set of owners.
@@ -144,8 +138,7 @@ pub(super) struct SharedAwaitable<S: Sequencer> {
 pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The instant when the database object was created.
     ///
-    /// The value is equal to `S::Instant::default()` if the database object is universally
-    /// visible.
+    /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
 
     /// The only owner.
@@ -171,6 +164,33 @@ impl<S: Sequencer> AccessController<S> {
     /// An [`Error`] is returned if the specified deadline was reached or memory allocation failed
     /// when pushing a [`Waker`](std::task::Waker) into the owner
     /// [`Transaction`](super::Transaction).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, ToObjectID};
+    ///
+    /// struct O(usize);
+    ///
+    /// impl ToObjectID for O {
+    ///     fn to_object_id(&self) -> usize {
+    ///         self.0
+    ///    }
+    /// }
+    ///
+    /// let database = Database::default();
+    /// let access_controller = database.access_controller();
+    /// async {
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
+    ///     assert!(access_controller.reserve(&O(1), &mut journal, None).await.is_ok());
+    ///     journal.submit();
+    ///     assert!(transaction.commit().await.is_ok());
+    ///
+    ///     let snapshot = database.snapshot();
+    ///     assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+    /// };
+    /// ```
     #[inline]
     pub async fn read<O: ToObjectID>(
         &self,
@@ -195,7 +215,7 @@ impl<S: Sequencer> AccessController<S> {
                                     .grant_read_access(snapshot, deadline)
                             }
                             LockMode::Shared(_) | LockMode::Exclusive(_) => {
-                                // The database object is temporarily locked.
+                                // The database object is temporarily locked, but globally visible.
                                 Ok(true)
                             }
                             LockMode::SharedAwaitable(shared_awaitable) => {
@@ -254,13 +274,46 @@ impl<S: Sequencer> AccessController<S> {
 
     /// Reserves access control data for a database object to create it.
     ///
-    /// The database object is inaccessible while it is reserved by a transaction.
+    /// Transactions can compete for the same database object, e.g., when the new database object
+    /// becomes reachable via an index before being visible to database readers, however at most
+    /// one of competing transactions can reserve the database object and finally be committed.
+    ///
+    /// [`AccessController`] does not prohibit a situation where an already created database object
+    /// becomes globally visible, e.g., the object was created and the access data has been
+    /// removed, and a new transaction tries to reserve the same database object; this usually
+    /// causes a correctness issue where a database reader cannot have a consistent view of the
+    /// database. Therefore, a transaction must have checked whether the database object is
+    /// visible to database readers or not beforehand.
+    ///
+    /// It returns `true` if the database object was newly reserved in this transaction.
     ///
     /// # Errors
     ///
     /// An [`Error`] is returned if memory allocation failed, the database object was already
-    /// created and globally visible, or another transaction has not completed creating the
-    /// database object until the deadline is reached.
+    /// created, or another transaction has not completed creating the database object until the
+    /// specified deadline is reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, ToObjectID};
+    ///
+    /// struct O(usize);
+    ///
+    /// impl ToObjectID for O {
+    ///     fn to_object_id(&self) -> usize {
+    ///         self.0
+    ///    }
+    /// }
+    ///
+    /// let database = Database::default();
+    /// let access_controller = database.access_controller();
+    /// async {
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
+    ///     assert!(access_controller.reserve(&O(1), &mut journal, None).await.is_ok());
+    /// };
+    /// ```
     #[inline]
     pub async fn reserve<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,
@@ -277,13 +330,14 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(true);
             }
         };
-        if let ObjectState::Locked(locked) = entry.get_mut() {
+        while let ObjectState::Locked(locked) = entry.get_mut() {
             match locked {
                 LockMode::Reserved(owner) => {
                     // The state of the owner needs to be checked.
                     match owner.grant_write_access(journal.anchor()) {
                         Relationship::Committed(_) => {
-                            // The transaction was committed.
+                            // The transaction was committed, meaning that the database object has
+                            // been successfully created.
                             return Err(Error::SerializationFailure);
                         }
                         Relationship::RolledBack => {
@@ -293,7 +347,8 @@ impl<S: Sequencer> AccessController<S> {
                             return Ok(true);
                         }
                         Relationship::Linearizable => {
-                            // Already reserved in a previous journal.
+                            // Already reserved in a previously submitted journal in the same
+                            // transaction.
                             return Ok(false);
                         }
                         Relationship::Concurrent => {
@@ -301,23 +356,35 @@ impl<S: Sequencer> AccessController<S> {
                             return Err(Error::Deadlock);
                         }
                         Relationship::Unknown => {
-                            // TODO: wait.
-                            return Err(Error::Conflict);
+                            if deadline.is_some() {
+                                // Prepare for awaiting access to the database object.
+                                *locked = LockMode::ReservedAwaitable(
+                                    ExclusiveAwaitable::with_instant_and_owner(
+                                        S::Instant::default(),
+                                        owner.clone(),
+                                    ),
+                                );
+                            } else {
+                                // No deadline is specified.
+                                break;
+                            }
                         }
                     }
                 }
                 LockMode::ReservedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
+                        // If the owner gets rolled back before the deadline, this transaction may
+                        // get access to the database object.
                         let message_sender = journal.message_sender();
                         let owner = Owner::from(journal);
                         let request = Request::Reserve(owner.clone());
                         exclusive_awaitable.push_request(request);
-                        return self
-                            .await_access(entry, owner, message_sender, deadline)
-                            .await;
+                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
                     }
+                    // No deadline is specified.
+                    break;
                 }
-                _ => (),
+                _ => break,
             }
         }
 
@@ -481,174 +548,227 @@ impl<S: Sequencer> AccessController<S> {
         }
     }
 
-    /// Transfers ownership to the first one waiting in the wait queue.
+    /// Transfers ownership to all the eligible waiting transactions.
     ///
-    /// If the database object does not need to be monitored anymore, it returns `true`. It is a
-    /// blocking synchronous method invoked by [`Overseer`](super::overseer::Overseer).
+    /// If the database object still need to be monitored, it returns `true`. It is a blocking and
+    /// synchronous method invoked by [`Overseer`](super::overseer::Overseer).
     pub(super) fn transfer_ownership(&self, object_id: usize) -> bool {
         self.table
             .update(&object_id, |_, state| {
-                if let ObjectState::Locked(locked) = state {
-                    match locked {
-                        LockMode::Reserved(_)
-                        | LockMode::Shared(_)
-                        | LockMode::Exclusive(_)
-                        | LockMode::Marked(_) => {
-                            // No waiting transactions.
-                            true
-                        }
-                        LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                            if let Some(first_request) =
-                                exclusive_awaitable.wait_queue.clone_first()
-                            {
-                                match exclusive_awaitable
-                                    .owner
-                                    .grant_write_access(first_request.owner())
-                                {
-                                    Relationship::Committed(commit_instant) => {
-                                        let (new_state, no_waiting_transactions) =
-                                            Self::process_wait_queue(
-                                                first_request,
-                                                commit_instant,
-                                                true,
-                                                false,
-                                                &mut exclusive_awaitable.wait_queue,
-                                            );
-                                        *state = new_state;
-                                        no_waiting_transactions
-                                    }
-                                    Relationship::RolledBack => {
-                                        let (new_state, no_waiting_transactions) =
-                                            Self::process_wait_queue(
-                                                first_request,
-                                                S::Instant::default(),
-                                                false,
-                                                false,
-                                                &mut exclusive_awaitable.wait_queue,
-                                            );
-                                        *state = new_state;
-                                        no_waiting_transactions
-                                    }
-                                    Relationship::Linearizable => {
-                                        // TODO: intra-transaction ownership transfer.
-                                        unimplemented!()
-                                    }
-                                    Relationship::Concurrent | Relationship::Unknown => false,
-                                }
-                            } else {
+                loop {
+                    if let ObjectState::Locked(locked) = state {
+                        match locked {
+                            LockMode::Reserved(_)
+                            | LockMode::Shared(_)
+                            | LockMode::Exclusive(_)
+                            | LockMode::Marked(_) => {
                                 // No waiting transactions.
-                                *locked = LockMode::Reserved(exclusive_awaitable.owner.clone());
-                                true
+                                return false;
+                            }
+                            LockMode::ReservedAwaitable(exclusive_awaitable) => {
+                                if let Some(request) = exclusive_awaitable.wait_queue.clone_first()
+                                {
+                                    match exclusive_awaitable
+                                        .owner
+                                        .grant_write_access(request.owner())
+                                    {
+                                        Relationship::Committed(commit_instant) => {
+                                            if let Some(new_state) =
+                                                Self::transfer_committed_reserved_ownership(
+                                                    request,
+                                                    commit_instant,
+                                                    &mut exclusive_awaitable.wait_queue,
+                                                )
+                                            {
+                                                *state = new_state;
+                                            }
+                                        }
+                                        Relationship::RolledBack => {
+                                            *state = Self::transfer_rolled_back_reserved_ownership(
+                                                request,
+                                                &mut exclusive_awaitable.wait_queue,
+                                            );
+                                        }
+                                        Relationship::Linearizable => {
+                                            // TODO: intra-transaction ownership transfer.
+                                            unimplemented!()
+                                        }
+                                        Relationship::Concurrent | Relationship::Unknown => {
+                                            // The first waiting transaction cannot gain access to
+                                            // the database object.
+                                            return true;
+                                        }
+                                    }
+                                } else {
+                                    // No waiting transactions.
+                                    *locked = LockMode::Reserved(exclusive_awaitable.owner.clone());
+                                    return false;
+                                }
+                            }
+                            LockMode::ExclusiveAwaitable(_) => {
+                                // TODO: unlock handling.
+                                todo!()
+                            }
+                            LockMode::MarkedAwaitable(_) => {
+                                // TODO: deletion handling.
+                                unimplemented!()
+                            }
+                            LockMode::SharedAwaitable(_) => {
+                                // TODO: shared-lock handling
+                                panic!("unimplemented");
                             }
                         }
-                        LockMode::ExclusiveAwaitable(_) => {
-                            // TODO: unlock handling.
-                            todo!()
-                        }
-                        LockMode::MarkedAwaitable(_) => {
-                            // TODO: deletion handling.
-                            unimplemented!()
-                        }
-                        LockMode::SharedAwaitable(_) => {
-                            // TODO: shared-lock handling
-                            false
-                        }
+                    } else {
+                        // The database object was created or deleted.
+                        return false;
                     }
-                } else {
-                    false
                 }
             })
-            .map_or(true, |r| r)
+            .map_or(false, |r| r)
     }
 
-    /// Processes requests in the [`WaitQueue`] and returns the new access table entry state.
+    /// Transfer reserve ownership from the committed transaction to the waiting transaction.
     ///
-    /// Returns `true` if the entry has no waiting transactions anymore. This assumes that access
-    /// is granted to the requester.
-    fn process_wait_queue(
-        first_request: Request<S>,
+    /// Returns an updated database object state if there was a change to it. This function always
+    /// pops the first request from the wait queue, therefore progress of the caller is guaranteed.
+    fn transfer_committed_reserved_ownership(
+        request: Request<S>,
         creation_instant: S::Instant,
-        is_reserved: bool,
-        _is_deleted: bool,
         wait_queue: &mut WaitQueue<S>,
-    ) -> (ObjectState<S>, bool) {
-        debug_assert_eq!(creation_instant, S::Instant::default());
-        let mut no_waiting_transactions = wait_queue.remove_first();
-        let new_state = match first_request {
+    ) -> Option<ObjectState<S>> {
+        let wait_queue_empty = wait_queue.remove_first();
+        match request {
             Request::Reserve(requester) => {
-                if is_reserved {
-                    // Reservation failed.
-                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
-                        r.set_result(Err(Error::SerializationFailure), None);
-                    }
-                    ObjectState::Created(creation_instant)
+                // It is not possible to reserve the database object after another transaction has
+                // successfully created it.
+                if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                    r.set_result(Err(Error::SerializationFailure), None);
+                }
+                if wait_queue_empty {
+                    Some(ObjectState::Created(creation_instant))
                 } else {
-                    // The previous owner has failed to fully reserve the database object.
+                    None
+                }
+            }
+            Request::Shared(requester) => {
+                let mut shared_awaitable =
+                    SharedAwaitable::with_instant_and_owner(creation_instant, requester.clone());
+                shared_awaitable.wait_queue = take(wait_queue);
+                if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                    r.set_result(Ok(true), None);
+                }
+                Some(ObjectState::Locked(LockMode::SharedAwaitable(
+                    shared_awaitable,
+                )))
+            }
+            Request::Exclusive(requester) => {
+                let mut exclusive_awaitable =
+                    ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
+                exclusive_awaitable.wait_queue = take(wait_queue);
+                if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                    r.set_result(Ok(true), None);
+                }
+                Some(ObjectState::Locked(LockMode::ExclusiveAwaitable(
+                    exclusive_awaitable,
+                )))
+            }
+            Request::Marked(requester) => {
+                let mut exclusive_awaitable =
+                    ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
+                exclusive_awaitable.wait_queue = take(wait_queue);
+                if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                    r.set_result(Ok(true), None);
+                }
+                Some(ObjectState::Locked(LockMode::MarkedAwaitable(
+                    exclusive_awaitable,
+                )))
+            }
+        }
+    }
+
+    /// Transfer reserve ownership from the rolled back journal to the waiting transaction.
+    ///
+    /// Returns an updated database object state. This function always pops the first request from
+    /// the wait queue, therefore progress of the caller is guaranteed.
+    fn transfer_rolled_back_reserved_ownership(
+        request: Request<S>,
+        wait_queue: &mut WaitQueue<S>,
+    ) -> ObjectState<S> {
+        let wait_queue_empty = wait_queue.remove_first();
+        match request {
+            Request::Reserve(requester) => {
+                if wait_queue_empty {
                     if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
                         r.set_result(Ok(true), None);
                     }
                     ObjectState::Locked(LockMode::Reserved(requester))
+                } else {
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        requester.clone(),
+                    );
+                    exclusive_awaitable.wait_queue = take(wait_queue);
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
+                    ObjectState::Locked(LockMode::ReservedAwaitable(exclusive_awaitable))
                 }
             }
             Request::Shared(requester) => {
-                if creation_instant == S::Instant::default() && no_waiting_transactions {
+                if wait_queue_empty {
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
                     ObjectState::Locked(LockMode::Shared(requester))
                 } else {
-                    let mut shared_awaitable =
-                        SharedAwaitable::with_instant_and_owner(creation_instant, requester);
-                    loop {
-                        if let Some(Request::Shared(next_requester)) = wait_queue.clone_first() {
-                            shared_awaitable.owner_set.insert(next_requester);
-                            no_waiting_transactions = wait_queue.remove_first();
-                        } else {
-                            shared_awaitable.wait_queue = take(wait_queue);
-                            shared_awaitable.owner_set.iter().for_each(|o| {
-                                if let Ok(mut r) = o.access_request_result_placeholder().lock() {
-                                    r.set_result(Ok(true), None);
-                                }
-                            });
-                            break;
-                        }
+                    let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        requester.clone(),
+                    );
+                    shared_awaitable.wait_queue = take(wait_queue);
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
                     }
                     ObjectState::Locked(LockMode::SharedAwaitable(shared_awaitable))
                 }
             }
             Request::Exclusive(requester) => {
-                if creation_instant == S::Instant::default() && no_waiting_transactions {
+                if wait_queue_empty {
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
                     ObjectState::Locked(LockMode::Exclusive(requester))
                 } else {
-                    let mut exclusive_awaitable =
-                        ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester);
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        requester.clone(),
+                    );
                     exclusive_awaitable.wait_queue = take(wait_queue);
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
                     ObjectState::Locked(LockMode::ExclusiveAwaitable(exclusive_awaitable))
                 }
             }
             Request::Marked(requester) => {
-                if creation_instant == S::Instant::default() && no_waiting_transactions {
+                if wait_queue_empty {
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
                     ObjectState::Locked(LockMode::Marked(requester))
                 } else {
-                    let mut exclusive_awaitable =
-                        ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester);
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        requester.clone(),
+                    );
                     exclusive_awaitable.wait_queue = take(wait_queue);
+                    if let Ok(mut r) = requester.access_request_result_placeholder().lock() {
+                        r.set_result(Ok(true), None);
+                    }
                     ObjectState::Locked(LockMode::MarkedAwaitable(exclusive_awaitable))
                 }
             }
-        };
-        (new_state, no_waiting_transactions)
-    }
-
-    /// Awaits access to the database object.
-    async fn await_access<'a>(
-        &'a self,
-        entry: OccupiedEntry<'a, usize, ObjectState<S>>,
-        owner: Owner<S>,
-        message_sender: &SyncSender<Task>,
-        deadline: Instant,
-    ) -> Result<bool, Error> {
-        owner.clear_access_request_result_placeholder();
-        let awaitable = AwaitResponse::new(owner, *entry.key(), message_sender, deadline);
-        drop(entry);
-        awaitable.await
+        }
     }
 }
 
@@ -839,7 +959,7 @@ mod test {
     #[tokio::test]
     async fn reserve_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -859,7 +979,7 @@ mod test {
     #[tokio::test]
     async fn reserve_prepare_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -879,32 +999,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn reserve_prepare_reserve() {
-        let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .reserve(&0, &mut journal, None)
-            .await
-            .is_ok());
-        assert_eq!(journal.submit(), 1);
-        let prepared = transaction.prepare().await.unwrap();
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        let (reserved, committed) = futures::join!(
-            access_controller.reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            prepared
-        );
-        assert_eq!(reserved, Err(Error::Conflict));
-        assert!(committed.is_ok());
-    }
-
-    #[tokio::test]
     async fn reserve_rewind_reserve() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -925,7 +1022,7 @@ mod test {
     #[tokio::test]
     async fn reserve_rollback_reserve() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -933,20 +1030,21 @@ mod test {
             .await
             .is_ok());
         assert_eq!(journal.submit(), 1);
-        transaction.rollback().await;
+        let rollback_runner = async { transaction.rollback().await };
 
         let transaction = database.transaction();
         let mut journal = transaction.journal();
-        assert!(access_controller
-            .reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
-            .await
-            .is_ok());
+        let (result, _) = futures::join!(
+            access_controller.reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            rollback_runner
+        );
+        assert_eq!(result, Ok(true));
     }
 
     #[tokio::test]
     async fn reserve_prepare_timeout() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -971,7 +1069,7 @@ mod test {
     #[tokio::test]
     async fn reserve_commit_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -981,7 +1079,7 @@ mod test {
         assert_eq!(journal.submit(), 1);
         let prepared = transaction.prepare().await.unwrap();
         let mut database_snapshot = 0;
-        let reader = async {
+        let read_runner = async {
             let snapshot = database.snapshot();
             database_snapshot = snapshot.database_snapshot();
             access_controller
@@ -989,16 +1087,39 @@ mod test {
                 .await
         };
 
-        let result = futures::join!(prepared, reader);
-        let commit_instant = result.0.unwrap();
-        let visible = result.1.unwrap();
+        let (visible, committed) = futures::join!(read_runner, prepared);
+        let commit_instant = committed.unwrap();
+        let visible = visible.unwrap();
         assert_eq!(visible, commit_instant <= database_snapshot);
+    }
+
+    #[tokio::test]
+    async fn reserve_commit_reserve() {
+        let database = Database::default();
+        let access_controller = database.access_controller();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert!(access_controller
+            .reserve(&0, &mut journal, None)
+            .await
+            .is_ok());
+        assert_eq!(journal.submit(), 1);
+        let prepared = transaction.prepare().await.unwrap();
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        let (reserved, committed) = futures::join!(
+            access_controller.reserve(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            prepared
+        );
+        assert_eq!(reserved, Err(Error::SerializationFailure));
+        assert!(committed.is_ok());
     }
 
     #[tokio::test]
     async fn reserve_commit_share_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -1038,7 +1159,7 @@ mod test {
     #[tokio::test]
     async fn reserve_rollback_share_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -1069,7 +1190,7 @@ mod test {
     #[tokio::test]
     async fn reserve_rollback_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -1092,7 +1213,7 @@ mod test {
     #[tokio::test]
     async fn share_read() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -1123,7 +1244,7 @@ mod test {
     #[tokio::test]
     async fn lock() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller
@@ -1137,7 +1258,7 @@ mod test {
     #[tokio::test]
     async fn mark() {
         let database = Database::default();
-        let access_controller = AccessController::<AtomicCounter>::default();
+        let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
         assert!(access_controller

@@ -2,12 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::access_controller::{Owner, PromotedAccess};
+use super::access_controller::{ObjectState, Owner, PromotedAccess};
 use super::overseer::Task;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
+use scc::hash_map::OccupiedEntry;
 use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -72,7 +73,6 @@ pub(super) struct Anchor<S: Sequencer> {
 #[derive(Debug)]
 pub(super) struct AwaitResponse<'d, S: Sequencer> {
     /// The owner.
-    #[allow(dead_code)]
     owner: Owner<S>,
 
     /// The object identifier of the desired resource.
@@ -197,15 +197,12 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
         )
     }
 
-    /// Returns a reference to its [`Transaction`].
+    /// Returns a reference to the message sender owned by the [`Database`](super::Database).
     pub(super) fn message_sender(&self) -> &'d SyncSender<Task> {
         self.transaction.message_sender()
     }
 
     /// Returns a reference to its [`Anchor`].
-    #[inline]
-    #[must_use]
-    #[allow(dead_code)]
     pub(super) fn anchor(&self) -> &ebr::Arc<Anchor<S>> {
         &self.anchor
     }
@@ -401,12 +398,16 @@ impl<S: Sequencer> Anchor<S> {
 }
 
 impl<'d, S: Sequencer> AwaitResponse<'d, S> {
+    /// Creates a new [`AwaitResponse`].
     pub(super) fn new(
         owner: Owner<S>,
-        object_id: usize,
+        entry: OccupiedEntry<usize, ObjectState<S>>,
         message_sender: &'d SyncSender<Task>,
         deadline: Instant,
     ) -> AwaitResponse<'d, S> {
+        let object_id = *entry.key();
+        drop(entry);
+        owner.clear_access_request_result_placeholder();
         AwaitResponse {
             owner,
             object_id,
@@ -461,6 +462,7 @@ impl<S: Sequencer> AccessRequestResult<S> {
         result: Result<bool, Error>,
         promotion_result: Option<PromotedAccess<S>>,
     ) {
+        debug_assert!(self.result.is_none());
         self.result.replace(result);
         self.promotion_result = promotion_result;
         if let Some(waker) = self.waker.take() {
