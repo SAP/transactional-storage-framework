@@ -47,10 +47,7 @@ pub(super) struct Anchor<S: Sequencer> {
     /// Promoted access permission is kept in the [`Journal`] to roll back the access when the
     /// [`Journal`] has to be rolled back.
     ///
-    /// ## Warning
-    ///
-    /// `promoted_access` cannot be mutably accessed with a mutable reference to an entry in an
-    /// [`AccessController`](super::AccessController) held, otherwise a deadlock may occur.
+    /// TODO: rollback handling.
     #[allow(dead_code)]
     promoted_access: HashMap<usize, PromotedAccess<S>>,
 
@@ -119,31 +116,34 @@ pub(super) struct AwaitEOT<'d, S: Sequencer> {
     deadline: Instant,
 }
 
-/// Write access permission.
+/// Relationship between the access requester and the database object owner.
 #[derive(Debug)]
-pub(super) enum WritePermission<S: Sequencer> {
+pub(super) enum Relationship<S: Sequencer> {
     /// The owner was committed.
     ///
-    /// The requester can take ownership.
+    /// The requester can take ownership as long as the commit instant is kept in the access
+    /// controller.
     Committed(S::Instant),
 
     /// The owner was rolled back.
+    ///
+    /// The requester can take ownership.
     RolledBack,
 
     /// The ownership can be transferred.
     ///
-    /// The request belongs to the same transaction, and they are linearizable.
+    /// The requester belongs to the same transaction, and they are linearizable.
     #[allow(dead_code)]
     Linearizable,
 
     /// The ownership cannot be transferred.
     ///
-    /// The request belongs to the same transaction, but they are not linearizable.
+    /// The requester belongs to the same transaction, but they are not linearizable.
     #[allow(dead_code)]
     Concurrent,
 
-    /// The request has to wait.
-    Rejected,
+    /// The requester has to wait to correctly determine the relationship.
+    Unknown,
 }
 
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
@@ -185,16 +185,21 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn snapshot<'r>(&'r self) -> Snapshot<'d, 't, 'r, S> {
+    pub fn snapshot<'j>(&'j self) -> Snapshot<'d, 't, 'j, S> {
         Snapshot::from_parts(
             self.transaction.sequencer(),
-            self.transaction.sender(),
+            self.transaction.message_sender(),
             Some(
                 self.transaction
                     .transaction_snapshot(self.anchor.creation_instant),
             ),
             Some(self.journal_snapshot()),
         )
+    }
+
+    /// Returns a reference to its [`Transaction`].
+    pub(super) fn message_sender(&self) -> &'d SyncSender<Task> {
+        self.transaction.message_sender()
     }
 
     /// Returns a reference to its [`Anchor`].
@@ -284,56 +289,21 @@ impl<S: Sequencer> Anchor<S> {
     /// Checks if the supplied [`Journal`] is able to update a piece of data created by the
     /// [`Journal`] represented by `self`.
     ///
-    /// Returns the instant when the transaction was committed or rolled back if the transaction is
-    /// not active anymore.
-    ///
-    /// # Errors
-    ///
-    /// A boolean flag indicating that the ownership can be transferred to the [`Journal`] is
-    /// returned if the transaction has yet to be committed or rolled back. If the [`Journal`]
-    /// belongs to the same transaction as the owner, `Some(flag)` is returned; if the owner was
-    /// already submitted to the [`Transaction`] before the specified [`Journal`] was started,
-    /// `Some(true)` if returned. `None` is returned if the transaction and the owner are
-    /// unrelated.
-    pub(super) fn grant_write_access<P: PersistenceLayer<S>>(
-        &self,
-        _journal: &mut Journal<'_, '_, S, P>,
-    ) -> WritePermission<S> {
+    /// Returns the relationship between the requester and `self`.
+    pub(super) fn grant_write_access(&self, _anchor: &Anchor<S>) -> Relationship<S> {
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
             if eot_instant == S::Instant::default() {
-                WritePermission::RolledBack
+                Relationship::RolledBack
             } else if self.submit_instant() != 0 {
                 // The journal has stayed in the transaction until the transaction was committed.
-                WritePermission::Committed(eot_instant)
+                Relationship::Committed(eot_instant)
             } else {
                 // The journal was rolled back before the transaction has been committed.
-                WritePermission::RolledBack
+                Relationship::RolledBack
             }
         } else {
             // TODO: intra-transaction visibility control.
-            WritePermission::Rejected
-        }
-    }
-
-    /// Checks if the specified [`Anchor`] is able to take ownership of the resource held by
-    /// `self`.
-    ///
-    /// If the transaction was committed or rolled back, the time point value is returned,
-    /// otherwise `None` is returned. Returning `None` means that the ownership is to be
-    /// transferred within the same transaction.
-    ///
-    /// # Errors
-    ///
-    /// An error is returned if the ownership cannot be transferred.
-    pub(super) fn grant_ownership_transfer(
-        &self,
-        _other: &Anchor<S>,
-    ) -> Result<Option<S::Instant>, ()> {
-        if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
-            Ok(Some(eot_instant))
-        } else {
-            // TODO: intra-transaction ownership transfer.
-            Err(())
+            Relationship::Unknown
         }
     }
 

@@ -266,7 +266,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     }
 
     /// Returns a reference to its message sender.
-    pub(super) fn sender(&self) -> &'d SyncSender<Task> {
+    pub(super) fn message_sender(&self) -> &'d SyncSender<Task> {
         self.database.message_sender()
     }
 
