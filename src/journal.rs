@@ -95,6 +95,9 @@ pub(super) struct AccessRequestResult<S: Sequencer> {
     waker: Option<Waker>,
 
     /// Result of the resource acquisition attempt.
+    ///
+    /// `true` is set if the resource is newly acquired. `false` is set if the transaction already
+    /// has ownership.
     result: Option<Result<bool, Error>>,
 
     /// Result of promotion.
@@ -312,6 +315,29 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
+    /// Checks if the specified [`Anchor`] is able to take ownership of the resource held by
+    /// `self`.
+    ///
+    /// If the transaction was committed or rolled back, the time point value is returned,
+    /// otherwise `None` is returned. Returning `None` means that the ownership is to be
+    /// transferred within the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if the ownership cannot be transferred.
+    #[allow(dead_code)]
+    pub(super) fn grant_ownership_transfer<'d>(
+        &self,
+        _other: &Anchor<S>,
+    ) -> Result<Option<S::Instant>, ()> {
+        if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
+            Ok(Some(eot_instant))
+        } else {
+            // TODO: intra-transaction ownership transfer.
+            Err(())
+        }
+    }
+
     /// Clears its [`AccessRequestResult`] field.
     pub(super) fn clear_access_request_result_placeholder(&self) {
         // Locking is infallible.
@@ -456,6 +482,19 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
             cx.waker().wake_by_ref();
         }
         Poll::Pending
+    }
+}
+
+impl<S: Sequencer> AccessRequestResult<S> {
+    /// Sets the result.
+    pub(super) fn set_result(
+        &mut self,
+        result: Result<bool, Error>,
+        promotion_result: Option<PromotedAccess<S>>,
+    ) {
+        self.result.replace(result);
+        self.promotion_result = promotion_result;
+        self.waker.take().map(|w| w.wake());
     }
 }
 
