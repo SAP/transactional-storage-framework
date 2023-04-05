@@ -104,6 +104,22 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         Snapshot::from_parts(&self.kernel.sequencer, self.message_sender(), None, None)
     }
 
+    /// Returns a reference to its [`AccessController`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::Database;
+    ///
+    /// let database = Database::default();
+    /// let access_controller = database.access_controller();
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn access_controller(&self) -> &AccessController<S> {
+        self.kernel.access_controller()
+    }
+
     /// Creates a new empty [`Container`].
     ///
     /// # Errors
@@ -279,12 +295,6 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Returns a reference to its [`Sequencer`].
     pub(super) fn sequencer(&self) -> &S {
         &self.kernel.sequencer
-    }
-
-    /// Returns a reference to its [`AccessController`].
-    #[allow(dead_code)]
-    pub(super) fn access_controller(&self) -> &AccessController<S> {
-        &self.kernel.access_controller()
     }
 
     /// Returns a message sender to the [`Overseer`].

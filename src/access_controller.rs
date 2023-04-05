@@ -265,6 +265,28 @@ impl<S: Sequencer> AccessController<S> {
     /// An [`Error`] is returned if memory allocation failed, the database object was already
     /// created, or another transaction has not completed creating the database object until the
     /// specified deadline is reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, ToObjectID};
+    ///
+    /// struct O(usize);
+    ///
+    /// impl ToObjectID for O {
+    ///     fn to_object_id(&self) -> usize {
+    ///         self.0
+    ///    }
+    /// }
+    ///
+    /// let database = Database::default();
+    /// let access_controller = database.access_controller();
+    /// let transaction = database.transaction();
+    /// let mut journal = transaction.journal();
+    /// async {
+    ///     assert!(access_controller.reserve(&O(1), &mut journal, None).await.is_ok());
+    /// };
+    /// ```
     #[inline]
     pub async fn reserve<O: ToObjectID, P: PersistenceLayer<S>>(
         &self,

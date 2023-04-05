@@ -10,13 +10,10 @@
     clippy::undocumented_unsafe_blocks
 )]
 
-//! Transactional Storage Framework
-//!
-//! # [`Database`]
-//! [`Database`] is a transactional storage system, and it is the gateway to all the functionalities that the crate offers.
+//! SAP Transactional Storage Framework
 
 mod access_controller;
-pub use access_controller::AccessController;
+pub use access_controller::{AccessController, ToObjectID};
 
 mod container;
 pub use container::Container;
