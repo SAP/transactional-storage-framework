@@ -98,20 +98,17 @@ impl Overseer {
                     }
                     Task::Monitor(object_id) => {
                         monitored_database_object_ids.insert(object_id);
-                        Self::scan_access_controller(
-                            kernel.access_controller(),
-                            &mut monitored_database_object_ids,
-                        );
                     }
                     Task::ScanAccessController => {
-                        Self::scan_access_controller(
-                            kernel.access_controller(),
-                            &mut monitored_database_object_ids,
-                        );
+                        // Do nothing.
                     }
                 }
             }
 
+            Self::scan_access_controller(
+                kernel.access_controller(),
+                &mut monitored_database_object_ids,
+            );
             wait_duration = Self::wake_up(&mut waker_queue);
         }
     }

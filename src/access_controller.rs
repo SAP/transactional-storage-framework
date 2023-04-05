@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::journal::{AwaitAccessPermission, WritePermission};
+use super::journal::{AwaitResponse, WritePermission};
 use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
@@ -103,16 +103,16 @@ enum LockMode<S: Sequencer> {
 }
 
 #[derive(Debug)]
-enum Desire<S: Sequencer> {
-    /// Desires to acquire a shared lock on the database object.
+enum Request<S: Sequencer> {
+    /// A request to acquire a shared lock on the database object.
     #[allow(dead_code)]
     Shared(Owner<S>),
 
-    /// Desires to acquire the exclusive lock on the database object.
+    /// A request to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
     Exclusive(Owner<S>),
 
-    /// Desires to acquire the exclusive lock on the database object for deletion.
+    /// A request to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
     Marked(Owner<S>),
 }
@@ -120,7 +120,7 @@ enum Desire<S: Sequencer> {
 #[derive(Debug, Default)]
 struct WaitQueue<S: Sequencer> {
     #[allow(dead_code)]
-    wait_queue: VecDeque<Desire<S>>,
+    wait_queue: VecDeque<Request<S>>,
 }
 
 #[derive(Debug)]
@@ -475,35 +475,45 @@ impl<S: Sequencer> AccessController<S> {
     async fn await_access<'a>(
         &'a self,
         mut entry: OccupiedEntry<'a, usize, ObjectState<S>>,
-        desired_access: Desire<S>,
+        request: Request<S>,
         message_sender: &SyncSender<Task>,
         deadline: Instant,
     ) -> Result<bool, Error> {
-        desired_access
-            .owner()
-            .clear_access_request_result_placeholder();
-        let awaitable =
-            AwaitAccessPermission::new(desired_access.owner().clone(), message_sender, deadline);
+        request.owner().clear_access_request_result_placeholder();
+        let awaitable = AwaitResponse::new(
+            request.owner().clone(),
+            *entry.key(),
+            message_sender,
+            deadline,
+        );
         if let ObjectState::Locked(locked) = entry.get_mut() {
             match locked {
-                LockMode::Reserved(_) => todo!(),
+                LockMode::Reserved(owner)
+                | LockMode::Exclusive(owner)
+                | LockMode::Marked(owner) => {
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        owner.clone(),
+                    );
+                    exclusive_awaitable.push_request(request);
+                    *locked = LockMode::ReservedAwaitable(exclusive_awaitable);
+                }
                 LockMode::ReservedAwaitable(exclusive_awaitable)
                 | LockMode::ExclusiveAwaitable(exclusive_awaitable)
                 | LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    exclusive_awaitable
-                        .wait_queue
-                        .wait_queue
-                        .push_back(desired_access);
+                    exclusive_awaitable.push_request(request);
                 }
-                LockMode::Shared(_) => todo!(),
+                LockMode::Shared(owner) => {
+                    let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        owner.clone(),
+                    );
+                    shared_awaitable.push_request(request);
+                    *locked = LockMode::SharedAwaitable(shared_awaitable);
+                }
                 LockMode::SharedAwaitable(shared_awaitable) => {
-                    shared_awaitable
-                        .wait_queue
-                        .wait_queue
-                        .push_back(desired_access);
+                    shared_awaitable.wait_queue.wait_queue.push_back(request);
                 }
-                LockMode::Exclusive(_) => todo!(),
-                LockMode::Marked(_) => todo!(),
             }
         } else {
             // The condition must have been checked by the caller.
@@ -564,11 +574,11 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
     }
 }
 
-impl<S: Sequencer> Desire<S> {
+impl<S: Sequencer> Request<S> {
     /// Returns a reference to its `owner` field.
     fn owner(&self) -> &Owner<S> {
         match self {
-            Desire::Shared(owner) | Desire::Exclusive(owner) | Desire::Marked(owner) => owner,
+            Request::Shared(owner) | Request::Exclusive(owner) | Request::Marked(owner) => owner,
         }
     }
 }
@@ -587,6 +597,14 @@ impl<S: Sequencer> SharedAwaitable<S> {
             wait_queue: WaitQueue::default(),
         })
     }
+
+    /// Pushes a request into the wait queue.
+    fn push_request(&mut self, request: Request<S>) {
+        self.wait_queue.wait_queue.push_back(request);
+        self.owner_set
+            .iter()
+            .for_each(|o| o.need_to_wake_up_others());
+    }
 }
 
 impl<S: Sequencer> ExclusiveAwaitable<S> {
@@ -600,6 +618,12 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
             owner,
             wait_queue: WaitQueue::default(),
         })
+    }
+
+    /// Pushes a request into the wait queue.
+    fn push_request(&mut self, request: Request<S>) {
+        self.wait_queue.wait_queue.push_back(request);
+        self.owner.need_to_wake_up_others();
     }
 }
 

@@ -12,8 +12,8 @@ use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering::{Acquire, Release};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
@@ -62,15 +62,24 @@ pub(super) struct Anchor<S: Sequencer> {
     /// current executor.
     access_request_result_placeholder: Mutex<AccessRequestResult<S>>,
 
+    /// A flag indicating that there has been another transaction waiting for any resources this
+    /// [`Journal`] has acquired.
+    wake_up_others: AtomicBool,
+
     /// [`Anchor`] itself is formed as a linked list of [`Anchor`] by the [`Transaction`].
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
+/// [`AwaitResponse`] is a [`Future`] to await any response to the request to acquire the specified
+/// resource.
 #[derive(Debug)]
-pub(super) struct AwaitAccessPermission<'d, S: Sequencer> {
+pub(super) struct AwaitResponse<'d, S: Sequencer> {
     /// The owner.
     #[allow(dead_code)]
     owner: Owner<S>,
+
+    /// The object identifier of the desired resource.
+    object_id: usize,
 
     /// The message sender to which send a wake up message.
     message_sender: &'d SyncSender<Task>,
@@ -319,6 +328,12 @@ impl<S: Sequencer> Anchor<S> {
         &self.access_request_result_placeholder
     }
 
+    /// Tells the [`Anchor`] that there is a transaction waiting for a recourse owned by the
+    /// [`Anchor`].
+    pub(super) fn need_to_wake_up_others(&self) {
+        self.wake_up_others.store(true, Release);
+    }
+
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
     pub(super) fn await_eot<'d>(
         &self,
@@ -347,10 +362,16 @@ impl<S: Sequencer> Anchor<S> {
         self.next.swap((next, ebr::Tag::None), order).0
     }
 
+    /// Wakes up any waiting transactions.
+    pub(super) fn commit(&self, message_sender: &SyncSender<Task>) {
+        self.wake_up_others(message_sender);
+    }
+
     /// Rolls back the changes contained in the associated [`Journal`].
-    pub(super) fn rollback(&self) {
+    pub(super) fn rollback(&self, message_sender: &SyncSender<Task>) {
         self.submit_instant
             .store(UNFINISHED_TRANSACTION_INSTANT, Release);
+        self.wake_up_others(message_sender);
     }
 
     /// Reads its submit instant.
@@ -369,26 +390,38 @@ impl<S: Sequencer> Anchor<S> {
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
             promoted_access: HashMap::default(),
             access_request_result_placeholder: Mutex::default(),
+            wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),
+        }
+    }
+
+    fn wake_up_others(&self, message_sender: &SyncSender<Task>) {
+        if self.wake_up_others.load(Acquire) {
+            // The result can be ignored since messages pending in the queue means that the access
+            // controller will be scanned in the future.
+            let _: Result<(), TrySendError<Task>> =
+                message_sender.try_send(Task::ScanAccessController);
         }
     }
 }
 
-impl<'d, S: Sequencer> AwaitAccessPermission<'d, S> {
+impl<'d, S: Sequencer> AwaitResponse<'d, S> {
     pub(super) fn new(
         owner: Owner<S>,
+        object_id: usize,
         message_sender: &'d SyncSender<Task>,
         deadline: Instant,
-    ) -> AwaitAccessPermission<'d, S> {
-        AwaitAccessPermission {
+    ) -> AwaitResponse<'d, S> {
+        AwaitResponse {
             owner,
+            object_id,
             message_sender,
             deadline,
         }
     }
 }
 
-impl<'d, S: Sequencer> Future for AwaitAccessPermission<'d, S> {
+impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
     type Output = Result<bool, Error>;
 
     #[inline]
@@ -404,6 +437,14 @@ impl<'d, S: Sequencer> Future for AwaitAccessPermission<'d, S> {
             }
             placeholder.waker.replace(cx.waker().clone());
         } else {
+            cx.waker().wake_by_ref();
+        }
+        if self
+            .message_sender
+            .try_send(Task::Monitor(self.object_id))
+            .is_err()
+        {
+            // The message channel is congested.
             cx.waker().wake_by_ref();
         }
         if self

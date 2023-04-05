@@ -163,7 +163,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 current = Some(record);
                 break;
             }
-            record.rollback();
+            record.rollback(self.database.message_sender());
             current = record.set_next(None, Relaxed);
         }
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
@@ -308,8 +308,13 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
-
         debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
+
+        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
+        while let Some(record) = current {
+            record.commit(self.database.message_sender());
+            current = record.set_next(None, Relaxed);
+        }
 
         commit_instant
     }
