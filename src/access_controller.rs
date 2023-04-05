@@ -76,7 +76,6 @@ pub(super) enum LockMode<S: Sequencer> {
     Reserved(Owner<S>),
 
     /// The database object is prepared to be created, but there are waiting transactions.
-    #[allow(dead_code)]
     ReservedAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is locked shared by a single transaction.
@@ -104,7 +103,6 @@ pub(super) enum LockMode<S: Sequencer> {
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
     /// A request to reserve a database object.
-    #[allow(dead_code)]
     Reserve(Owner<S>),
 
     /// A request to acquire a shared lock on the database object.
@@ -166,6 +164,33 @@ impl<S: Sequencer> AccessController<S> {
     /// An [`Error`] is returned if the specified deadline was reached or memory allocation failed
     /// when pushing a [`Waker`](std::task::Waker) into the owner
     /// [`Transaction`](super::Transaction).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, ToObjectID};
+    ///
+    /// struct O(usize);
+    ///
+    /// impl ToObjectID for O {
+    ///     fn to_object_id(&self) -> usize {
+    ///         self.0
+    ///    }
+    /// }
+    ///
+    /// let database = Database::default();
+    /// let access_controller = database.access_controller();
+    /// async {
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
+    ///     assert!(access_controller.reserve(&O(1), &mut journal, None).await.is_ok());
+    ///     journal.submit();
+    ///     assert!(transaction.commit().await.is_ok());
+    ///
+    ///     let snapshot = database.snapshot();
+    ///     assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+    /// };
+    /// ```
     #[inline]
     pub async fn read<O: ToObjectID>(
         &self,
@@ -260,6 +285,8 @@ impl<S: Sequencer> AccessController<S> {
     /// database. Therefore, a transaction must have checked whether the database object is
     /// visible to database readers or not beforehand.
     ///
+    /// It returns `true` if the database object was newly reserved in this transaction.
+    ///
     /// # Errors
     ///
     /// An [`Error`] is returned if memory allocation failed, the database object was already
@@ -281,9 +308,9 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// let database = Database::default();
     /// let access_controller = database.access_controller();
-    /// let transaction = database.transaction();
-    /// let mut journal = transaction.journal();
     /// async {
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.reserve(&O(1), &mut journal, None).await.is_ok());
     /// };
     /// ```
