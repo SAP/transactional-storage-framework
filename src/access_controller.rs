@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::journal::{AwaitAccessPermission, WritePermission};
+use super::journal::{AwaitResponse, WritePermission};
 use super::overseer::Task;
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::hash_map::Entry as MapEntry;
@@ -58,7 +58,7 @@ pub(super) struct Owner<S: Sequencer> {
 }
 
 #[derive(Debug)]
-enum ObjectState<S: Sequencer> {
+pub(super) enum ObjectState<S: Sequencer> {
     /// The database object is locked.
     Locked(LockMode<S>),
 
@@ -72,7 +72,7 @@ enum ObjectState<S: Sequencer> {
 }
 
 #[derive(Debug)]
-enum LockMode<S: Sequencer> {
+pub(super) enum LockMode<S: Sequencer> {
     /// The database object is prepared to be created.
     Reserved(Owner<S>),
 
@@ -103,28 +103,22 @@ enum LockMode<S: Sequencer> {
 }
 
 #[derive(Debug)]
-enum Desire<S: Sequencer> {
-    /// Desires to acquire a shared lock on the database object.
+pub(super) enum Request<S: Sequencer> {
+    /// A request to acquire a shared lock on the database object.
     #[allow(dead_code)]
     Shared(Owner<S>),
 
-    /// Desires to acquire the exclusive lock on the database object.
+    /// A request to acquire the exclusive lock on the database object.
     #[allow(dead_code)]
     Exclusive(Owner<S>),
 
-    /// Desires to acquire the exclusive lock on the database object for deletion.
+    /// A request to acquire the exclusive lock on the database object for deletion.
     #[allow(dead_code)]
     Marked(Owner<S>),
 }
 
-#[derive(Debug, Default)]
-struct WaitQueue<S: Sequencer> {
-    #[allow(dead_code)]
-    wait_queue: VecDeque<Desire<S>>,
-}
-
 #[derive(Debug)]
-struct SharedAwaitable<S: Sequencer> {
+pub(super) struct SharedAwaitable<S: Sequencer> {
     /// The instant when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is universally
@@ -141,7 +135,7 @@ struct SharedAwaitable<S: Sequencer> {
 }
 
 #[derive(Debug)]
-struct ExclusiveAwaitable<S: Sequencer> {
+pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The instant when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is universally
@@ -154,6 +148,12 @@ struct ExclusiveAwaitable<S: Sequencer> {
     /// The wait queue of the database object.
     #[allow(dead_code)]
     wait_queue: WaitQueue<S>,
+}
+
+#[derive(Debug, Default)]
+struct WaitQueue<S: Sequencer> {
+    #[allow(dead_code)]
+    wait_queue: VecDeque<Request<S>>,
 }
 
 impl<S: Sequencer> AccessController<S> {
@@ -470,40 +470,184 @@ impl<S: Sequencer> AccessController<S> {
         }
     }
 
+    /// Transfers ownership to the first one waiting in the wait queue.
+    ///
+    /// If the database object does not need to be monitored anymore, it returns `true`. It is a
+    /// blocking synchronous method invoked by [`Overseer`](super::overseer::Overseer).
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn transfer_ownership(&self, object_id: usize) -> bool {
+        self.table
+            .update(&object_id, |_, state| {
+                if let ObjectState::Locked(locked) = state {
+                    match locked {
+                        LockMode::Reserved(_)
+                        | LockMode::Shared(_)
+                        | LockMode::Exclusive(_)
+                        | LockMode::Marked(_) => {
+                            // No waiting transactions.
+                            true
+                        }
+                        LockMode::ReservedAwaitable(exclusive_awaitable)
+                        | LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                            if let Some(first_request) =
+                                exclusive_awaitable.wait_queue.clone_first()
+                            {
+                                if let Ok(result) = exclusive_awaitable
+                                    .owner
+                                    .grant_ownership_transfer(first_request.owner())
+                                {
+                                    if let Some(eot_instant) = result {
+                                        let mut no_waiting_transactions =
+                                            exclusive_awaitable.wait_queue.remove_first();
+                                        if eot_instant == S::Instant::default()
+                                            && no_waiting_transactions
+                                        {
+                                            if let Ok(mut result) = first_request
+                                                .owner()
+                                                .access_request_result_placeholder()
+                                                .lock()
+                                            {
+                                                result.set_result(Ok(true), None);
+                                            }
+                                            *locked = match first_request {
+                                                Request::Shared(requester) => {
+                                                    LockMode::Shared(requester)
+                                                }
+                                                Request::Exclusive(requester) => {
+                                                    LockMode::Exclusive(requester)
+                                                }
+                                                Request::Marked(requester) => {
+                                                    LockMode::Marked(requester)
+                                                }
+                                            };
+                                            true
+                                        } else {
+                                            *locked = match first_request {
+                                                Request::Shared(requester) => {
+                                                    let mut shared_awaitable =
+                                                        SharedAwaitable::with_instant_and_owner(
+                                                            eot_instant,
+                                                            requester,
+                                                        );
+                                                    loop {
+                                                        if let Some(Request::Shared(
+                                                            next_requester,
+                                                        )) = exclusive_awaitable
+                                                            .wait_queue
+                                                            .clone_first()
+                                                        {
+                                                            shared_awaitable
+                                                                .wait_queue
+                                                                .wait_queue
+                                                                .push_back(Request::Shared(
+                                                                    next_requester,
+                                                                ));
+                                                            no_waiting_transactions =
+                                                                exclusive_awaitable
+                                                                    .wait_queue
+                                                                    .remove_first();
+                                                        } else {
+                                                            shared_awaitable
+                                                                .wait_queue
+                                                                .wait_queue
+                                                                .iter()
+                                                                .for_each(|r| {
+                                                                    if let Ok(mut result) = r
+                                                                .owner()
+                                                                .access_request_result_placeholder()
+                                                                .lock()
+                                                            {
+                                                                result.set_result(Ok(true), None);
+                                                            }
+                                                                });
+                                                            break;
+                                                        }
+                                                    }
+                                                    LockMode::SharedAwaitable(shared_awaitable)
+                                                }
+                                                Request::Exclusive(_) => LockMode::Exclusive(
+                                                    exclusive_awaitable.owner.clone(),
+                                                ),
+                                                Request::Marked(_) => LockMode::Marked(
+                                                    exclusive_awaitable.owner.clone(),
+                                                ),
+                                            };
+                                            no_waiting_transactions
+                                        }
+                                    } else {
+                                        // TODO: intra-transaction ownership transfer.
+                                        unimplemented!()
+                                    }
+                                } else {
+                                    // Cannot take ownership.
+                                    false
+                                }
+                            } else {
+                                // No waiting transactions.
+                                *locked = LockMode::Reserved(exclusive_awaitable.owner.clone());
+                                true
+                            }
+                        }
+                        LockMode::MarkedAwaitable(_) => {
+                            // TODO: deletion handling.
+                            unimplemented!()
+                        }
+                        LockMode::SharedAwaitable(_) => {
+                            // TODO: shared-lock handling
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            })
+            .map_or(true, |r| r)
+    }
+
     /// Awaits access to the database object.
     #[allow(dead_code)]
     async fn await_access<'a>(
         &'a self,
         mut entry: OccupiedEntry<'a, usize, ObjectState<S>>,
-        desired_access: Desire<S>,
+        request: Request<S>,
         message_sender: &SyncSender<Task>,
         deadline: Instant,
     ) -> Result<bool, Error> {
-        desired_access
-            .owner()
-            .clear_access_request_result_placeholder();
-        let awaitable =
-            AwaitAccessPermission::new(desired_access.owner().clone(), message_sender, deadline);
+        request.owner().clear_access_request_result_placeholder();
+        let awaitable = AwaitResponse::new(
+            request.owner().clone(),
+            *entry.key(),
+            message_sender,
+            deadline,
+        );
         if let ObjectState::Locked(locked) = entry.get_mut() {
             match locked {
-                LockMode::Reserved(_) => todo!(),
+                LockMode::Reserved(owner)
+                | LockMode::Exclusive(owner)
+                | LockMode::Marked(owner) => {
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        owner.clone(),
+                    );
+                    exclusive_awaitable.push_request(request);
+                    *locked = LockMode::ReservedAwaitable(exclusive_awaitable);
+                }
                 LockMode::ReservedAwaitable(exclusive_awaitable)
                 | LockMode::ExclusiveAwaitable(exclusive_awaitable)
                 | LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    exclusive_awaitable
-                        .wait_queue
-                        .wait_queue
-                        .push_back(desired_access);
+                    exclusive_awaitable.push_request(request);
                 }
-                LockMode::Shared(_) => todo!(),
+                LockMode::Shared(owner) => {
+                    let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
+                        S::Instant::default(),
+                        owner.clone(),
+                    );
+                    shared_awaitable.push_request(request);
+                    *locked = LockMode::SharedAwaitable(shared_awaitable);
+                }
                 LockMode::SharedAwaitable(shared_awaitable) => {
-                    shared_awaitable
-                        .wait_queue
-                        .wait_queue
-                        .push_back(desired_access);
+                    shared_awaitable.wait_queue.wait_queue.push_back(request);
                 }
-                LockMode::Exclusive(_) => todo!(),
-                LockMode::Marked(_) => todo!(),
             }
         } else {
             // The condition must have been checked by the caller.
@@ -564,11 +708,22 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
     }
 }
 
-impl<S: Sequencer> Desire<S> {
+impl<S: Sequencer> Request<S> {
     /// Returns a reference to its `owner` field.
     fn owner(&self) -> &Owner<S> {
         match self {
-            Desire::Shared(owner) | Desire::Exclusive(owner) | Desire::Marked(owner) => owner,
+            Request::Shared(owner) | Request::Exclusive(owner) | Request::Marked(owner) => owner,
+        }
+    }
+}
+
+impl<S: Sequencer> Clone for Request<S> {
+    #[inline]
+    fn clone(&self) -> Self {
+        match self {
+            Self::Shared(owner) => Self::Shared(owner.clone()),
+            Self::Exclusive(owner) => Self::Exclusive(owner.clone()),
+            Self::Marked(owner) => Self::Marked(owner.clone()),
         }
     }
 }
@@ -587,6 +742,14 @@ impl<S: Sequencer> SharedAwaitable<S> {
             wait_queue: WaitQueue::default(),
         })
     }
+
+    /// Pushes a request into the wait queue.
+    fn push_request(&mut self, request: Request<S>) {
+        self.wait_queue.wait_queue.push_back(request);
+        self.owner_set
+            .iter()
+            .for_each(|o| o.need_to_wake_up_others());
+    }
 }
 
 impl<S: Sequencer> ExclusiveAwaitable<S> {
@@ -601,12 +764,36 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
             wait_queue: WaitQueue::default(),
         })
     }
+
+    /// Pushes a request into the wait queue.
+    fn push_request(&mut self, request: Request<S>) {
+        self.wait_queue.wait_queue.push_back(request);
+        self.owner.need_to_wake_up_others();
+    }
+}
+
+impl<S: Sequencer> WaitQueue<S> {
+    /// Peeks the first waiting transaction.
+    fn clone_first(&self) -> Option<Request<S>> {
+        self.wait_queue.front().map(Clone::clone)
+    }
+
+    /// Removes the first waiting transaction.
+    ///
+    /// Returns `true` if the wait queue is empty.
+    fn remove_first(&mut self) -> bool {
+        self.wait_queue.pop_front();
+        self.wait_queue.is_empty()
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
 
     static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
@@ -617,6 +804,20 @@ mod test {
     impl ToObjectID for usize {
         fn to_object_id(&self) -> usize {
             *self
+        }
+    }
+
+    struct ShortSleep(Instant);
+
+    impl Future for ShortSleep {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.0 + TIMEOUT_EXPECTED < Instant::now() {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
         }
     }
 

@@ -13,6 +13,9 @@ use std::thread::{self, available_parallelism, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// [`Overseer`] wakes up timed out tasks and deletes unreachable database objects.
+///
+/// [`Overseer`] is the only one that is allowed to execute blocking code as the code is run in a
+/// separate background thread.
 #[derive(Debug)]
 pub struct Overseer {
     /// The worker thread.
@@ -98,20 +101,17 @@ impl Overseer {
                     }
                     Task::Monitor(object_id) => {
                         monitored_database_object_ids.insert(object_id);
-                        Self::scan_access_controller(
-                            kernel.access_controller(),
-                            &mut monitored_database_object_ids,
-                        );
                     }
                     Task::ScanAccessController => {
-                        Self::scan_access_controller(
-                            kernel.access_controller(),
-                            &mut monitored_database_object_ids,
-                        );
+                        // Do nothing.
                     }
                 }
             }
 
+            Self::scan_access_controller(
+                kernel.access_controller(),
+                &mut monitored_database_object_ids,
+            );
             wait_duration = Self::wake_up(&mut waker_queue);
         }
     }
@@ -119,9 +119,10 @@ impl Overseer {
     /// Scans the access controller and cleans up access control information associated with
     /// monitored database objects.
     fn scan_access_controller<S: Sequencer>(
-        _access_controller: &AccessController<S>,
-        _monitored_object_ids: &mut BTreeSet<usize>,
+        access_controller: &AccessController<S>,
+        monitored_object_ids: &mut BTreeSet<usize>,
     ) {
+        monitored_object_ids.retain(|object_id| access_controller.transfer_ownership(*object_id));
     }
 
     /// Wakes up every expired [`Waker`], and returns the time remaining until the first [`Waker`]
@@ -152,19 +153,16 @@ mod test {
     use super::*;
     use crate::Database;
     use std::future::Future;
+    use std::pin::Pin;
     use std::sync::mpsc::SyncSender;
-    use std::task::Poll;
+    use std::task::{Context, Poll};
     use std::time::Instant;
 
     struct AfterNSecs<'d>(Instant, u64, &'d SyncSender<Task>);
 
     impl<'d> Future for AfterNSecs<'d> {
         type Output = ();
-
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> Poll<Self::Output> {
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if self.0 + Duration::from_secs(self.1) < Instant::now() {
                 Poll::Ready(())
             } else {
