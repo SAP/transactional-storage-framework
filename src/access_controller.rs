@@ -882,23 +882,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -918,7 +906,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            Self::exclusive_lock_defails(lock_mode)?;
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1022,23 +1010,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -1058,7 +1034,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            Self::exclusive_lock_defails(lock_mode)?;
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1162,23 +1138,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -1198,7 +1162,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            Self::exclusive_lock_defails(lock_mode)?;
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1383,7 +1347,10 @@ impl<S: Sequencer> AccessController<S> {
         }
     }
 
-    fn exclusive_lock_defails(
+    /// Extracts exclusive access details from the [`LockMode`].
+    ///
+    /// Returns an [`Error`] if the supplied [`LockMode`] is wrong.
+    fn exclusive_access_defails(
         lock_mode: &mut LockMode<S>,
     ) -> Result<(&mut ExclusiveAwaitable<S>, bool, bool), Error> {
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
@@ -1404,6 +1371,30 @@ impl<S: Sequencer> AccessController<S> {
             is_reserved_for_creation,
             is_marked_for_deletion,
         ))
+    }
+
+    /// Augments [`WaitQueue`]
+    fn augment_wait_queue(
+        is_reserved_for_creation: bool,
+        is_marked_for_deletion: bool,
+        owner: Owner<S>,
+    ) -> LockMode<S> {
+        if is_reserved_for_creation {
+            LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        } else if is_marked_for_deletion {
+            LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        } else {
+            LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        }
     }
 }
 
