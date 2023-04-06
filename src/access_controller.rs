@@ -101,19 +101,22 @@ pub(super) enum LockMode<S: Sequencer> {
 }
 
 /// Types of access requests.
+///
+/// The instant when the request was made is stored in it, and the value is used by the deadlock
+/// detector.
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
     /// A request to reserve a database object.
-    Reserve(Owner<S>),
+    Reserve(Instant, Owner<S>),
 
     /// A request to acquire a shared lock on the database object.
-    Share(Owner<S>),
+    Share(Instant, Owner<S>),
 
     /// A request to acquire the exclusive lock on the database object.
-    Own(Owner<S>),
+    Own(Instant, Owner<S>),
 
     /// A request to acquire the exclusive lock on the database object for deletion.
-    Mark(Owner<S>),
+    Mark(Instant, Owner<S>),
 }
 
 /// Shared access control information container for a database object.
@@ -377,7 +380,7 @@ impl<S: Sequencer> AccessController<S> {
                         // get access to the database object.
                         let message_sender = journal.message_sender();
                         let owner = Owner::from(journal);
-                        let request = Request::Reserve(owner.clone());
+                        let request = Request::Reserve(Instant::now(), owner.clone());
                         exclusive_awaitable.push_request(request);
                         return AwaitResponse::new(owner, entry, message_sender, deadline).await;
                     }
@@ -496,7 +499,7 @@ impl<S: Sequencer> AccessController<S> {
                                 // Wait for the database resource to be available to the transaction.
                                 let message_sender = journal.message_sender();
                                 let owner = Owner::from(journal);
-                                let request = Request::Share(owner.clone());
+                                let request = Request::Share(Instant::now(), owner.clone());
                                 shared_awaitable.push_request(request);
                                 return AwaitResponse::new(owner, entry, message_sender, deadline)
                                     .await;
@@ -629,7 +632,7 @@ impl<S: Sequencer> AccessController<S> {
                             // Wait for the database resource to be available to the transaction.
                             let message_sender = journal.message_sender();
                             let owner = Owner::from(journal);
-                            let request = Request::Own(owner.clone());
+                            let request = Request::Own(Instant::now(), owner.clone());
                             shared_awaitable.push_request(request);
                             return AwaitResponse::new(owner, entry, message_sender, deadline)
                                 .await;
@@ -756,7 +759,7 @@ impl<S: Sequencer> AccessController<S> {
                             // Wait for the database resource to be available to the transaction.
                             let message_sender = journal.message_sender();
                             let owner = Owner::from(journal);
-                            let request = Request::Mark(owner.clone());
+                            let request = Request::Mark(Instant::now(), owner.clone());
                             shared_awaitable.push_request(request);
                             return AwaitResponse::new(owner, entry, message_sender, deadline)
                                 .await;
@@ -788,8 +791,8 @@ impl<S: Sequencer> AccessController<S> {
         self.table
             .update(&object_id, |_, state| {
                 loop {
-                    if let ObjectState::Locked(locked) = state {
-                        match locked {
+                    if let ObjectState::Locked(lock_mode) = state {
+                        match lock_mode {
                             LockMode::Reserved(_)
                             | LockMode::Shared(_)
                             | LockMode::Exclusive(_)
@@ -837,13 +840,44 @@ impl<S: Sequencer> AccessController<S> {
                                     }
                                 } else {
                                     // No waiting transactions.
-                                    *locked = LockMode::Reserved(exclusive_awaitable.owner.clone());
+                                    *lock_mode =
+                                        LockMode::Reserved(exclusive_awaitable.owner.clone());
                                     return false;
                                 }
                             }
-                            LockMode::ExclusiveAwaitable(_) => {
-                                // TODO: unlock handling.
-                                todo!()
+                            LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                                if let Some(request) = exclusive_awaitable.wait_queue.clone_first()
+                                {
+                                    match exclusive_awaitable
+                                        .owner
+                                        .grant_write_access(request.owner())
+                                    {
+                                        Relationship::Committed(_) | Relationship::RolledBack => {
+                                            if let Some(new_lock_mode) =
+                                                Self::transfer_exclusive_ownership(
+                                                    request,
+                                                    exclusive_awaitable,
+                                                )
+                                            {
+                                                *lock_mode = new_lock_mode;
+                                            }
+                                        }
+                                        Relationship::Linearizable => {
+                                            // TODO: intra-transaction ownership transfer.
+                                            unimplemented!()
+                                        }
+                                        Relationship::Concurrent | Relationship::Unknown => {
+                                            // The first waiting transaction cannot gain access to
+                                            // the database object.
+                                            return true;
+                                        }
+                                    }
+                                } else {
+                                    // No waiting transactions.
+                                    *lock_mode =
+                                        LockMode::Exclusive(exclusive_awaitable.owner.clone());
+                                    return false;
+                                }
                             }
                             LockMode::MarkedAwaitable(_) => {
                                 // TODO: deletion handling.
@@ -985,7 +1019,7 @@ impl<S: Sequencer> AccessController<S> {
             // Wait for the database resource to be available to the transaction.
             let message_sender = journal.message_sender();
             let owner = Owner::from(journal);
-            let request = Request::Share(owner.clone());
+            let request = Request::Share(Instant::now(), owner.clone());
             exclusive_awaitable.push_request(request);
             AwaitResponse::new(owner, entry, message_sender, deadline).await
         } else {
@@ -1113,7 +1147,7 @@ impl<S: Sequencer> AccessController<S> {
             // Wait for the database resource to be available to the transaction.
             let message_sender = journal.message_sender();
             let owner = Owner::from(journal);
-            let request = Request::Own(owner.clone());
+            let request = Request::Own(Instant::now(), owner.clone());
             exclusive_awaitable.push_request(request);
             AwaitResponse::new(owner, entry, message_sender, deadline).await
         } else {
@@ -1241,7 +1275,7 @@ impl<S: Sequencer> AccessController<S> {
             // Wait for the database resource to be available to the transaction.
             let message_sender = journal.message_sender();
             let owner = Owner::from(journal);
-            let request = Request::Mark(owner.clone());
+            let request = Request::Mark(Instant::now(), owner.clone());
             exclusive_awaitable.push_request(request);
             AwaitResponse::new(owner, entry, message_sender, deadline).await
         } else {
@@ -1261,7 +1295,7 @@ impl<S: Sequencer> AccessController<S> {
     ) -> Option<ObjectState<S>> {
         let wait_queue_empty = wait_queue.remove_first();
         match request {
-            Request::Reserve(requester) => {
+            Request::Reserve(_, requester) => {
                 // It is not possible to reserve the database object after another transaction has
                 // successfully created it.
                 requester.set_result(Err(Error::SerializationFailure), None)?;
@@ -1271,7 +1305,7 @@ impl<S: Sequencer> AccessController<S> {
                     None
                 }
             }
-            Request::Share(requester) => {
+            Request::Share(_, requester) => {
                 let mut shared_awaitable =
                     SharedAwaitable::with_instant_and_owner(creation_instant, requester.clone());
                 requester.set_result(Ok(true), None)?;
@@ -1280,7 +1314,7 @@ impl<S: Sequencer> AccessController<S> {
                     shared_awaitable,
                 )))
             }
-            Request::Own(requester) => {
+            Request::Own(_, requester) => {
                 let mut exclusive_awaitable =
                     ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
                 requester.set_result(Ok(true), None)?;
@@ -1289,7 +1323,7 @@ impl<S: Sequencer> AccessController<S> {
                     exclusive_awaitable,
                 )))
             }
-            Request::Mark(requester) => {
+            Request::Mark(_, requester) => {
                 let mut exclusive_awaitable =
                     ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
                 requester.set_result(Ok(true), None)?;
@@ -1311,7 +1345,7 @@ impl<S: Sequencer> AccessController<S> {
     ) -> Option<ObjectState<S>> {
         let wait_queue_empty = wait_queue.remove_first();
         match request {
-            Request::Reserve(requester) => {
+            Request::Reserve(_, requester) => {
                 if wait_queue_empty {
                     requester.set_result(Ok(true), None)?;
                     Some(ObjectState::Locked(LockMode::Reserved(requester)))
@@ -1327,7 +1361,7 @@ impl<S: Sequencer> AccessController<S> {
                     )))
                 }
             }
-            Request::Share(requester) => {
+            Request::Share(_, requester) => {
                 if wait_queue_empty {
                     requester.set_result(Ok(true), None)?;
                     Some(ObjectState::Locked(LockMode::Shared(requester)))
@@ -1343,7 +1377,7 @@ impl<S: Sequencer> AccessController<S> {
                     )))
                 }
             }
-            Request::Own(requester) => {
+            Request::Own(_, requester) => {
                 if wait_queue_empty {
                     requester.set_result(Ok(true), None)?;
                     Some(ObjectState::Locked(LockMode::Exclusive(requester)))
@@ -1359,7 +1393,7 @@ impl<S: Sequencer> AccessController<S> {
                     )))
                 }
             }
-            Request::Mark(requester) => {
+            Request::Mark(_, requester) => {
                 if wait_queue_empty {
                     requester.set_result(Ok(true), None)?;
                     Some(ObjectState::Locked(LockMode::Marked(requester)))
@@ -1373,6 +1407,75 @@ impl<S: Sequencer> AccessController<S> {
                     Some(ObjectState::Locked(LockMode::MarkedAwaitable(
                         exclusive_awaitable,
                     )))
+                }
+            }
+        }
+    }
+
+    /// Transfer exclusive ownership from the ended transaction to the waiting transaction.
+    ///
+    /// Returns a [`LockMode`] state if there was a change to it. This function always pops the
+    /// first request from the wait queue, therefore progress of the caller is guaranteed.
+    fn transfer_exclusive_ownership(
+        request: Request<S>,
+        exclusive_awaitable: &mut ExclusiveAwaitable<S>,
+    ) -> Option<LockMode<S>> {
+        let wait_queue_empty = exclusive_awaitable.wait_queue.remove_first();
+        match request {
+            Request::Reserve(_, requester) => {
+                // It is not possible to reserve the database object after another transaction has
+                // successfully created it.
+                requester.set_result(Err(Error::SerializationFailure), None)?;
+                if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
+                {
+                    Some(LockMode::Exclusive(exclusive_awaitable.owner.clone()))
+                } else {
+                    None
+                }
+            }
+            Request::Share(_, requester) => {
+                if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
+                {
+                    requester.set_result(Ok(true), None)?;
+                    Some(LockMode::Shared(requester))
+                } else {
+                    let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
+                        exclusive_awaitable.creation_instant,
+                        requester.clone(),
+                    );
+                    requester.set_result(Ok(true), None)?;
+                    shared_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
+                    Some(LockMode::SharedAwaitable(shared_awaitable))
+                }
+            }
+            Request::Own(_, requester) => {
+                if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
+                {
+                    requester.set_result(Ok(true), None)?;
+                    Some(LockMode::Exclusive(requester))
+                } else {
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        exclusive_awaitable.creation_instant,
+                        requester.clone(),
+                    );
+                    requester.set_result(Ok(true), None)?;
+                    exclusive_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
+                    Some(LockMode::ExclusiveAwaitable(exclusive_awaitable))
+                }
+            }
+            Request::Mark(_, requester) => {
+                if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
+                {
+                    requester.set_result(Ok(true), None)?;
+                    Some(LockMode::Marked(requester))
+                } else {
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        exclusive_awaitable.creation_instant,
+                        requester.clone(),
+                    );
+                    requester.set_result(Ok(true), None)?;
+                    exclusive_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
+                    Some(LockMode::MarkedAwaitable(exclusive_awaitable))
                 }
             }
         }
@@ -1503,10 +1606,10 @@ impl<S: Sequencer> Request<S> {
     /// Returns a reference to its `owner` field.
     fn owner(&self) -> &Owner<S> {
         match self {
-            Request::Reserve(owner)
-            | Request::Share(owner)
-            | Request::Own(owner)
-            | Request::Mark(owner) => owner,
+            Request::Reserve(_, owner)
+            | Request::Share(_, owner)
+            | Request::Own(_, owner)
+            | Request::Mark(_, owner) => owner,
         }
     }
 }
@@ -1515,10 +1618,10 @@ impl<S: Sequencer> Clone for Request<S> {
     #[inline]
     fn clone(&self) -> Self {
         match self {
-            Self::Reserve(owner) => Self::Reserve(owner.clone()),
-            Self::Share(owner) => Self::Share(owner.clone()),
-            Self::Own(owner) => Self::Own(owner.clone()),
-            Self::Mark(owner) => Self::Mark(owner.clone()),
+            Self::Reserve(instant, owner) => Self::Reserve(*instant, owner.clone()),
+            Self::Share(instant, owner) => Self::Share(*instant, owner.clone()),
+            Self::Own(instant, owner) => Self::Own(*instant, owner.clone()),
+            Self::Mark(instant, owner) => Self::Mark(*instant, owner.clone()),
         }
     }
 }
