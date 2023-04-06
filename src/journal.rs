@@ -12,6 +12,7 @@ use scc::hash_map::OccupiedEntry;
 use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -133,13 +134,11 @@ pub(super) enum Relationship<S: Sequencer> {
     /// The ownership can be transferred.
     ///
     /// The requester belongs to the same transaction, and they are linearizable.
-    #[allow(dead_code)]
     Linearizable,
 
     /// The ownership cannot be transferred.
     ///
     /// The requester belongs to the same transaction, but they are not linearizable.
-    #[allow(dead_code)]
     Concurrent,
 
     /// The requester has to wait to correctly determine the relationship.
@@ -226,7 +225,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
     fn drop(&mut self) {
-        if self.anchor.submit_instant() == 0 {
+        if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
             // Send `anchor` to the garbage collector.
         }
     }
@@ -252,10 +251,14 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(transaction_snapshot) = snapshot.transaction_snapshot() {
-            if TransactionSnapshot::new(
-                self.transaction_anchor.as_ptr() as usize,
-                self.creation_instant,
-            ) <= *transaction_snapshot
+            let submit_instant = self.submit_instant();
+            let submit_instant = if submit_instant == UNFINISHED_TRANSACTION_INSTANT {
+                UNREACHABLE_TRANSACTION_INSTANT
+            } else {
+                submit_instant
+            };
+            if TransactionSnapshot::new(self.transaction_anchor.as_ptr() as usize, submit_instant)
+                <= *transaction_snapshot
             {
                 // It comes from the same transaction, and a newer journal.
                 return Ok(true);
@@ -292,21 +295,36 @@ impl<S: Sequencer> Anchor<S> {
     /// [`Journal`] represented by `self`.
     ///
     /// Returns the relationship between the requester and `self`.
-    pub(super) fn grant_write_access(&self, _anchor: &Anchor<S>) -> Relationship<S> {
+    pub(super) fn grant_write_access(&self, anchor: &Anchor<S>) -> Relationship<S> {
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
             if eot_instant == S::Instant::default() {
-                Relationship::RolledBack
-            } else if self.submit_instant() != 0 {
+                return Relationship::RolledBack;
+            } else if self.submit_instant() != UNFINISHED_TRANSACTION_INSTANT {
                 // The journal has stayed in the transaction until the transaction was committed.
-                Relationship::Committed(eot_instant)
-            } else {
-                // The journal was rolled back before the transaction has been committed.
-                Relationship::RolledBack
+                return Relationship::Committed(eot_instant);
             }
-        } else {
-            // TODO: intra-transaction visibility control.
-            Relationship::Unknown
+            // The journal was rolled back before the transaction has been committed.
+            return Relationship::RolledBack;
+        } else if ptr::eq(
+            self.transaction_anchor.as_ptr(),
+            anchor.transaction_anchor.as_ptr(),
+        ) {
+            // They are from the same transaction.
+            let submit_instant = self.submit_instant();
+            let submit_instant = if submit_instant == UNFINISHED_TRANSACTION_INSTANT {
+                UNREACHABLE_TRANSACTION_INSTANT
+            } else {
+                submit_instant
+            };
+            if submit_instant <= anchor.creation_instant {
+                // It comes from the same transaction, and a newer journal.
+                return Relationship::Linearizable;
+            }
+
+            // `Concurrent` is also returned when comparing the same `Anchor`.
+            return Relationship::Concurrent;
         }
+        Relationship::Unknown
     }
 
     /// Clears its [`AccessRequestResult`] field.

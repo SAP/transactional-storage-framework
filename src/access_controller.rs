@@ -1647,13 +1647,52 @@ mod test {
     async fn reserve_read() {
         let database = Database::default();
         let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
+        let transaction_1 = database.transaction();
+
+        let mut journal_1 = transaction_1.journal();
         assert!(access_controller
-            .reserve(&0, &mut journal, None)
+            .reserve(&0, &mut journal_1, None)
             .await
             .is_ok());
-        assert_eq!(journal.submit(), 1);
+        let journal_1_snapshot = journal_1.snapshot();
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &journal_1_snapshot,
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
+            Ok(true),
+        );
+        assert_eq!(journal_1.submit(), 1);
+
+        let transaction_1_snapshot = transaction_1.snapshot();
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &transaction_1_snapshot,
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
+            Ok(true),
+        );
+
+        let transaction_2 = database.transaction();
+        let journal_2 = transaction_2.journal();
+        let journal_2_snapshot = journal_2.snapshot();
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &journal_2_snapshot,
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
+            Ok(false),
+        );
+
         let snapshot = database.snapshot();
         assert_eq!(
             access_controller
