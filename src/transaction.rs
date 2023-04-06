@@ -52,6 +52,25 @@ pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 pub const UNREACHABLE_TRANSACTION_INSTANT: usize = usize::MAX;
 
 impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
+    /// The transaction identifier.
+    ///
+    /// The identifier is unique in the process, however the same identifier can be used after the
+    /// transaction is committed or rolled back by an unrelated database transaction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, Transaction};
+    ///
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
+    /// assert_ne!(transaction.id(), 0);
+    /// ```
+    #[inline]
+    pub fn id(&self) -> usize {
+        self.anchor.as_ptr() as usize
+    }
+
     /// Creates a new [`Journal`].
     ///
     /// A [`Journal`] keeps database changes until it is dropped. In order to make the changes
