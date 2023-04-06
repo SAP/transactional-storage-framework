@@ -240,6 +240,7 @@ impl<S: Sequencer> AccessController<S> {
                                         .owner
                                         .anchor
                                         .grant_read_access(snapshot, deadline)
+                                        .map(|r| !r)
                                 } else {
                                     // The database object was created after the reader had
                                     // started.
@@ -609,6 +610,21 @@ impl<S: Sequencer> AccessController<S> {
                         return Ok(true);
                     }
                     LockMode::SharedAwaitable(shared_awaitable) => {
+                        if shared_awaitable.cleanup_inactive_owners()
+                            && shared_awaitable.wait_queue.is_empty()
+                        {
+                            if shared_awaitable.creation_instant == S::Instant::default() {
+                                *lock_mode = LockMode::Exclusive(Owner::from(journal));
+                            } else {
+                                *lock_mode = LockMode::ExclusiveAwaitable(
+                                    ExclusiveAwaitable::with_instant_and_owner(
+                                        shared_awaitable.creation_instant,
+                                        Owner::from(journal),
+                                    ),
+                                );
+                            }
+                            return Ok(true);
+                        }
                         if let Some(deadline) = deadline {
                             // Wait for the database resource to be available to the transaction.
                             let message_sender = journal.message_sender();
@@ -721,6 +737,21 @@ impl<S: Sequencer> AccessController<S> {
                         return Ok(true);
                     }
                     LockMode::SharedAwaitable(shared_awaitable) => {
+                        if shared_awaitable.cleanup_inactive_owners()
+                            && shared_awaitable.wait_queue.is_empty()
+                        {
+                            if shared_awaitable.creation_instant == S::Instant::default() {
+                                *lock_mode = LockMode::Marked(Owner::from(journal));
+                            } else {
+                                *lock_mode = LockMode::MarkedAwaitable(
+                                    ExclusiveAwaitable::with_instant_and_owner(
+                                        shared_awaitable.creation_instant,
+                                        Owner::from(journal),
+                                    ),
+                                );
+                            }
+                            return Ok(true);
+                        }
                         if let Some(deadline) = deadline {
                             // Wait for the database resource to be available to the transaction.
                             let message_sender = journal.message_sender();
@@ -882,23 +913,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -918,18 +937,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1033,23 +1041,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -1069,18 +1065,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1184,23 +1169,11 @@ impl<S: Sequencer> AccessController<S> {
             }
             Relationship::Unknown => {
                 if deadline.is_some() {
-                    // Prepare for awaiting access to the database object.
-                    *lock_mode = if is_reserved_for_creation {
-                        LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else if is_marked_for_deletion {
-                        LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    } else {
-                        LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            S::Instant::default(),
-                            owner.clone(),
-                        ))
-                    };
+                    *lock_mode = Self::augment_wait_queue(
+                        is_reserved_for_creation,
+                        is_marked_for_deletion,
+                        owner.clone(),
+                    );
                     Ok(None)
                 } else {
                     // No deadline is specified.
@@ -1220,18 +1193,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_access_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1415,6 +1377,56 @@ impl<S: Sequencer> AccessController<S> {
             }
         }
     }
+
+    /// Extracts exclusive access details from the [`LockMode`].
+    ///
+    /// Returns an [`Error`] if the supplied [`LockMode`] is wrong.
+    fn exclusive_access_defails(
+        lock_mode: &mut LockMode<S>,
+    ) -> Result<(&mut ExclusiveAwaitable<S>, bool, bool), Error> {
+        let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
+            match lock_mode {
+                LockMode::ReservedAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, true, false)
+                }
+                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, false, false)
+                }
+                LockMode::MarkedAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, false, true)
+                }
+                _ => return Err(Error::WrongParameter),
+            };
+        Ok((
+            exclusive_awaitable,
+            is_reserved_for_creation,
+            is_marked_for_deletion,
+        ))
+    }
+
+    /// Augments [`WaitQueue`]
+    fn augment_wait_queue(
+        is_reserved_for_creation: bool,
+        is_marked_for_deletion: bool,
+        owner: Owner<S>,
+    ) -> LockMode<S> {
+        if is_reserved_for_creation {
+            LockMode::ReservedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        } else if is_marked_for_deletion {
+            LockMode::MarkedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        } else {
+            LockMode::ExclusiveAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                S::Instant::default(),
+                owner,
+            ))
+        }
+    }
 }
 
 impl<S: Sequencer> Clone for Owner<S> {
@@ -1524,6 +1536,17 @@ impl<S: Sequencer> SharedAwaitable<S> {
             owner_set,
             wait_queue: WaitQueue::default(),
         })
+    }
+
+    /// Cleans up committed and rolled back owners.
+    ///
+    /// Returns `true` if the [`SharedAwaitable`] got empty.
+    fn cleanup_inactive_owners(&mut self) -> bool {
+        self.owner_set.retain(|o| {
+            // Delete the owner if the transaction is not active anymore.
+            o.is_transaction_active()
+        });
+        self.owner_set.is_empty()
     }
 
     /// Pushes a request into the wait queue.
@@ -1979,11 +2002,78 @@ mod test {
         let access_controller = database.access_controller();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
-        assert!(access_controller
-            .mark(&0, &mut journal, None)
-            .await
-            .unwrap());
+        assert_eq!(
+            access_controller.mark(&0, &mut journal, None).await,
+            Ok(true)
+        );
         assert_eq!(journal.submit(), 1);
         assert!(transaction.commit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reserve_commit_share_commit_lock_commit_share_commit_mark_commit() {
+        let database = Database::default();
+        let access_controller = database.access_controller();
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            access_controller.reserve(&0, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let old_snapshot = database.snapshot();
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            access_controller.share(&0, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            access_controller.lock(&0, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            access_controller.share(&0, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            access_controller.mark(&0, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(journal.submit(), 1);
+        assert!(transaction.commit().await.is_ok());
+
+        let snapshot = database.snapshot();
+        assert_eq!(
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(false),
+        );
+        assert_eq!(
+            access_controller
+                .read(&0, &old_snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
+        );
     }
 }

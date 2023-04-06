@@ -283,6 +283,11 @@ impl<S: Sequencer> Anchor<S> {
         Ok(false)
     }
 
+    /// Checks if the transaction was active.
+    pub(super) fn is_transaction_active(&self) -> bool {
+        self.transaction_anchor.eot_instant().is_none()
+    }
+
     /// Checks if the supplied [`Journal`] is able to update a piece of data created by the
     /// [`Journal`] represented by `self`.
     ///
