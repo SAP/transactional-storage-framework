@@ -50,7 +50,7 @@ pub(super) struct Anchor<S: Sequencer> {
     ///
     /// The field must be reset before making a new asynchronous request to an
     /// [`AccessController`](super::AccessController). The data is protected by a [`Mutex`],
-    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yield the
+    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yields the
     /// current executor.
     access_request_result_placeholder: Mutex<AccessRequestResult>,
 
