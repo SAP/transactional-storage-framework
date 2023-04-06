@@ -918,18 +918,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_lock_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1069,18 +1058,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_lock_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1220,18 +1198,7 @@ impl<S: Sequencer> AccessController<S> {
             return Err(Error::WrongParameter);
         };
         let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
-            match lock_mode {
-                LockMode::ReservedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, true, false)
-                }
-                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, false)
-                }
-                LockMode::MarkedAwaitable(exclusive_awaitable) => {
-                    (exclusive_awaitable, false, true)
-                }
-                _ => return Err(Error::WrongParameter),
-            };
+            Self::exclusive_lock_defails(lock_mode)?;
 
         // The state of the owner needs to be checked.
         match exclusive_awaitable
@@ -1414,6 +1381,29 @@ impl<S: Sequencer> AccessController<S> {
                 }
             }
         }
+    }
+
+    fn exclusive_lock_defails(
+        lock_mode: &mut LockMode<S>,
+    ) -> Result<(&mut ExclusiveAwaitable<S>, bool, bool), Error> {
+        let (exclusive_awaitable, is_reserved_for_creation, is_marked_for_deletion) =
+            match lock_mode {
+                LockMode::ReservedAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, true, false)
+                }
+                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, false, false)
+                }
+                LockMode::MarkedAwaitable(exclusive_awaitable) => {
+                    (exclusive_awaitable, false, true)
+                }
+                _ => return Err(Error::WrongParameter),
+            };
+        Ok((
+            exclusive_awaitable,
+            is_reserved_for_creation,
+            is_marked_for_deletion,
+        ))
     }
 }
 
