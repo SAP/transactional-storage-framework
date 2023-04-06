@@ -2,18 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::access_controller::{ObjectState, Owner, PromotedAccess};
+use super::access_controller::{ObjectState, Owner};
 use super::overseer::Task;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
+use scc::ebr;
 use scc::hash_map::OccupiedEntry;
-use scc::{ebr, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::ptr;
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Mutex;
@@ -46,20 +46,17 @@ pub(super) struct Anchor<S: Sequencer> {
     /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
     submit_instant: AtomicUsize,
 
-    /// Promoted access permission is kept in the [`Journal`] to roll back the access when the
-    /// [`Journal`] has to be rolled back.
-    ///
-    /// TODO: rollback handling.
-    #[allow(dead_code)]
-    promoted_access: HashMap<usize, PromotedAccess<S>>,
-
     /// A placeholder for asynchronous resource acquisition requests.
     ///
     /// The field must be reset before making a new asynchronous request to an
     /// [`AccessController`](super::AccessController). The data is protected by a [`Mutex`],
-    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yield the
+    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yields the
     /// current executor.
-    access_request_result_placeholder: Mutex<AccessRequestResult<S>>,
+    access_request_result_placeholder: Mutex<AccessRequestResult>,
+
+    /// A flag indicating that the changes in the [`Journal`] are going to be rolled back.
+    /// [`Journal`] has acquired.
+    rollback: AtomicBool,
 
     /// A flag indicating that there has been another transaction waiting for any resources this
     /// [`Journal`] has acquired.
@@ -88,7 +85,7 @@ pub(super) struct AwaitResponse<'d, S: Sequencer> {
 
 /// The result of the current access permission request.
 #[derive(Debug, Default)]
-pub(super) struct AccessRequestResult<S: Sequencer> {
+pub(super) struct AccessRequestResult {
     /// [`Waker`] to wake up when the result is ready.
     waker: Option<Waker>,
 
@@ -97,10 +94,6 @@ pub(super) struct AccessRequestResult<S: Sequencer> {
     /// `true` is set if the resource is newly acquired. `false` is set if the transaction already
     /// has ownership.
     result: Option<Result<bool, Error>>,
-
-    /// Result of promotion.
-    #[allow(dead_code)]
-    promotion_result: Option<PromotedAccess<S>>,
 }
 
 /// [`AwaitEOT`] is returned by an [`Anchor`] for the caller to await the final transaction state
@@ -226,14 +219,13 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
     fn drop(&mut self) {
         if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
-            // Send `anchor` to the garbage collector.
+            self.anchor.rollback(self.transaction.message_sender());
         }
     }
 }
 
 impl<S: Sequencer> Anchor<S> {
     /// The transaction identifier is returned.
-    #[allow(dead_code)]
     pub(super) fn transaction_id(&self) -> usize {
         self.transaction_anchor.as_ptr() as usize
     }
@@ -258,13 +250,9 @@ impl<S: Sequencer> Anchor<S> {
 
         if let Some(transaction_snapshot) = snapshot.transaction_snapshot() {
             let submit_instant = self.submit_instant();
-            let submit_instant = if submit_instant == UNFINISHED_TRANSACTION_INSTANT {
-                UNREACHABLE_TRANSACTION_INSTANT
-            } else {
-                submit_instant
-            };
-            if TransactionSnapshot::new(self.transaction_anchor.as_ptr() as usize, submit_instant)
-                <= *transaction_snapshot
+            if submit_instant != UNFINISHED_TRANSACTION_INSTANT
+                && TransactionSnapshot::new(self.transaction_id(), submit_instant)
+                    <= *transaction_snapshot
             {
                 // It comes from the same transaction, and a newer journal.
                 return Ok(true);
@@ -303,32 +291,30 @@ impl<S: Sequencer> Anchor<S> {
     /// Returns the relationship between the requester and `self`.
     pub(super) fn grant_write_access(&self, anchor: &Anchor<S>) -> Relationship<S> {
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
-            if eot_instant == S::Instant::default() {
+            if eot_instant == S::Instant::default() || self.rollback.load(Relaxed) {
                 return Relationship::RolledBack;
-            } else if self.submit_instant() != UNFINISHED_TRANSACTION_INSTANT {
-                // The journal has stayed in the transaction until the transaction was committed.
-                return Relationship::Committed(eot_instant);
             }
-            // The journal was rolled back before the transaction has been committed.
-            return Relationship::RolledBack;
+            return Relationship::Committed(eot_instant);
         } else if ptr::eq(
             self.transaction_anchor.as_ptr(),
             anchor.transaction_anchor.as_ptr(),
         ) {
             // They are from the same transaction.
             let submit_instant = self.submit_instant();
-            let submit_instant = if submit_instant == UNFINISHED_TRANSACTION_INSTANT {
-                UNREACHABLE_TRANSACTION_INSTANT
-            } else {
-                submit_instant
-            };
-            if submit_instant <= anchor.creation_instant {
+            if submit_instant != UNFINISHED_TRANSACTION_INSTANT
+                && submit_instant <= anchor.creation_instant
+            {
                 // It comes from the same transaction, and a newer journal.
                 return Relationship::Linearizable;
+            } else if self.rollback.load(Relaxed) {
+                return Relationship::RolledBack;
             }
 
             // `Concurrent` is also returned when comparing the same `Anchor`.
             return Relationship::Concurrent;
+        }
+        if self.rollback.load(Relaxed) {
+            return Relationship::RolledBack;
         }
         Relationship::Unknown
     }
@@ -345,7 +331,7 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Returns a reference to its [`AccessRequestResult`] field.
-    pub(super) fn access_request_result_placeholder(&self) -> &Mutex<AccessRequestResult<S>> {
+    pub(super) fn access_request_result_placeholder(&self) -> &Mutex<AccessRequestResult> {
         &self.access_request_result_placeholder
     }
 
@@ -390,8 +376,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Rolls back the changes contained in the associated [`Journal`].
     pub(super) fn rollback(&self, message_sender: &SyncSender<Task>) {
-        self.submit_instant
-            .store(UNFINISHED_TRANSACTION_INSTANT, Release);
+        self.rollback.store(true, Release);
         self.wake_up_others(message_sender);
     }
 
@@ -409,8 +394,8 @@ impl<S: Sequencer> Anchor<S> {
             transaction_anchor,
             creation_instant,
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
-            promoted_access: HashMap::default(),
             access_request_result_placeholder: Mutex::default(),
+            rollback: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),
         }
@@ -457,7 +442,7 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
             }
             if self.deadline < Instant::now() {
                 // The deadline was reached.
-                let result = placeholder.set_result(Err(Error::Timeout), None);
+                let result = placeholder.set_result(Err(Error::Timeout));
                 debug_assert!(result.is_ok());
                 return Poll::Ready(Err(Error::Timeout));
             }
@@ -485,20 +470,15 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
     }
 }
 
-impl<S: Sequencer> AccessRequestResult<S> {
+impl AccessRequestResult {
     /// Sets the result.
-    pub(super) fn set_result(
-        &mut self,
-        result: Result<bool, Error>,
-        promotion_result: Option<PromotedAccess<S>>,
-    ) -> Result<(), Error> {
+    pub(super) fn set_result(&mut self, result: Result<bool, Error>) -> Result<(), Error> {
         if let Some(result) = self.result.as_ref() {
             // `Error::Timeout` can be set by the requester.
             debug_assert_eq!(*result, Err(Error::Timeout));
             return Err(Error::Timeout);
         }
         self.result.replace(result);
-        self.promotion_result = promotion_result;
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }

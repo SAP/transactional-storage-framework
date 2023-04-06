@@ -36,7 +36,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
 /// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
-    anchor_addr: usize,
+    id: usize,
     instant: usize,
     _phantom: PhantomData<&'t ()>,
 }
@@ -102,9 +102,9 @@ impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S
 
 impl<'t> TransactionSnapshot<'t> {
     /// Creates a new [`TransactionSnapshot`].
-    pub(super) fn new(anchor_addr: usize, instant: usize) -> TransactionSnapshot<'t> {
+    pub(super) fn new(id: usize, instant: usize) -> TransactionSnapshot<'t> {
         TransactionSnapshot {
-            anchor_addr,
+            id,
             instant,
             _phantom: PhantomData,
         }
@@ -114,7 +114,7 @@ impl<'t> TransactionSnapshot<'t> {
 impl<'t> PartialOrd for TransactionSnapshot<'t> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        if self.anchor_addr != other.anchor_addr {
+        if self.id != other.id {
             return None;
         }
         self.instant.partial_cmp(&other.instant)

@@ -311,7 +311,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// Returns the memory address of its [`Anchor`].
     pub(super) fn transaction_snapshot(&self, instant: usize) -> TransactionSnapshot {
         debug_assert!(instant <= self.now());
-        TransactionSnapshot::new(self.anchor.as_ref() as *const _ as usize, instant)
+        TransactionSnapshot::new(self.id(), instant)
     }
 
     /// Post-processes its transaction commit.

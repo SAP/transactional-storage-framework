@@ -145,6 +145,10 @@ pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The only owner.
     owner: Owner<S>,
 
+    /// Owner information before promotion.
+    #[allow(dead_code)]
+    promotion_data: Option<PromotedAccess<S>>,
+
     /// The wait queue of the database object.
     wait_queue: WaitQueue<S>,
 }
@@ -1298,7 +1302,7 @@ impl<S: Sequencer> AccessController<S> {
             Request::Reserve(_, requester) => {
                 // It is not possible to reserve the database object after another transaction has
                 // successfully created it.
-                requester.set_result(Err(Error::SerializationFailure), None)?;
+                requester.set_result(Err(Error::SerializationFailure))?;
                 if wait_queue_empty {
                     Some(ObjectState::Created(creation_instant))
                 } else {
@@ -1308,7 +1312,7 @@ impl<S: Sequencer> AccessController<S> {
             Request::Share(_, requester) => {
                 let mut shared_awaitable =
                     SharedAwaitable::with_instant_and_owner(creation_instant, requester.clone());
-                requester.set_result(Ok(true), None)?;
+                requester.set_result(Ok(true))?;
                 shared_awaitable.wait_queue = take(wait_queue);
                 Some(ObjectState::Locked(LockMode::SharedAwaitable(
                     shared_awaitable,
@@ -1317,7 +1321,7 @@ impl<S: Sequencer> AccessController<S> {
             Request::Own(_, requester) => {
                 let mut exclusive_awaitable =
                     ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
-                requester.set_result(Ok(true), None)?;
+                requester.set_result(Ok(true))?;
                 exclusive_awaitable.wait_queue = take(wait_queue);
                 Some(ObjectState::Locked(LockMode::ExclusiveAwaitable(
                     exclusive_awaitable,
@@ -1326,7 +1330,7 @@ impl<S: Sequencer> AccessController<S> {
             Request::Mark(_, requester) => {
                 let mut exclusive_awaitable =
                     ExclusiveAwaitable::with_instant_and_owner(creation_instant, requester.clone());
-                requester.set_result(Ok(true), None)?;
+                requester.set_result(Ok(true))?;
                 exclusive_awaitable.wait_queue = take(wait_queue);
                 Some(ObjectState::Locked(LockMode::MarkedAwaitable(
                     exclusive_awaitable,
@@ -1347,14 +1351,14 @@ impl<S: Sequencer> AccessController<S> {
         match request {
             Request::Reserve(_, requester) => {
                 if wait_queue_empty {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(ObjectState::Locked(LockMode::Reserved(requester)))
                 } else {
                     let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
                         S::Instant::default(),
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     exclusive_awaitable.wait_queue = take(wait_queue);
                     Some(ObjectState::Locked(LockMode::ReservedAwaitable(
                         exclusive_awaitable,
@@ -1363,14 +1367,14 @@ impl<S: Sequencer> AccessController<S> {
             }
             Request::Share(_, requester) => {
                 if wait_queue_empty {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(ObjectState::Locked(LockMode::Shared(requester)))
                 } else {
                     let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
                         S::Instant::default(),
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     shared_awaitable.wait_queue = take(wait_queue);
                     Some(ObjectState::Locked(LockMode::SharedAwaitable(
                         shared_awaitable,
@@ -1379,14 +1383,14 @@ impl<S: Sequencer> AccessController<S> {
             }
             Request::Own(_, requester) => {
                 if wait_queue_empty {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(ObjectState::Locked(LockMode::Exclusive(requester)))
                 } else {
                     let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
                         S::Instant::default(),
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     exclusive_awaitable.wait_queue = take(wait_queue);
                     Some(ObjectState::Locked(LockMode::ExclusiveAwaitable(
                         exclusive_awaitable,
@@ -1395,14 +1399,14 @@ impl<S: Sequencer> AccessController<S> {
             }
             Request::Mark(_, requester) => {
                 if wait_queue_empty {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(ObjectState::Locked(LockMode::Marked(requester)))
                 } else {
                     let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
                         S::Instant::default(),
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     exclusive_awaitable.wait_queue = take(wait_queue);
                     Some(ObjectState::Locked(LockMode::MarkedAwaitable(
                         exclusive_awaitable,
@@ -1425,7 +1429,7 @@ impl<S: Sequencer> AccessController<S> {
             Request::Reserve(_, requester) => {
                 // It is not possible to reserve the database object after another transaction has
                 // successfully created it.
-                requester.set_result(Err(Error::SerializationFailure), None)?;
+                requester.set_result(Err(Error::SerializationFailure))?;
                 if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
                 {
                     Some(LockMode::Exclusive(exclusive_awaitable.owner.clone()))
@@ -1436,14 +1440,14 @@ impl<S: Sequencer> AccessController<S> {
             Request::Share(_, requester) => {
                 if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
                 {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(LockMode::Shared(requester))
                 } else {
                     let mut shared_awaitable = SharedAwaitable::with_instant_and_owner(
                         exclusive_awaitable.creation_instant,
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     shared_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
                     Some(LockMode::SharedAwaitable(shared_awaitable))
                 }
@@ -1451,14 +1455,14 @@ impl<S: Sequencer> AccessController<S> {
             Request::Own(_, requester) => {
                 if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
                 {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(LockMode::Exclusive(requester))
                 } else {
                     let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
                         exclusive_awaitable.creation_instant,
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     exclusive_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
                     Some(LockMode::ExclusiveAwaitable(exclusive_awaitable))
                 }
@@ -1466,14 +1470,14 @@ impl<S: Sequencer> AccessController<S> {
             Request::Mark(_, requester) => {
                 if wait_queue_empty && exclusive_awaitable.creation_instant == S::Instant::default()
                 {
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     Some(LockMode::Marked(requester))
                 } else {
                     let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
                         exclusive_awaitable.creation_instant,
                         requester.clone(),
                     );
-                    requester.set_result(Ok(true), None)?;
+                    requester.set_result(Ok(true))?;
                     exclusive_awaitable.wait_queue = take(&mut exclusive_awaitable.wait_queue);
                     Some(LockMode::MarkedAwaitable(exclusive_awaitable))
                 }
@@ -1554,13 +1558,9 @@ impl<S: Sequencer> Owner<S> {
     /// Sets the resource acquisition result.
     ///
     /// Returns `None` if the result was previously set.
-    fn set_result(
-        &self,
-        result: Result<bool, Error>,
-        promotion_result: Option<PromotedAccess<S>>,
-    ) -> Option<()> {
+    fn set_result(&self, result: Result<bool, Error>) -> Option<()> {
         if let Ok(mut r) = self.access_request_result_placeholder().lock() {
-            if let Err(error) = r.set_result(result, promotion_result) {
+            if let Err(error) = r.set_result(result) {
                 // `Error::Timeout` can be set by the requester.
                 debug_assert_eq!(error, Error::Timeout);
                 return None;
@@ -1670,6 +1670,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant,
             owner,
+            promotion_data: None,
             wait_queue: WaitQueue::default(),
         })
     }
