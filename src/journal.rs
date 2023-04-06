@@ -226,7 +226,6 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 
 impl<S: Sequencer> Anchor<S> {
     /// The transaction identifier is returned.
-    #[allow(dead_code)]
     pub(super) fn transaction_id(&self) -> usize {
         self.transaction_anchor.as_ptr() as usize
     }
