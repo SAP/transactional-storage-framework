@@ -422,14 +422,15 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.deadline < Instant::now() {
-            // The deadline was reached.
-            return Poll::Ready(Err(Error::Timeout));
-        } else if let Ok(mut placeholder) =
-            self.owner.access_request_result_placeholder().try_lock()
-        {
+        if let Ok(mut placeholder) = self.owner.access_request_result_placeholder().try_lock() {
             if let Some(result) = placeholder.result.take() {
                 return Poll::Ready(result);
+            }
+            if self.deadline < Instant::now() {
+                // The deadline was reached.
+                let result = placeholder.set_result(Err(Error::Timeout), None);
+                debug_assert!(result.is_ok());
+                return Poll::Ready(Err(Error::Timeout));
             }
             placeholder.waker.replace(cx.waker().clone());
         } else {
@@ -461,13 +462,18 @@ impl<S: Sequencer> AccessRequestResult<S> {
         &mut self,
         result: Result<bool, Error>,
         promotion_result: Option<PromotedAccess<S>>,
-    ) {
-        debug_assert!(self.result.is_none());
+    ) -> Result<(), Error> {
+        if let Some(result) = self.result.as_ref() {
+            // `Error::Timeout` can be set by the requester.
+            debug_assert_eq!(*result, Err(Error::Timeout));
+            return Err(Error::Timeout);
+        }
         self.result.replace(result);
         self.promotion_result = promotion_result;
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
+        Ok(())
     }
 }
 
