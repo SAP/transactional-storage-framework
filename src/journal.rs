@@ -12,7 +12,6 @@ use scc::ebr;
 use scc::hash_map::OccupiedEntry;
 use std::future::Future;
 use std::pin::Pin;
-use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -54,9 +53,8 @@ pub(super) struct Anchor<S: Sequencer> {
     /// current executor.
     access_request_result_placeholder: Mutex<AccessRequestResult>,
 
-    /// A flag indicating that the changes in the [`Journal`] are going to be rolled back.
-    /// [`Journal`] has acquired.
-    rollback: AtomicBool,
+    /// A flag indicating that the changes in the [`Journal`] are is being rolled back.
+    rolled_back: AtomicBool,
 
     /// A flag indicating that there has been another transaction waiting for any resources this
     /// [`Journal`] has acquired.
@@ -230,6 +228,15 @@ impl<S: Sequencer> Anchor<S> {
         self.transaction_anchor.as_ptr() as usize
     }
 
+    /// Checks if the state of the [`Anchor`] is fixed after the transaction was ended or the
+    /// associated [`Journal`] was rolled back.
+    pub(super) fn is_terminated(&self) -> bool {
+        // The transaction was ended.
+        self.transaction_anchor.eot_instant().is_some() ||
+        // The anchor was rolled back.
+        self.rolled_back.load(Relaxed)
+    }
+
     /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
     ///
     /// # Errors
@@ -243,7 +250,7 @@ impl<S: Sequencer> Anchor<S> {
     ) -> Result<bool, AwaitEOT<'d, S>> {
         if let Some(journal_snapshot) = snapshot.journal_snapshot() {
             if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
-                // It comes from the same transaction, and same journal.
+                // It comes from the same transaction and journal.
                 return Ok(true);
             }
         }
@@ -254,12 +261,18 @@ impl<S: Sequencer> Anchor<S> {
                 && TransactionSnapshot::new(self.transaction_id(), submit_instant)
                     <= *transaction_snapshot
             {
-                // It comes from the same transaction, and a newer journal.
+                // `snapshot` comes from the same transaction, but a newer journal.
                 return Ok(true);
             }
         }
 
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
+            if self.rolled_back.load(Relaxed) {
+                // The journal was rolled back.
+                //
+                // `rolled_back` has to be checked after checking the transaction state.
+                return Ok(false);
+            }
             return Ok(
                 eot_instant != S::Instant::default() && eot_instant <= snapshot.database_snapshot()
             );
@@ -280,43 +293,41 @@ impl<S: Sequencer> Anchor<S> {
         Ok(false)
     }
 
-    /// Checks if the transaction was active.
-    pub(super) fn is_transaction_active(&self) -> bool {
-        self.transaction_anchor.eot_instant().is_none()
-    }
-
     /// Checks if the supplied [`Journal`] is able to update a piece of data created by the
     /// [`Journal`] represented by `self`.
     ///
     /// Returns the relationship between the requester and `self`.
     pub(super) fn grant_write_access(&self, anchor: &Anchor<S>) -> Relationship<S> {
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
-            if eot_instant == S::Instant::default() || self.rollback.load(Relaxed) {
-                return Relationship::RolledBack;
+            // The transaction was ended.
+            if eot_instant == S::Instant::default() || self.rolled_back.load(Relaxed) {
+                // The transaction or the journal was rolled back.
+                //
+                // `rolled_back` has to be checked after checking the transaction state.
+                Relationship::RolledBack
+            } else {
+                Relationship::Committed(eot_instant)
             }
-            return Relationship::Committed(eot_instant);
-        } else if ptr::eq(
-            self.transaction_anchor.as_ptr(),
-            anchor.transaction_anchor.as_ptr(),
-        ) {
+        } else if self.transaction_id() == anchor.transaction_id() {
             // They are from the same transaction.
             let submit_instant = self.submit_instant();
             if submit_instant != UNFINISHED_TRANSACTION_INSTANT
                 && submit_instant <= anchor.creation_instant
             {
-                // It comes from the same transaction, and a newer journal.
-                return Relationship::Linearizable;
-            } else if self.rollback.load(Relaxed) {
-                return Relationship::RolledBack;
+                // The requester is a newer journal in the transaction, or the same with the owner.
+                Relationship::Linearizable
+            } else if self.rolled_back.load(Relaxed) {
+                // The owner which belongs to the same transaction was rolled back.
+                Relationship::RolledBack
+            } else {
+                Relationship::Concurrent
             }
-
-            // `Concurrent` is also returned when comparing the same `Anchor`.
-            return Relationship::Concurrent;
+        } else if self.rolled_back.load(Relaxed) {
+            // The owner was rolled back.
+            Relationship::RolledBack
+        } else {
+            Relationship::Unknown
         }
-        if self.rollback.load(Relaxed) {
-            return Relationship::RolledBack;
-        }
-        Relationship::Unknown
     }
 
     /// Clears its [`AccessRequestResult`] field.
@@ -376,7 +387,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Rolls back the changes contained in the associated [`Journal`].
     pub(super) fn rollback(&self, message_sender: &SyncSender<Task>) {
-        self.rollback.store(true, Release);
+        self.rolled_back.store(true, Release);
         self.wake_up_others(message_sender);
     }
 
@@ -395,7 +406,7 @@ impl<S: Sequencer> Anchor<S> {
             creation_instant,
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
             access_request_result_placeholder: Mutex::default(),
-            rollback: AtomicBool::new(false),
+            rolled_back: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),
         }
@@ -523,8 +534,8 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
 mod tests {
     use crate::Database;
 
-    #[tokio::test]
-    async fn journal() {
+    #[test]
+    fn journal() {
         let storage = Database::default();
         let transaction = storage.transaction();
         let journal_1 = transaction.journal();
