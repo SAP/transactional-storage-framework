@@ -1796,9 +1796,6 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
     use std::time::Duration;
 
     static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
@@ -1812,17 +1809,31 @@ mod test {
         }
     }
 
-    struct ShortSleep(Instant);
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TransactionAction {
+        Commit,
+        Rewind,
+        Rollback,
+    }
 
-    impl Future for ShortSleep {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if self.0 + TIMEOUT_EXPECTED < Instant::now() {
-                Poll::Ready(())
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum AccessAction {
+        Create,
+        Share,
+        Lock,
+        Delete,
+    }
+
+    async fn take_access_action<S: Sequencer, P: PersistenceLayer<S>>(
+        access_action: AccessAction,
+        access_controller: &AccessController<S>,
+        journal: &mut Journal<'_, '_, S, P>,
+    ) -> Result<bool, Error> {
+        match access_action {
+            AccessAction::Create => access_controller.create(&0, journal, None).await,
+            AccessAction::Share => access_controller.share(&0, journal, None).await,
+            AccessAction::Lock => access_controller.lock(&0, journal, None).await,
+            AccessAction::Delete => access_controller.delete(&0, journal, None).await,
         }
     }
 
@@ -1830,52 +1841,77 @@ mod test {
     async fn read_snapshot() {
         let database = Database::default();
         let access_controller = database.access_controller();
-        let transaction_old = database.transaction();
-        let mut journal_old = transaction_old.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal_old, None).await,
-            Ok(true)
-        );
-        let journal_old_snapshot = journal_old.snapshot();
+        let mut snapshot = None;
+        for access_action in [
+            AccessAction::Create,
+            AccessAction::Share,
+            AccessAction::Lock,
+            AccessAction::Share,
+            AccessAction::Delete,
+        ] {
+            let transaction = database.transaction();
+            let mut journal = transaction.journal();
+            assert_eq!(
+                take_access_action(access_action, access_controller, &mut journal).await,
+                Ok(true)
+            );
+            let journal_snapshot = journal.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &journal_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            assert_eq!(journal.submit(), 1);
+            let transaction_snapshot = transaction.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &transaction_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            assert!(transaction.commit().await.is_ok());
+            let database_snapshot = database.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &database_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            if snapshot.is_none() {
+                snapshot.replace(database_snapshot);
+            }
+        }
         assert_eq!(
             access_controller
                 .read(
                     &0,
-                    &journal_old_snapshot,
-                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                )
-                .await,
-            Ok(true),
-        );
-        assert_eq!(journal_old.submit(), 1);
-        let transaction_old_snapshot = transaction_old.snapshot();
-        assert_eq!(
-            access_controller
-                .read(
-                    &0,
-                    &transaction_old_snapshot,
-                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                )
-                .await,
-            Ok(true),
-        );
-        let transaction_new = database.transaction();
-        let journal_new = transaction_new.journal();
-        let journal_new_snapshot = journal_new.snapshot();
-        assert_eq!(
-            access_controller
-                .read(
-                    &0,
-                    &journal_new_snapshot,
+                    &database.snapshot(),
                     Some(Instant::now() + TIMEOUT_UNEXPECTED),
                 )
                 .await,
             Ok(false),
         );
-        assert!(transaction_old.commit().await.is_ok());
-        let database_snapshot = database.snapshot();
         assert_eq!(
-            access_controller.read(&0, &database_snapshot, None).await,
+            access_controller
+                .read(
+                    &0,
+                    &snapshot.unwrap(),
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
             Ok(true),
         );
     }
@@ -1904,7 +1940,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn create_commit_create() {
+    async fn read_rolled_back() {
         let database = Database::default();
         let access_controller = database.access_controller();
         let transaction = database.transaction();
@@ -1914,50 +1950,26 @@ mod test {
             Ok(true)
         );
         assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
+        let prepared = transaction.prepare().await.unwrap();
+        let snapshot_old = database.snapshot();
         let transaction = database.transaction();
         let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Err(Error::SerializationFailure),
+        let (deleted, _) = futures::join!(
+            access_controller.delete(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            async { drop(prepared) },
         );
-    }
-
-    #[tokio::test]
-    async fn create_rewind_create() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
+        let snapshot = database.snapshot();
         assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
+            access_controller
+                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
+            Ok(true),
         );
-        drop(journal);
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
+        assert_eq!(deleted, Ok(true));
         assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn create_rollback_create() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        transaction.rollback().await;
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
+            access_controller
+                .read(&0, &snapshot_old, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
+                .await,
             Ok(true),
         );
     }
@@ -1981,49 +1993,6 @@ mod test {
                 .await,
             Ok(false),
         );
-    }
-
-    #[tokio::test]
-    async fn create_commit_wait_create() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        let prepared = transaction.prepare().await.unwrap();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        let (created, committed) = futures::join!(
-            access_controller.create(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            prepared
-        );
-        assert!(committed.is_ok());
-        assert_eq!(created, Err(Error::SerializationFailure));
-    }
-
-    #[tokio::test]
-    async fn create_rollback_wait_create() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        let rollback_runner = async { transaction.rollback().await };
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        let (result, _) = futures::join!(
-            access_controller.create(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            rollback_runner
-        );
-        assert_eq!(result, Ok(true));
     }
 
     #[tokio::test]
@@ -2056,105 +2025,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn create_commit_read() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .create(&0, &mut journal, None)
-            .await
-            .is_ok());
-        assert_eq!(journal.submit(), 1);
-        let prepared = transaction.prepare().await.unwrap();
-        let mut database_snapshot = 0;
-        let read_runner = async {
-            let snapshot = database.snapshot();
-            database_snapshot = snapshot.database_snapshot();
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED))
-                .await
-        };
-
-        let (visible, committed) = futures::join!(read_runner, prepared);
-        let commit_instant = committed.unwrap();
-        let visible = visible.unwrap();
-        assert_eq!(visible, commit_instant <= database_snapshot);
-    }
-
-    #[tokio::test]
-    async fn create_rollback_share_read() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .create(&0, &mut journal, None)
-            .await
-            .is_ok());
-        assert_eq!(journal.submit(), 1);
-        transaction.rollback().await;
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .share(&0, &mut journal, None)
-            .await
-            .unwrap());
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let snapshot = database.snapshot();
-        assert_eq!(
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(true),
-        );
-    }
-
-    #[tokio::test]
-    async fn create_commit_share_read() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .create(&0, &mut journal, None)
-            .await
-            .is_ok());
-        assert_eq!(journal.submit(), 1);
-        let prepared = transaction.prepare().await.unwrap();
-
-        let old_snapshot = database.snapshot();
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        let (shared, committed) = futures::join!(
-            access_controller.share(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            prepared
-        );
-
-        let snapshot = database.snapshot();
-        assert_eq!(
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(true),
-        );
-
-        assert!(committed.is_ok());
-        assert_eq!(shared, Ok(true));
-
-        assert_eq!(
-            access_controller
-                .read(&0, &old_snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(false),
-        );
-    }
-
-    #[tokio::test]
     async fn create_rollback_read() {
         let database = Database::default();
         let access_controller = database.access_controller();
@@ -2178,148 +2048,81 @@ mod test {
     }
 
     #[tokio::test]
-    async fn share_read() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .share(&0, &mut journal, None)
-            .await
-            .unwrap());
-        assert_eq!(journal.submit(), 1);
+    async fn access_tx_access() {
+        for serial_execution in [false, true] {
+            for access_action in [
+                AccessAction::Create,
+                AccessAction::Share,
+                AccessAction::Lock,
+                AccessAction::Delete,
+            ] {
+                for transaction_action in [
+                    TransactionAction::Commit,
+                    TransactionAction::Rewind,
+                    TransactionAction::Rollback,
+                ] {
+                    for post_access_action in [
+                        AccessAction::Create,
+                        AccessAction::Share,
+                        AccessAction::Lock,
+                        AccessAction::Delete,
+                    ] {
+                        let database = Database::default();
+                        let access_controller = database.access_controller();
+                        let transaction = database.transaction();
+                        let mut journal = transaction.journal();
+                        assert_eq!(
+                            take_access_action(access_action, access_controller, &mut journal)
+                                .await,
+                            Ok(true)
+                        );
+                        if transaction_action == TransactionAction::Rewind {
+                            drop(journal);
+                        } else {
+                            assert_eq!(journal.submit(), 1);
+                        }
+                        let transaction_action_runner = async {
+                            if transaction_action == TransactionAction::Commit {
+                                assert!(transaction.commit().await.is_ok());
+                            } else if transaction_action == TransactionAction::Rollback {
+                                transaction.rollback().await;
+                            }
+                        };
+                        let post_action_runner = async {
+                            let transaction = database.transaction();
+                            let mut journal = transaction.journal();
+                            take_access_action(post_access_action, access_controller, &mut journal)
+                                .await
+                        };
 
-        let snapshot = database.snapshot();
-        assert_eq!(
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(true),
-        );
+                        let result = if serial_execution {
+                            futures::join!(transaction_action_runner, post_action_runner).1
+                        } else {
+                            transaction_action_runner.await;
+                            post_action_runner.await
+                        };
 
-        assert!(transaction.commit().await.is_ok());
-
-        let snapshot = database.snapshot();
-        assert_eq!(
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(true),
-        );
-    }
-
-    #[tokio::test]
-    async fn share_share_share() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction_1 = database.transaction();
-        let mut journal_1 = transaction_1.journal();
-        let transaction_2 = database.transaction();
-        let mut journal_2 = transaction_2.journal();
-        let transaction_3 = database.transaction();
-        let mut journal_3 = transaction_3.journal();
-        let (shared_1, shared_2, shared_3) = futures::join!(
-            access_controller.share(&0, &mut journal_1, None),
-            access_controller.share(&0, &mut journal_2, None),
-            access_controller.share(&0, &mut journal_3, None)
-        );
-        assert_eq!(shared_1, Ok(true));
-        assert_eq!(shared_2, Ok(true));
-        assert_eq!(shared_3, Ok(true));
-    }
-
-    #[tokio::test]
-    async fn lock() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert!(access_controller
-            .lock(&0, &mut journal, None)
-            .await
-            .unwrap());
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn delete() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.delete(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn create_commit_share_commit_lock_commit_share_commit_delete_commit() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.create(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let old_snapshot = database.snapshot();
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.share(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.lock(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.share(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let transaction = database.transaction();
-        let mut journal = transaction.journal();
-        assert_eq!(
-            access_controller.delete(&0, &mut journal, None).await,
-            Ok(true)
-        );
-        assert_eq!(journal.submit(), 1);
-        assert!(transaction.commit().await.is_ok());
-
-        let snapshot = database.snapshot();
-        assert_eq!(
-            access_controller
-                .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(false),
-        );
-        assert_eq!(
-            access_controller
-                .read(&0, &old_snapshot, Some(Instant::now() + TIMEOUT_UNEXPECTED),)
-                .await,
-            Ok(true),
-        );
+                        if ((access_action != AccessAction::Create
+                            || transaction_action == TransactionAction::Commit)
+                            && post_access_action == AccessAction::Create)
+                            || (access_action == AccessAction::Delete
+                                && transaction_action == TransactionAction::Commit)
+                        {
+                            assert_eq!(
+                                result,
+                                Err(Error::SerializationFailure),
+                                "{access_action:?} {transaction_action:?} {post_access_action:?}"
+                            );
+                        } else {
+                            assert_eq!(
+                                result,
+                                Ok(true),
+                                "{access_action:?} {transaction_action:?} {post_access_action:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
