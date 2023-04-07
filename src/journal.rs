@@ -495,6 +495,11 @@ impl AccessRequestResult {
         }
         Ok(())
     }
+
+    /// Checks if a result is set.
+    pub(super) fn is_result_set(&self) -> bool {
+        self.result.is_some()
+    }
 }
 
 impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
