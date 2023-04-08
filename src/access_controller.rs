@@ -27,26 +27,6 @@ pub trait ToObjectID {
     fn to_object_id(&self) -> usize;
 }
 
-/// [`PromotedAccess`] is kept inside a [`Journal`] when the [`Journal`] successfully promoted
-/// access permission for a database object.
-///
-/// [`PromotedAccess`] instances kept in a [`Journal`] are used when the [`Journal`] has to be
-/// rolled back, so that the access permission can also be rolled back.
-#[derive(Debug)]
-pub(super) enum PromotedAccess<S: Sequencer> {
-    /// Promoted to `exclusive` from `shared`.
-    #[allow(dead_code)]
-    SharedToExclusive(Owner<S>),
-
-    /// Promoted to `deleted` from `shared`.
-    #[allow(dead_code)]
-    SharedToDeleted(Owner<S>),
-
-    /// Promoted to `deleted` from `exclusive`.
-    #[allow(dead_code)]
-    ExclusiveToDeleted(Owner<S>),
-}
-
 /// An owner of a database object.
 #[derive(Debug)]
 pub(super) struct Owner<S: Sequencer> {
@@ -145,9 +125,8 @@ pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The only owner.
     owner: Owner<S>,
 
-    /// Owner information before promotion.
-    #[allow(dead_code)]
-    promotion_data: Option<PromotedAccess<S>>,
+    /// Access data before promotion.
+    promotion_link: Option<Box<LockMode<S>>>,
 
     /// The wait queue of the database object.
     wait_queue: WaitQueue<S>,
@@ -280,9 +259,9 @@ impl<S: Sequencer> AccessController<S> {
 
     /// Creates access control data for a newly created database object.
     ///
-    /// The access control data is atomically converted into a time point data when the
-    /// transaction is committed, so that readers can check if they have the read access right to
-    /// the data, and no other transactions cannot create the same database object.
+    /// The access control data is atomically converted into a time point data when the transaction
+    /// is committed, so that readers can check if they have the read access right to the data, and
+    /// no other transactions cannot create the same database object.
     ///
     /// Transactions may compete for the same database object, e.g., when the new database object
     /// becomes reachable via an index before being visible to database readers, however at most
@@ -531,6 +510,10 @@ impl<S: Sequencer> AccessController<S> {
     }
 
     /// Takes ownership of the database object for deletion.
+    ///
+    /// The access control data is atomically converted into a time point data when the transaction
+    /// is committed, so that readers can check if they have the read access right to the data. No
+    /// other transactions are allowed to modify the access control data after it was deleted.
     ///
     /// Returns `true` if the database object was newly deleted in the transaction.
     ///
@@ -831,7 +814,8 @@ impl<S: Sequencer> AccessController<S> {
                             return Ok(Some(false));
                         }
                         Relationship::Concurrent => {
-                            // TODO: intra-transaction deadlock - need to check this.
+                            // Multiple journals competing for the same database object is regarded
+                            // as a deadlock.
                             return Err(Error::Deadlock);
                         }
                         Relationship::Unknown => {
@@ -965,8 +949,15 @@ impl<S: Sequencer> AccessController<S> {
                     }
                     LockMode::Shared(owner) => {
                         if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
-                            // TODO: lock-promotion.
-                            return Err(Error::SerializationFailure);
+                            *lock_mode = LockMode::ExclusiveAwaitable(
+                                ExclusiveAwaitable::with_owner_and_old_access_data(
+                                    Owner {
+                                        anchor: new_owner.clone(),
+                                    },
+                                    LockMode::Shared(owner.clone()),
+                                ),
+                            );
+                            return Ok(Some(false));
                         }
                         *lock_mode =
                             LockMode::SharedAwaitable(SharedAwaitable::with_owner(owner.clone()));
@@ -1613,6 +1604,61 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
     }
 }
 
+impl<S: Sequencer> LockMode<S> {
+    /// Cleans up committed and rolled back owners.
+    ///
+    /// Returns `true` if the [`ExclusiveAwaitable`] got empty.
+    #[allow(dead_code)]
+    fn cleanup_inactive_owners(&mut self) {
+        loop {
+            match self {
+                LockMode::CreatedAwaitable(exclusive_awaitable)
+                | LockMode::ExclusiveAwaitable(exclusive_awaitable)
+                | LockMode::DeletedAwaitable(exclusive_awaitable) => {
+                    // Check if the owner was rolled back.
+                    if exclusive_awaitable.owner.is_rolled_back() {
+                        if let Some(previous_access_data) =
+                            exclusive_awaitable.promotion_link.take()
+                        {
+                            let wait_queue = take(&mut exclusive_awaitable.wait_queue);
+                            *self = *previous_access_data;
+                            if !wait_queue.is_empty() {
+                                match self {
+                                    LockMode::Exclusive(owner) => {
+                                        *self = LockMode::ExclusiveAwaitable(
+                                            ExclusiveAwaitable::with_owner_and_wait_queue(
+                                                owner.clone(),
+                                                wait_queue,
+                                            ),
+                                        );
+                                    }
+                                    LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                                        exclusive_awaitable.wait_queue = wait_queue;
+                                    }
+                                    LockMode::Shared(owner) => {
+                                        *self = LockMode::SharedAwaitable(
+                                            SharedAwaitable::with_owner_and_wait_queue(
+                                                owner.clone(),
+                                                wait_queue,
+                                            ),
+                                        );
+                                    }
+                                    LockMode::SharedAwaitable(shared_awaitable) => {
+                                        shared_awaitable.wait_queue = wait_queue;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
 impl<S: Sequencer> Request<S> {
     /// Returns a reference to its `owner` field.
     fn owner(&self) -> &Owner<S> {
@@ -1703,7 +1749,21 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
-            promotion_data: None,
+            promotion_link: None,
+            wait_queue: WaitQueue::default(),
+        })
+    }
+
+    /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted and its old access data
+    /// before promotion set.
+    fn with_owner_and_old_access_data(
+        owner: Owner<S>,
+        old_access_data: LockMode<S>,
+    ) -> Box<ExclusiveAwaitable<S>> {
+        Box::new(ExclusiveAwaitable {
+            creation_instant: S::Instant::default(),
+            owner,
+            promotion_link: Some(Box::new(old_access_data)),
             wait_queue: WaitQueue::default(),
         })
     }
@@ -1716,7 +1776,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
-            promotion_data: None,
+            promotion_link: None,
             wait_queue,
         })
     }
@@ -1730,7 +1790,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant,
             owner,
-            promotion_data: None,
+            promotion_link: None,
             wait_queue: WaitQueue::default(),
         })
     }
@@ -1836,6 +1896,22 @@ mod test {
             AccessAction::Lock => access_controller.lock(&0, journal, deadline).await,
             AccessAction::Delete => access_controller.delete(&0, journal, deadline).await,
         }
+    }
+
+    #[tokio::test]
+    async fn share_to_lock() {
+        let database = Database::default();
+        let access_controller = database.access_controller();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        assert_eq!(
+            take_access_action(AccessAction::Share, access_controller, &mut journal, None).await,
+            Ok(true)
+        );
+        assert_eq!(
+            take_access_action(AccessAction::Lock, access_controller, &mut journal, None).await,
+            Ok(false)
+        );
     }
 
     #[tokio::test]

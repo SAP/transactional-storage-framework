@@ -12,6 +12,7 @@ use scc::ebr;
 use scc::hash_map::OccupiedEntry;
 use std::future::Future;
 use std::pin::Pin;
+use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -228,13 +229,19 @@ impl<S: Sequencer> Anchor<S> {
         self.transaction_anchor.as_ptr() as usize
     }
 
+    /// Checks if the [`Journal`] was rolled back.
+    pub(super) fn is_rolled_back(&self) -> bool {
+        // The anchor was rolled back.
+        self.rolled_back.load(Relaxed)
+    }
+
     /// Checks if the state of the [`Anchor`] is fixed after the transaction was ended or the
     /// associated [`Journal`] was rolled back.
     pub(super) fn is_terminated(&self) -> bool {
         // The transaction was ended.
         self.transaction_anchor.eot_instant().is_some() ||
         // The anchor was rolled back.
-        self.rolled_back.load(Relaxed)
+        self.is_rolled_back()
     }
 
     /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
@@ -267,7 +274,7 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
-            if self.rolled_back.load(Relaxed) {
+            if self.is_rolled_back() {
                 // The journal was rolled back.
                 //
                 // `rolled_back` has to be checked after checking the transaction state.
@@ -298,12 +305,15 @@ impl<S: Sequencer> Anchor<S> {
     ///
     /// Returns the relationship between the requester and `self`.
     pub(super) fn grant_write_access(&self, anchor: &Anchor<S>) -> Relationship<S> {
-        if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
+        if ptr::eq(self, anchor) {
+            // Requester and the owner are the same.
+            Relationship::Linearizable
+        } else if let Some(eot_instant) = self.transaction_anchor.eot_instant() {
             // The transaction was ended.
-            if eot_instant == S::Instant::default() || self.rolled_back.load(Relaxed) {
+            if eot_instant == S::Instant::default() || self.is_rolled_back() {
                 // The transaction or the journal was rolled back.
                 //
-                // `rolled_back` has to be checked after checking the transaction state.
+                // `is_rolled_back()` has to be checked after checking the transaction state.
                 Relationship::RolledBack
             } else {
                 Relationship::Committed(eot_instant)
@@ -316,13 +326,13 @@ impl<S: Sequencer> Anchor<S> {
             {
                 // The requester is a newer journal in the transaction, or the same with the owner.
                 Relationship::Linearizable
-            } else if self.rolled_back.load(Relaxed) {
+            } else if self.is_rolled_back() {
                 // The owner which belongs to the same transaction was rolled back.
                 Relationship::RolledBack
             } else {
                 Relationship::Concurrent
             }
-        } else if self.rolled_back.load(Relaxed) {
+        } else if self.is_rolled_back() {
             // The owner was rolled back.
             Relationship::RolledBack
         } else {
