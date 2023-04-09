@@ -13,8 +13,6 @@ license = "Apache-2.0"
 categories = ["asynchronous", "concurrency", "database-implementations"]
 keywords = ["async", "concurrent", "database"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 scc = "1.4"
 

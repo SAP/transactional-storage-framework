@@ -957,6 +957,11 @@ impl<S: Sequencer> AccessController<S> {
                                 .set_old_access_data(LockMode::Shared(owner.clone()));
                             *lock_mode = LockMode::ExclusiveAwaitable(exclusive_awaitable);
                             return Ok(Some(true));
+                        } else if owner.is_terminated() {
+                            *lock_mode = LockMode::Exclusive(Owner {
+                                anchor: new_owner.clone(),
+                            });
+                            return Ok(Some(true));
                         }
 
                         // Allocate a wait queue and retry.
@@ -964,26 +969,7 @@ impl<S: Sequencer> AccessController<S> {
                             LockMode::SharedAwaitable(SharedAwaitable::with_owner(owner.clone()));
                     }
                     LockMode::SharedAwaitable(shared_awaitable) => {
-                        if shared_awaitable.is_only_owner(new_owner) {
-                            // If the requester is the only shared owner of the database object, it
-                            // is eligible to promote the lock to `Locked` even when there are
-                            // waiting transactions.
-                            let wait_queue = take(&mut shared_awaitable.wait_queue);
-                            let mut exclusive_awaitable =
-                                ExclusiveAwaitable::with_owner_and_wait_queue(
-                                    Owner {
-                                        anchor: new_owner.clone(),
-                                    },
-                                    wait_queue,
-                                );
-                            exclusive_awaitable.set_old_access_data(LockMode::SharedAwaitable(
-                                shared_awaitable.clone(),
-                            ));
-                            *lock_mode = LockMode::ExclusiveAwaitable(exclusive_awaitable);
-                            return Ok(Some(true));
-                        } else if shared_awaitable.cleanup_inactive_owners()
-                            && shared_awaitable.wait_queue.is_empty()
-                        {
+                        if shared_awaitable.cleanup_inactive_owners() {
                             if shared_awaitable.creation_instant == S::Instant::default() {
                                 *lock_mode = LockMode::Exclusive(Owner {
                                     anchor: new_owner.clone(),
@@ -999,11 +985,16 @@ impl<S: Sequencer> AccessController<S> {
                                 );
                             }
                             return Ok(Some(true));
+                        } else if let Some(exclusive_awaitable) =
+                            shared_awaitable.try_promote_to_exclusive(new_owner)
+                        {
+                            *lock_mode = LockMode::ExclusiveAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
                         } else if deadline.is_some() {
                             return Ok(None);
                         }
 
-                        // The wait queue is not empty, but no deadline is specified.
+                        // The database object is owned by an active transaction.
                         break;
                     }
                 },
@@ -1060,33 +1051,18 @@ impl<S: Sequencer> AccessController<S> {
                                 .set_old_access_data(LockMode::Shared(owner.clone()));
                             *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
                             return Ok(Some(true));
+                        } else if owner.is_terminated() {
+                            *lock_mode = LockMode::Deleted(Owner {
+                                anchor: new_owner.clone(),
+                            });
+                            return Ok(Some(true));
                         }
-
                         // Allocate a wait queue and retry.
                         *lock_mode =
                             LockMode::SharedAwaitable(SharedAwaitable::with_owner(owner.clone()));
                     }
                     LockMode::SharedAwaitable(shared_awaitable) => {
-                        if shared_awaitable.is_only_owner(new_owner) {
-                            // If the requester is the only shared owner of the database object, it
-                            // is eligible to promote the lock to `Delete` even when there are
-                            // waiting transactions.
-                            let wait_queue = take(&mut shared_awaitable.wait_queue);
-                            let mut exclusive_awaitable =
-                                ExclusiveAwaitable::with_owner_and_wait_queue(
-                                    Owner {
-                                        anchor: new_owner.clone(),
-                                    },
-                                    wait_queue,
-                                );
-                            exclusive_awaitable.set_old_access_data(LockMode::SharedAwaitable(
-                                shared_awaitable.clone(),
-                            ));
-                            *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
-                            return Ok(Some(true));
-                        } else if shared_awaitable.cleanup_inactive_owners()
-                            && shared_awaitable.wait_queue.is_empty()
-                        {
+                        if shared_awaitable.cleanup_inactive_owners() {
                             if shared_awaitable.creation_instant == S::Instant::default() {
                                 *lock_mode = LockMode::Deleted(Owner {
                                     anchor: new_owner.clone(),
@@ -1102,11 +1078,17 @@ impl<S: Sequencer> AccessController<S> {
                                 );
                             }
                             return Ok(Some(true));
+                        }
+                        if let Some(exclusive_awaitable) =
+                            shared_awaitable.try_promote_to_exclusive(new_owner)
+                        {
+                            *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
                         } else if deadline.is_some() {
                             return Ok(None);
                         }
 
-                        // The wait queue is not empty, but no deadline is specified.
+                        // The database object cannot be deleted immediately.
                         break;
                     }
                 },
@@ -1759,25 +1741,43 @@ impl<S: Sequencer> SharedAwaitable<S> {
     }
 
     /// Checks if the specified owner is linearizable with all the owners in the owner set.
-    fn is_only_owner(&self, new_owner: &ebr::Arc<JournalAnchor<S>>) -> bool {
-        !self.owner_set.iter().any(|o| {
+    fn try_promote_to_exclusive(
+        &mut self,
+        new_owner: &ebr::Arc<JournalAnchor<S>>,
+    ) -> Option<Box<ExclusiveAwaitable<S>>> {
+        if self.owner_set.iter().any(|o| {
             // Delete the entry if the owner definitely does not hold the shared ownership.
             !matches!(
                 o.grant_write_access(new_owner),
                 Relationship::<S>::Linearizable
             )
-        })
+        }) {
+            // One of the owners is not compatible.
+            return None;
+        }
+
+        // If the requester is the only shared owner of the database object, it
+        // is eligible to promote it to `ExclusiveAwaitable`
+        let wait_queue = take(&mut self.wait_queue);
+        let mut exclusive_awaitable = ExclusiveAwaitable::with_owner_and_wait_queue(
+            Owner {
+                anchor: new_owner.clone(),
+            },
+            wait_queue,
+        );
+        exclusive_awaitable.set_old_access_data(LockMode::SharedAwaitable(Box::new(self.clone())));
+        Some(exclusive_awaitable)
     }
 
     /// Cleans up committed and rolled back owners.
     ///
-    /// Returns `true` if the [`SharedAwaitable`] got empty.
+    /// Returns `true` if the [`SharedAwaitable`] got totally empty.
     fn cleanup_inactive_owners(&mut self) -> bool {
         self.owner_set.retain(|o| {
             // Delete the entry if the owner definitely does not hold the shared ownership.
             !o.is_terminated()
         });
-        self.owner_set.is_empty()
+        self.owner_set.is_empty() && self.wait_queue.is_empty()
     }
 
     /// Pushes a request into the wait queue.
