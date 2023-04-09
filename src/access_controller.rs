@@ -1140,7 +1140,8 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(Some(false));
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 return Err(Error::Deadlock);
             }
             Relationship::Unknown => (),
@@ -1202,7 +1203,8 @@ impl<S: Sequencer> AccessController<S> {
                 Ok(Some(false))
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 Err(Error::Deadlock)
             }
             Relationship::Unknown => {
@@ -1263,7 +1265,8 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(Some(false));
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 return Err(Error::Deadlock);
             }
             Relationship::Unknown => (),
@@ -1387,7 +1390,8 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(Some(false));
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 return Err(Error::Deadlock);
             }
             Relationship::Unknown => (),
@@ -1449,7 +1453,8 @@ impl<S: Sequencer> AccessController<S> {
                 Err(Error::SerializationFailure)
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 Err(Error::Deadlock)
             }
             Relationship::Unknown => {
@@ -1510,7 +1515,8 @@ impl<S: Sequencer> AccessController<S> {
                 return Err(Error::SerializationFailure);
             }
             Relationship::Concurrent => {
-                // TODO: intra-transaction deadlock - need to check this.
+                // Competing with other operations in the same transaction is considered to be a
+                // deadlock.
                 return Err(Error::Deadlock);
             }
             Relationship::Unknown => (),
