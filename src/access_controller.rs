@@ -1997,7 +1997,7 @@ mod test {
 
     #[tokio::test]
     async fn promotion() {
-        for num_shared_locks in 0..3 {
+        for num_shared_locks in 0..4 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                 let database = Database::default();
                 let access_controller = database.access_controller();
@@ -2019,13 +2019,8 @@ mod test {
                 }
                 if num_shared_locks != 0 {
                     assert_eq!(
-                        take_access_action(
-                            AccessAction::Lock,
-                            access_controller,
-                            &mut journal,
-                            None
-                        )
-                        .await,
+                        take_access_action(promotion_action, access_controller, &mut journal, None)
+                            .await,
                         Err(Error::SerializationFailure),
                     );
                 }
@@ -2036,6 +2031,20 @@ mod test {
                         .await,
                     Ok(true)
                 );
+                assert_eq!(journal.submit(), num_shared_locks + 1);
+                if promotion_action == AccessAction::Lock {
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        take_access_action(
+                            AccessAction::Delete,
+                            access_controller,
+                            &mut journal,
+                            None
+                        )
+                        .await,
+                        Ok(true)
+                    );
+                }
             }
         }
     }
