@@ -2013,6 +2013,85 @@ mod test {
     }
 
     #[tokio::test]
+    async fn read_snapshot() {
+        let database = Database::default();
+        let access_controller = database.access_controller();
+        let mut snapshot = None;
+        for access_action in [
+            AccessAction::Create,
+            AccessAction::Share,
+            AccessAction::Lock,
+            AccessAction::Share,
+            AccessAction::Delete,
+        ] {
+            let transaction = database.transaction();
+            let mut journal = transaction.journal();
+            assert_eq!(
+                take_access_action(access_action, access_controller, &mut journal, None).await,
+                Ok(true)
+            );
+            let journal_snapshot = journal.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &journal_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            assert_eq!(journal.submit(), 1);
+            let transaction_snapshot = transaction.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &transaction_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            assert!(transaction.commit().await.is_ok());
+            let database_snapshot = database.snapshot();
+            assert_eq!(
+                access_controller
+                    .read(
+                        &0,
+                        &database_snapshot,
+                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                    )
+                    .await,
+                Ok(access_action != AccessAction::Delete),
+            );
+            if snapshot.is_none() {
+                snapshot.replace(database_snapshot);
+            }
+        }
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &database.snapshot(),
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
+            Ok(false),
+        );
+        assert_eq!(
+            access_controller
+                .read(
+                    &0,
+                    &snapshot.unwrap(),
+                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                )
+                .await,
+            Ok(true),
+        );
+    }
+
+    #[tokio::test]
     async fn access_promotion() {
         for num_shared_locks in 0..4 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
@@ -2135,86 +2214,6 @@ mod test {
             }
         }
     }
-
-    #[tokio::test]
-    async fn read_snapshot() {
-        let database = Database::default();
-        let access_controller = database.access_controller();
-        let mut snapshot = None;
-        for access_action in [
-            AccessAction::Create,
-            AccessAction::Share,
-            AccessAction::Lock,
-            AccessAction::Share,
-            AccessAction::Delete,
-        ] {
-            let transaction = database.transaction();
-            let mut journal = transaction.journal();
-            assert_eq!(
-                take_access_action(access_action, access_controller, &mut journal, None).await,
-                Ok(true)
-            );
-            let journal_snapshot = journal.snapshot();
-            assert_eq!(
-                access_controller
-                    .read(
-                        &0,
-                        &journal_snapshot,
-                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                    )
-                    .await,
-                Ok(access_action != AccessAction::Delete),
-            );
-            assert_eq!(journal.submit(), 1);
-            let transaction_snapshot = transaction.snapshot();
-            assert_eq!(
-                access_controller
-                    .read(
-                        &0,
-                        &transaction_snapshot,
-                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                    )
-                    .await,
-                Ok(access_action != AccessAction::Delete),
-            );
-            assert!(transaction.commit().await.is_ok());
-            let database_snapshot = database.snapshot();
-            assert_eq!(
-                access_controller
-                    .read(
-                        &0,
-                        &database_snapshot,
-                        Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                    )
-                    .await,
-                Ok(access_action != AccessAction::Delete),
-            );
-            if snapshot.is_none() {
-                snapshot.replace(database_snapshot);
-            }
-        }
-        assert_eq!(
-            access_controller
-                .read(
-                    &0,
-                    &database.snapshot(),
-                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                )
-                .await,
-            Ok(false),
-        );
-        assert_eq!(
-            access_controller
-                .read(
-                    &0,
-                    &snapshot.unwrap(),
-                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
-                )
-                .await,
-            Ok(true),
-        );
-    }
-
     #[tokio::test]
     async fn access_tx_access() {
         for serial_execution in [false, true] {

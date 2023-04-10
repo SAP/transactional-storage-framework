@@ -465,6 +465,10 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
                 // The deadline was reached.
                 let result = placeholder.set_result(Err(Error::Timeout));
                 debug_assert!(result.is_ok());
+
+                // Need to wake up other waiting transactions.
+                let _: Result<(), TrySendError<Task>> =
+                    self.message_sender.try_send(Task::Monitor(self.object_id));
                 return Poll::Ready(Err(Error::Timeout));
             }
             placeholder.waker.replace(cx.waker().clone());
