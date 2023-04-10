@@ -2013,7 +2013,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn promotion() {
+    async fn access_promotion() {
         for num_shared_locks in 0..4 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                 let database = Database::default();
@@ -2084,6 +2084,53 @@ mod test {
                         );
                     }
                     assert_eq!(transaction.rewind(num_shared_locks), num_shared_locks);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn access_promotion_wait() {
+        for num_shared_locks in 0..3 {
+            for block_action in [AccessAction::Lock, AccessAction::Delete] {
+                for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
+                    let database = Database::default();
+                    let access_controller = database.access_controller();
+                    let transaction = database.transaction();
+                    for i in 0..num_shared_locks {
+                        let mut journal = transaction.journal();
+                        assert_eq!(
+                            take_access_action(
+                                AccessAction::Share,
+                                access_controller,
+                                &mut journal,
+                                None
+                            )
+                            .await,
+                            Ok(i == 0)
+                        );
+                        assert_eq!(journal.submit(), i + 1);
+                    }
+
+                    let blocker_transaction = database.transaction();
+                    let mut blocker_journal = blocker_transaction.journal();
+                    let mut journal = transaction.journal();
+                    let (blocker_result, result) = futures::join!(
+                        take_access_action(
+                            block_action,
+                            access_controller,
+                            &mut blocker_journal,
+                            Some(Instant::now() + TIMEOUT_EXPECTED)
+                        ),
+                        take_access_action(
+                            promotion_action,
+                            access_controller,
+                            &mut journal,
+                            Some(Instant::now() + TIMEOUT_UNEXPECTED)
+                        )
+                    );
+                    assert_eq!(blocker_result, Err(Error::Timeout));
+                    assert_eq!(result, Ok(true));
                 }
             }
         }
