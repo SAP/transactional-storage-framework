@@ -126,7 +126,7 @@ pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     owner: Owner<S>,
 
     /// Access data before promotion.
-    promotion_link: Option<Box<LockMode<S>>>,
+    prior_state: Option<Box<LockMode<S>>>,
 
     /// The wait queue of the database object.
     wait_queue: WaitQueue<S>,
@@ -953,8 +953,7 @@ impl<S: Sequencer> AccessController<S> {
                             let mut exclusive_awaitable = ExclusiveAwaitable::with_owner(Owner {
                                 anchor: new_owner.clone(),
                             });
-                            exclusive_awaitable
-                                .set_old_access_data(LockMode::Shared(owner.clone()));
+                            exclusive_awaitable.set_prior_state(LockMode::Shared(owner.clone()));
                             *lock_mode = LockMode::ExclusiveAwaitable(exclusive_awaitable);
                             return Ok(Some(true));
                         } else if owner.is_terminated() {
@@ -1047,8 +1046,7 @@ impl<S: Sequencer> AccessController<S> {
                             let mut exclusive_awaitable = ExclusiveAwaitable::with_owner(Owner {
                                 anchor: new_owner.clone(),
                             });
-                            exclusive_awaitable
-                                .set_old_access_data(LockMode::Shared(owner.clone()));
+                            exclusive_awaitable.set_prior_state(LockMode::Shared(owner.clone()));
                             *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
                             return Ok(Some(true));
                         } else if owner.is_terminated() {
@@ -1449,8 +1447,22 @@ impl<S: Sequencer> AccessController<S> {
                 Ok(Some(true))
             }
             Relationship::Linearizable => {
-                // TODO: lock-promotion.
-                Err(Error::SerializationFailure)
+                if is_deleted {
+                    // The transaction owns the database object to delete it.
+                    return Ok(Some(false));
+                }
+                // The database object is locked by the transaction, therefore the journal is
+                // eligible to promote the access mode.
+                let mut exclusive_awaitable = ExclusiveAwaitable::with_owner(Owner {
+                    anchor: new_owner.clone(),
+                });
+                if is_created {
+                    exclusive_awaitable.set_prior_state(LockMode::Created(owner.clone()));
+                } else {
+                    exclusive_awaitable.set_prior_state(LockMode::Exclusive(owner.clone()));
+                }
+                *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
+                Ok(Some(true))
             }
             Relationship::Concurrent => {
                 // Competing with other operations in the same transaction is considered to be a
@@ -1511,8 +1523,32 @@ impl<S: Sequencer> AccessController<S> {
                 }
             }
             Relationship::Linearizable => {
-                // TODO: lock-promotion.
-                return Err(Error::SerializationFailure);
+                if is_deleted {
+                    // The transaction owns the database object to delete it.
+                    return Ok(Some(false));
+                } else if exclusive_awaitable.wait_queue.is_empty() {
+                    // The database object is locked by the transaction and the wait queue is
+                    // empty, therefore the journal is eligible to promote the access mode.
+                    let mut exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        exclusive_awaitable.creation_instant,
+                        Owner {
+                            anchor: new_owner.clone(),
+                        },
+                    );
+                    let old_exclusive_awaitable = ExclusiveAwaitable::with_instant_and_owner(
+                        exclusive_awaitable.creation_instant,
+                        exclusive_awaitable.owner.clone(),
+                    );
+                    if is_created {
+                        exclusive_awaitable
+                            .set_prior_state(LockMode::CreatedAwaitable(old_exclusive_awaitable));
+                    } else {
+                        exclusive_awaitable
+                            .set_prior_state(LockMode::ExclusiveAwaitable(old_exclusive_awaitable));
+                    }
+                    *lock_mode = LockMode::DeletedAwaitable(exclusive_awaitable);
+                    return Ok(Some(true));
+                }
             }
             Relationship::Concurrent => {
                 // Competing with other operations in the same transaction is considered to be a
@@ -1646,7 +1682,7 @@ impl<S: Sequencer> LockMode<S> {
         {
             // Check if the owner was rolled back.
             if exclusive_awaitable.owner.is_rolled_back() {
-                if let Some(previous_access_data) = exclusive_awaitable.promotion_link.take() {
+                if let Some(previous_access_data) = exclusive_awaitable.prior_state.take() {
                     let wait_queue = take(&mut exclusive_awaitable.wait_queue);
                     *self = *previous_access_data;
                     if !wait_queue.is_empty() {
@@ -1771,7 +1807,7 @@ impl<S: Sequencer> SharedAwaitable<S> {
             },
             wait_queue,
         );
-        exclusive_awaitable.set_old_access_data(LockMode::SharedAwaitable(Box::new(self.clone())));
+        exclusive_awaitable.set_prior_state(LockMode::SharedAwaitable(Box::new(self.clone())));
         Some(exclusive_awaitable)
     }
 
@@ -1812,7 +1848,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
-            promotion_link: None,
+            prior_state: None,
             wait_queue: WaitQueue::default(),
         })
     }
@@ -1825,7 +1861,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
-            promotion_link: None,
+            prior_state: None,
             wait_queue,
         })
     }
@@ -1839,15 +1875,15 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         Box::new(ExclusiveAwaitable {
             creation_instant,
             owner,
-            promotion_link: None,
+            prior_state: None,
             wait_queue: WaitQueue::default(),
         })
     }
 
     /// Sets the old access data when promoting the access mode.
-    fn set_old_access_data(&mut self, old_access_data: LockMode<S>) {
-        debug_assert!(self.promotion_link.is_none());
-        self.promotion_link.replace(Box::new(old_access_data));
+    fn set_prior_state(&mut self, old_access_data: LockMode<S>) {
+        debug_assert!(self.prior_state.is_none());
+        self.prior_state.replace(Box::new(old_access_data));
     }
 
     /// Pushes a request into the wait queue.
