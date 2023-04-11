@@ -15,6 +15,68 @@ use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
 /// value.
+///
+/// # Examples
+///
+/// ```
+/// use sap_tsf::{Database, ToObjectID};
+///
+/// // `O` represents a database object type.
+/// struct O(usize);
+///
+/// // `ToObjectID` is implemented for `O`.
+/// impl ToObjectID for O {
+///     fn to_object_id(&self) -> usize {
+///         self.0
+///    }
+/// }
+///
+/// let database = Database::default();
+/// let access_controller = database.access_controller();
+///
+/// async {
+///     let transaction = database.transaction();
+///     let mut journal = transaction.journal();
+///
+///     // Let the `Database` know that the database object will be created.
+///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+///     journal.submit();
+///
+///     // The transaction writes its own commit instant value onto the access data of the database
+///     // object, and future readers and writers will be able to gain access to it.
+///     assert!(transaction.commit().await.is_ok());
+///
+///     let snapshot = database.snapshot();
+///     assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+///
+///     let transaction_succ = database.transaction();
+///     let mut journal_succ = transaction_succ.journal();
+///
+///     // The transaction will own the database object to prevent any other transactions from
+///     // gaining write access to it.
+///     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
+///     assert_eq!(journal_succ.submit(), 1);
+///
+///     let transaction_fail = database.transaction();
+///     let mut journal_fail = transaction_fail.journal();
+
+///     // Another transaction fails to take ownership of the database object.
+///     assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
+///
+///     let mut journal_delete = transaction_succ.journal();
+//
+///     // The transaction will delete the database object.
+///     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
+///     assert_eq!(journal_delete.submit(), 2);
+///
+///     // The transaction deletes the database object by writing its commit instant value onto
+///     // the access data associated with the database object.
+///     assert!(transaction_succ.commit().await.is_ok());
+///
+///     // Further access to the database object is prohibited.
+///     assert!(access_controller.share(&O(1), &mut journal_fail, None).await.is_err());
+/// };
+/// ```
 #[derive(Debug, Default)]
 pub struct AccessController<S: Sequencer> {
     table: HashMap<usize, ObjectState<S>>,
@@ -30,8 +92,7 @@ pub trait ToObjectID {
 /// An owner of a database object.
 #[derive(Debug)]
 pub(super) struct Owner<S: Sequencer> {
-    /// The address of the owner [`JournalAnchor`](super::journal::Anchor) is used as its
-    /// identification.
+    /// The journal is directly pointed to by [`Owner`].
     anchor: ebr::Arc<JournalAnchor<S>>,
 }
 
@@ -42,67 +103,70 @@ pub(super) enum ObjectState<S: Sequencer> {
     Locked(LockMode<S>),
 
     /// The database object was created at the instant.
-    #[allow(dead_code)]
     Created(S::Instant),
 
     /// The database object was deleted at the instant.
-    #[allow(dead_code)]
     Deleted(S::Instant),
 }
 
-/// Locking modes.
+/// Locking modes of a database object.
+///
+/// If the [`Database`](super::Database) implements multi-version concurrency control, read access
+/// to a database object is not controlled by the lock mode.
 #[derive(Debug)]
 pub(super) enum LockMode<S: Sequencer> {
     /// The database object is prepared to be created.
     Created(Owner<S>),
 
-    /// The database object is prepared to be created, but there are waiting transactions.
+    /// The database object is prepared to be created, and there can be transactions trying to
+    /// create the same database object.
     CreatedAwaitable(Box<ExclusiveAwaitable<S>>),
 
-    /// The database object is locked shared by a single transaction.
+    /// A single transaction owns the database object to prevent it from being modified .
     Shared(Owner<S>),
 
-    /// The database object which may not be visible to some readers is shared by one or more
-    /// transactions.
+    /// One of more transactions share ownership of the database object to prevent it from being
+    /// modified, and there can be transactions trying to gain access to the database object.
     SharedAwaitable(Box<SharedAwaitable<S>>),
 
     /// The database object is locked by the transaction.
     Exclusive(Owner<S>),
 
-    /// The database object which may not be visible to some readers is locked by the transaction.
+    /// The database object is locked by the transaction, and there can be transactions trying to
+    /// gain access to the database object.
     ExclusiveAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is being deleted by the transaction.
     Deleted(Owner<S>),
 
-    /// The database object which may not be visible to some readers is being deleted by the
-    /// transaction.
+    /// The database object is being deleted by the transaction, and there can be transactions
+    /// trying to gain access to the database object.
     DeletedAwaitable(Box<ExclusiveAwaitable<S>>),
 }
 
 /// Types of access requests.
 ///
-/// The instant when the request was made is stored in it, and the value is used by the deadlock
-/// detector.
+/// The wall-clock time instant when the request was made is stored in it, and the value is used by
+/// the deadlock detector.
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
-    /// A request to create a database object.
+    /// Create a database object.
     Create(Instant, Owner<S>),
 
-    /// A request to acquire a shared lock on the database object.
+    /// Acquire a shared lock on a database object.
     Share(Instant, Owner<S>),
 
-    /// A request to acquire the exclusive lock on the database object.
+    /// Acquire the exclusive lock on a database object.
     Lock(Instant, Owner<S>),
 
-    /// A request to acquire the exclusive lock on the database object for deletion.
+    /// Acquire the exclusive lock on a database object to delete it.
     Delete(Instant, Owner<S>),
 }
 
 /// Shared access control information container for a database object.
 #[derive(Debug)]
 pub(super) struct SharedAwaitable<S: Sequencer> {
-    /// The instant when the database object was created.
+    /// The logical timestamp when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
@@ -117,7 +181,7 @@ pub(super) struct SharedAwaitable<S: Sequencer> {
 /// Exclusive access control information container for a database object.
 #[derive(Debug)]
 pub(super) struct ExclusiveAwaitable<S: Sequencer> {
-    /// The instant when the database object was created.
+    /// The logical timestamp when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
@@ -125,7 +189,7 @@ pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The only owner.
     owner: Owner<S>,
 
-    /// Access data before promotion.
+    /// Access control data before promotion.
     prior_state: Option<Box<LockMode<S>>>,
 
     /// The wait queue of the database object.
@@ -138,16 +202,25 @@ struct WaitQueue<S: Sequencer>(VecDeque<Request<S>>);
 
 impl<S: Sequencer> AccessController<S> {
     /// Tries to gain read access to the database object.
-    //
-    // This method returns `true` if no access control is defined for the database object,
-    // therefore any access control mapping must be removed only if the corresponding database
-    // object is always visible to all the readers, or it has become unreachable to readers.
+    ///
+    /// This method is used by a database system implementing multi-version concurrency control. It
+    /// compares the sequencer instant and transaction information in the supplied [`Snapshot`]
+    /// with the creation or deletion sequencer instant, or the owner contained in the access
+    /// control data, and then returns `true` if the [`Snapshot`] is eligible to read the database
+    /// object. If the creation or deletion sequencer instant cannot be immediately read, e.g., the
+    /// transaction is being committed at the moment, it may wait for the credible sequencer
+    /// instant value to be determined until the specified timeout is reached.
+    ///
+    /// This method just returns `true` if no access control is defined for the database object,
+    /// therefore any access control mapping must be removed only if the corresponding database
+    /// object can always be visible to all the readers, or the database object has become totally
+    /// unreachable to readers after being logically deleted.
     ///
     /// # Errors
     ///
     /// An [`Error`] is returned if the specified deadline was reached or memory allocation failed
     /// when pushing a [`Waker`](std::task::Waker) into the owner
-    /// [`Transaction`](super::Transaction).
+    /// [`Transaction`](super::Transaction) if the transaction is being committed.
     ///
     /// # Examples
     ///
@@ -228,8 +301,7 @@ impl<S: Sequencer> AccessController<S> {
                                         .grant_read_access(snapshot, deadline)
                                         .map(|r| !r)
                                 } else {
-                                    // The database object was created after the reader had
-                                    // started.
+                                    // The deletion cannot be seen.
                                     Ok(false)
                                 }
                             }
@@ -1679,6 +1751,7 @@ impl<S: Sequencer> ObjectState<S> {
     /// Cleans up the [`ObjectState`].
     fn cleanup_state(&mut self) {
         if let ObjectState::Locked(lock_mode) = self {
+            // Try to revoke previously promoted access previliges if the owner was rolled back.
             while let LockMode::ExclusiveAwaitable(exclusive_awaitable)
             | LockMode::DeletedAwaitable(exclusive_awaitable) = lock_mode
             {
@@ -1720,6 +1793,64 @@ impl<S: Sequencer> ObjectState<S> {
                     }
                 }
                 break;
+            }
+
+            // Try to convert `Locked` into `Created` or `Deleted` if the owner was committed.
+            //
+            // TODO: return `false` if the whole entry can be removed.
+            match lock_mode {
+                LockMode::Created(owner) => {
+                    if let Some(commit_instant) = owner.eot_instant() {
+                        if commit_instant != S::Instant::default() {
+                            *self = ObjectState::Created(commit_instant);
+                        }
+                    }
+                }
+                LockMode::CreatedAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() {
+                        if let Some(commit_instant) = exclusive_awaitable.owner.eot_instant() {
+                            if commit_instant == S::Instant::default() {
+                                *self = ObjectState::Locked(LockMode::Created(
+                                    exclusive_awaitable.owner.clone(),
+                                ));
+                            } else {
+                                *self = ObjectState::Created(commit_instant);
+                            }
+                        }
+                    }
+                }
+                LockMode::Shared(_) | LockMode::SharedAwaitable(_) | LockMode::Exclusive(_) => (),
+                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() && exclusive_awaitable.owner.is_terminated() {
+                        if exclusive_awaitable.creation_instant == S::Instant::default() {
+                            *self = ObjectState::Locked(LockMode::Exclusive(
+                                exclusive_awaitable.owner.clone(),
+                            ));
+                        } else {
+                            *self = ObjectState::Created(exclusive_awaitable.creation_instant);
+                        }
+                    }
+                }
+                LockMode::Deleted(owner) => {
+                    if let Some(commit_instant) = owner.eot_instant() {
+                        if commit_instant != S::Instant::default() {
+                            *self = ObjectState::Deleted(commit_instant);
+                        }
+                    }
+                }
+                LockMode::DeletedAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() {
+                        if let Some(commit_instant) = exclusive_awaitable.owner.eot_instant() {
+                            if commit_instant == S::Instant::default() {
+                                *self = ObjectState::Locked(LockMode::Deleted(
+                                    exclusive_awaitable.owner.clone(),
+                                ));
+                            } else {
+                                *self = ObjectState::Deleted(commit_instant);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1897,6 +2028,11 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
         })
     }
 
+    /// Returns `true` if the [`ExclusiveAwaitable`] is empty.
+    fn is_empty(&self) -> bool {
+        self.prior_state.is_none() && self.wait_queue.is_empty()
+    }
+
     /// Sets the old access data when promoting the access mode.
     fn set_prior_state(&mut self, old_access_data: LockMode<S>) {
         debug_assert!(self.prior_state.is_none());
@@ -2013,83 +2149,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn promotion() {
-        for num_shared_locks in 0..4 {
-            for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
-                let database = Database::default();
-                let access_controller = database.access_controller();
-                let mut transaction = database.transaction();
-                let mut journal = transaction.journal();
-                for i in 0..num_shared_locks {
-                    let mut journal = transaction.journal();
-                    assert_eq!(
-                        take_access_action(
-                            AccessAction::Share,
-                            access_controller,
-                            &mut journal,
-                            None
-                        )
-                        .await,
-                        Ok(i == 0)
-                    );
-                    assert_eq!(journal.submit(), i + 1);
-                }
-                if num_shared_locks != 0 {
-                    assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
-                        Err(Error::SerializationFailure),
-                    );
-                }
-                drop(journal);
-                for _ in 0..2 {
-                    let mut journal = transaction.journal();
-                    assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
-                        Ok(true)
-                    );
-                    assert_eq!(journal.submit(), num_shared_locks + 1);
-                    let mut journal = transaction.journal();
-                    assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
-                        Ok(false)
-                    );
-                    drop(journal);
-                    if promotion_action == AccessAction::Lock {
-                        for _ in 0..2 {
-                            let mut journal = transaction.journal();
-                            assert_eq!(
-                                take_access_action(
-                                    AccessAction::Delete,
-                                    access_controller,
-                                    &mut journal,
-                                    None
-                                )
-                                .await,
-                                Ok(true)
-                            );
-                        }
-                        let mut journal = transaction.journal();
-                        assert_eq!(
-                            take_access_action(
-                                AccessAction::Share,
-                                access_controller,
-                                &mut journal,
-                                None
-                            )
-                            .await,
-                            Ok(false)
-                        );
-                    }
-                    assert_eq!(transaction.rewind(num_shared_locks), num_shared_locks);
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn read_snapshot() {
         let database = Database::default();
         let access_controller = database.access_controller();
@@ -2166,6 +2225,129 @@ mod test {
                 .await,
             Ok(true),
         );
+    }
+
+    #[tokio::test]
+    async fn access_promote() {
+        for num_shared_locks in 0..4 {
+            for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
+                let database = Database::default();
+                let access_controller = database.access_controller();
+                let mut transaction = database.transaction();
+                let mut journal = transaction.journal();
+                for i in 0..num_shared_locks {
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        take_access_action(
+                            AccessAction::Share,
+                            access_controller,
+                            &mut journal,
+                            None
+                        )
+                        .await,
+                        Ok(i == 0)
+                    );
+                    assert_eq!(journal.submit(), i + 1);
+                }
+                if num_shared_locks != 0 {
+                    assert_eq!(
+                        take_access_action(promotion_action, access_controller, &mut journal, None)
+                            .await,
+                        Err(Error::SerializationFailure),
+                    );
+                }
+                drop(journal);
+                for _ in 0..2 {
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        take_access_action(promotion_action, access_controller, &mut journal, None)
+                            .await,
+                        Ok(true)
+                    );
+                    assert_eq!(journal.submit(), num_shared_locks + 1);
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        take_access_action(promotion_action, access_controller, &mut journal, None)
+                            .await,
+                        Ok(false)
+                    );
+                    drop(journal);
+                    if promotion_action == AccessAction::Lock {
+                        for _ in 0..2 {
+                            let mut journal = transaction.journal();
+                            assert_eq!(
+                                take_access_action(
+                                    AccessAction::Delete,
+                                    access_controller,
+                                    &mut journal,
+                                    None
+                                )
+                                .await,
+                                Ok(true)
+                            );
+                        }
+                        let mut journal = transaction.journal();
+                        assert_eq!(
+                            take_access_action(
+                                AccessAction::Share,
+                                access_controller,
+                                &mut journal,
+                                None
+                            )
+                            .await,
+                            Ok(false)
+                        );
+                    }
+                    assert_eq!(transaction.rewind(num_shared_locks), num_shared_locks);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn access_promote_wait() {
+        for num_shared_locks in 1..3 {
+            for block_action in [AccessAction::Lock, AccessAction::Delete] {
+                for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
+                    let database = Database::default();
+                    let access_controller = database.access_controller();
+                    let transaction = database.transaction();
+                    for i in 0..num_shared_locks {
+                        let mut journal = transaction.journal();
+                        assert_eq!(
+                            take_access_action(
+                                AccessAction::Share,
+                                access_controller,
+                                &mut journal,
+                                None
+                            )
+                            .await,
+                            Ok(i == 0)
+                        );
+                        assert_eq!(journal.submit(), i + 1);
+                    }
+                    let blocker_transaction = database.transaction();
+                    let mut blocker_journal = blocker_transaction.journal();
+                    let mut journal = transaction.journal();
+                    let (blocker_result, result) = futures::join!(
+                        take_access_action(
+                            block_action,
+                            access_controller,
+                            &mut blocker_journal,
+                            Some(Instant::now() + TIMEOUT_EXPECTED)
+                        ),
+                        take_access_action(
+                            promotion_action,
+                            access_controller,
+                            &mut journal,
+                            Some(Instant::now() + TIMEOUT_UNEXPECTED)
+                        )
+                    );
+                    assert_eq!(result, Ok(true));
+                    assert_eq!(blocker_result, Err(Error::Timeout));
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -229,6 +229,13 @@ impl<S: Sequencer> Anchor<S> {
         self.transaction_anchor.as_ptr() as usize
     }
 
+    /// Gets the end-of-transaction time instant.
+    ///
+    /// Returns `None` if the transaction is not ended.
+    pub(super) fn eot_instant(&self) -> Option<S::Instant> {
+        self.transaction_anchor.eot_instant()
+    }
+
     /// Checks if the [`Journal`] was rolled back.
     pub(super) fn is_rolled_back(&self) -> bool {
         // The anchor was rolled back.
@@ -465,6 +472,10 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
                 // The deadline was reached.
                 let result = placeholder.set_result(Err(Error::Timeout));
                 debug_assert!(result.is_ok());
+
+                // Need to wake up other waiting transactions.
+                let _: Result<(), TrySendError<Task>> =
+                    self.message_sender.try_send(Task::Monitor(self.object_id));
                 return Poll::Ready(Err(Error::Timeout));
             }
             placeholder.waker.replace(cx.waker().clone());
