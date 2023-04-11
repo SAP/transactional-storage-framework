@@ -92,6 +92,69 @@ let journal = transaction.start();
 
 `AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object. In other words, `AccessController` controls locking and versioning of database objects.
 
+```rust
+
+use sap_tsf::{Database, ToObjectID};
+
+// `O` represents a database object type.
+struct O(usize);
+
+
+// `ToObjectID` is implemented for `O` so that `AccessController` can derive the
+// identifier of a database object represented by an instace of `O`.
+impl ToObjectID for O {
+    fn to_object_id(&self) -> usize {
+        self.0
+    }
+}
+
+let database = Database::default();
+let access_controller = database.access_controller();
+
+async {
+    let transaction = database.transaction();
+    let mut journal = transaction.journal();
+
+    // Let the `Database` know that the database object will be created.
+    assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+
+    journal.submit();
+
+    // The transaction writes its own commit instant value onto the database object, and only
+    // future readers and writers can gain access to the database object.
+    assert!(transaction.commit().await.is_ok());
+
+    let snapshot = database.snapshot();
+    assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+
+    let transaction_succ = database.transaction();
+    let mut journal_succ = transaction_succ.journal();
+
+    // The transaction owns the database object to prevent any other transactions to get write
+    // access to it.
+    assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
+    assert_eq!(journal_succ.submit(), 1);
+
+    let transaction_fail = database.transaction();
+    let mut journal_fail = transaction_fail.journal();
+    assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
+
+    let mut journal_delete = transaction_succ.journal();
+
+    // The transaction will delete the database object.
+    assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
+
+    assert_eq!(journal_delete.submit(), 2);
+ 
+    // The transaction deleted the database object by writing its commit instant value onto
+    // the database object.
+    assert!(transaction_succ.commit().await.is_ok());
+
+    // Further access to the database object is prohibited.
+    assert!(access_controller.share(&O(1), &mut journal_fail, None).await.is_err());
+};
+ ```
+
 ### PersistenceLayer
 
 `PersistenceLayer` is an abstract module for implementing write-ahead-logging mechanisms and point-in-time-recovery.
