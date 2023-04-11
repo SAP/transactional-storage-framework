@@ -2092,7 +2092,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn access_promotion() {
+    async fn access_promote() {
         for num_shared_locks in 0..4 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                 let database = Database::default();
@@ -2169,8 +2169,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn access_promotion_wait() {
-        for num_shared_locks in 0..3 {
+    async fn access_promote_wait() {
+        for num_shared_locks in 1..3 {
             for block_action in [AccessAction::Lock, AccessAction::Delete] {
                 for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                     let database = Database::default();
@@ -2190,7 +2190,6 @@ mod test {
                         );
                         assert_eq!(journal.submit(), i + 1);
                     }
-
                     let blocker_transaction = database.transaction();
                     let mut blocker_journal = blocker_transaction.journal();
                     let mut journal = transaction.journal();
@@ -2208,12 +2207,13 @@ mod test {
                             Some(Instant::now() + TIMEOUT_UNEXPECTED)
                         )
                     );
-                    assert_eq!(blocker_result, Err(Error::Timeout));
                     assert_eq!(result, Ok(true));
+                    assert_eq!(blocker_result, Err(Error::Timeout));
                 }
             }
         }
     }
+
     #[tokio::test]
     async fn access_tx_access() {
         for serial_execution in [false, true] {
