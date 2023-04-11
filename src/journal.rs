@@ -229,6 +229,13 @@ impl<S: Sequencer> Anchor<S> {
         self.transaction_anchor.as_ptr() as usize
     }
 
+    /// Gets the end-of-transaction time instant.
+    ///
+    /// Returns `None` if the transaction is not ended.
+    pub(super) fn eot_instant(&self) -> Option<S::Instant> {
+        self.transaction_anchor.eot_instant()
+    }
+
     /// Checks if the [`Journal`] was rolled back.
     pub(super) fn is_rolled_back(&self) -> bool {
         // The anchor was rolled back.

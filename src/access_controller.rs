@@ -42,11 +42,9 @@ pub(super) enum ObjectState<S: Sequencer> {
     Locked(LockMode<S>),
 
     /// The database object was created at the instant.
-    #[allow(dead_code)]
     Created(S::Instant),
 
     /// The database object was deleted at the instant.
-    #[allow(dead_code)]
     Deleted(S::Instant),
 }
 
@@ -1679,6 +1677,7 @@ impl<S: Sequencer> ObjectState<S> {
     /// Cleans up the [`ObjectState`].
     fn cleanup_state(&mut self) {
         if let ObjectState::Locked(lock_mode) = self {
+            // Try to revoke previously promoted access previliges if the owner was rolled back.
             while let LockMode::ExclusiveAwaitable(exclusive_awaitable)
             | LockMode::DeletedAwaitable(exclusive_awaitable) = lock_mode
             {
@@ -1720,6 +1719,64 @@ impl<S: Sequencer> ObjectState<S> {
                     }
                 }
                 break;
+            }
+
+            // Try to convert `Locked` into `Created` or `Deleted` if the owner was committed.
+            //
+            // TODO: return `false` if the whole entry can be removed.
+            match lock_mode {
+                LockMode::Created(owner) => {
+                    if let Some(commit_instant) = owner.eot_instant() {
+                        if commit_instant != S::Instant::default() {
+                            *self = ObjectState::Created(commit_instant);
+                        }
+                    }
+                }
+                LockMode::CreatedAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() {
+                        if let Some(commit_instant) = exclusive_awaitable.owner.eot_instant() {
+                            if commit_instant == S::Instant::default() {
+                                *self = ObjectState::Locked(LockMode::Created(
+                                    exclusive_awaitable.owner.clone(),
+                                ));
+                            } else {
+                                *self = ObjectState::Created(commit_instant);
+                            }
+                        }
+                    }
+                }
+                LockMode::Shared(_) | LockMode::SharedAwaitable(_) | LockMode::Exclusive(_) => (),
+                LockMode::ExclusiveAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() && exclusive_awaitable.owner.is_terminated() {
+                        if exclusive_awaitable.creation_instant == S::Instant::default() {
+                            *self = ObjectState::Locked(LockMode::Exclusive(
+                                exclusive_awaitable.owner.clone(),
+                            ));
+                        } else {
+                            *self = ObjectState::Created(exclusive_awaitable.creation_instant);
+                        }
+                    }
+                }
+                LockMode::Deleted(owner) => {
+                    if let Some(commit_instant) = owner.eot_instant() {
+                        if commit_instant != S::Instant::default() {
+                            *self = ObjectState::Deleted(commit_instant);
+                        }
+                    }
+                }
+                LockMode::DeletedAwaitable(exclusive_awaitable) => {
+                    if exclusive_awaitable.is_empty() {
+                        if let Some(commit_instant) = exclusive_awaitable.owner.eot_instant() {
+                            if commit_instant == S::Instant::default() {
+                                *self = ObjectState::Locked(LockMode::Deleted(
+                                    exclusive_awaitable.owner.clone(),
+                                ));
+                            } else {
+                                *self = ObjectState::Deleted(commit_instant);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1895,6 +1952,11 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
             prior_state: None,
             wait_queue: WaitQueue::default(),
         })
+    }
+
+    /// Returns `true` if the [`ExclusiveAwaitable`] is empty.
+    fn is_empty(&self) -> bool {
+        self.prior_state.is_none() && self.wait_queue.is_empty()
     }
 
     /// Sets the old access data when promoting the access mode.
