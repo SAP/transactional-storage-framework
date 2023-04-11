@@ -17,6 +17,11 @@ keywords = ["async", "concurrent", "database"]
 scc = "1.4"
 
 [dev-dependencies]
+criterion = { version = "0.4", features = ["async_futures"] }
 futures = "0.3"
 static_assertions = "1.1"
 tokio = { version = "1.2", features = ["full"] }
+
+[[bench]]
+name = "access_controller"
+harness = false

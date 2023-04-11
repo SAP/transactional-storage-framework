@@ -16,6 +16,21 @@ use std::time::Instant;
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
 /// value.
 ///
+/// [`AccessController`] provides an essential database object access control method for database
+/// systems using multi-version concurrency control or read-write locks. As long as a datbase
+/// object can be uniquely identified through [`ToObjectID`], read or write access to the object
+/// can be fully transactionally controlled via [`AccessController`].
+///
+/// [`AccessController`] exactly acts as a transactional [`std::sync::RwLock`] when only
+/// [`AccessController::share`] and [`AccessController::lock`] are used; those two methods are
+/// suitable for lock-based concurrency control protocols.
+///
+/// In addition to the aforementioned methods, [`AccessController::create`] and
+/// [`AccessController::delete`] can be used when the database system needs to denote the lifetime
+/// of a database object; this information is crucial for multi-version concurrency control
+/// protocols since the database system must not let a database object be read by readers that
+/// started before the creation or after the deletion of the object.
+///
 /// # Examples
 ///
 /// ```
@@ -203,13 +218,14 @@ struct WaitQueue<S: Sequencer>(VecDeque<Request<S>>);
 impl<S: Sequencer> AccessController<S> {
     /// Tries to gain read access to the database object.
     ///
-    /// This method is used by a database system implementing multi-version concurrency control. It
+    /// This method is used by a database system using multi-version concurrency control. It
     /// compares the sequencer instant and transaction information in the supplied [`Snapshot`]
     /// with the creation or deletion sequencer instant, or the owner contained in the access
     /// control data, and then returns `true` if the [`Snapshot`] is eligible to read the database
     /// object. If the creation or deletion sequencer instant cannot be immediately read, e.g., the
-    /// transaction is being committed at the moment, it may wait for the credible sequencer
-    /// instant value to be determined until the specified timeout is reached.
+    /// transaction is being committed at the moment, it may wait for the sequencer instant value
+    /// corresponding to the transaction commit operation to be determined until the specified
+    /// timeout is reached.
     ///
     /// This method just returns `true` if no access control is defined for the database object,
     /// therefore any access control mapping must be removed only if the corresponding database
