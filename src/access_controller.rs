@@ -24,8 +24,7 @@ use std::time::Instant;
 /// // `O` represents a database object type.
 /// struct O(usize);
 ///
-/// // `ToObjectID` is implemented for `O` so that `AccessController` can derive the identifier
-/// // of a database object represented by an instace of `O`.
+/// // `ToObjectID` is implemented for `O`.
 /// impl ToObjectID for O {
 ///     fn to_object_id(&self) -> usize {
 ///         self.0
@@ -43,8 +42,8 @@ use std::time::Instant;
 ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
 ///     journal.submit();
 ///
-///     // The transaction writes its own commit instant value onto the database object, and only
-///     // future readers and writers can gain access to the database object.
+///     // The transaction writes its own commit instant value onto the access data of the database
+///     // object, and future readers and writers will be able to gain access to it.
 ///     assert!(transaction.commit().await.is_ok());
 ///
 ///     let snapshot = database.snapshot();
@@ -53,13 +52,15 @@ use std::time::Instant;
 ///     let transaction_succ = database.transaction();
 ///     let mut journal_succ = transaction_succ.journal();
 ///
-///     // The transaction owns the database object to prevent any other transactions to get write
-///     // access to it.
+///     // The transaction will own the database object to prevent any other transactions from
+///     // gaining write access to it.
 ///     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
 ///     assert_eq!(journal_succ.submit(), 1);
 ///
 ///     let transaction_fail = database.transaction();
 ///     let mut journal_fail = transaction_fail.journal();
+
+///     // Another transaction fails to take ownership of the database object.
 ///     assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
 ///
 ///     let mut journal_delete = transaction_succ.journal();
@@ -68,8 +69,8 @@ use std::time::Instant;
 ///     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
 ///     assert_eq!(journal_delete.submit(), 2);
 ///
-///     // The transaction deleted the database object by writing its commit instant value onto
-///     // the database object.
+///     // The transaction deletes the database object by writing its commit instant value onto
+///     // the access data associated with the database object.
 ///     assert!(transaction_succ.commit().await.is_ok());
 ///
 ///     // Further access to the database object is prohibited.
@@ -91,8 +92,7 @@ pub trait ToObjectID {
 /// An owner of a database object.
 #[derive(Debug)]
 pub(super) struct Owner<S: Sequencer> {
-    /// The address of the owner [`JournalAnchor`](super::journal::Anchor) is used as its
-    /// identification.
+    /// The journal is directly pointed to by [`Owner`].
     anchor: ebr::Arc<JournalAnchor<S>>,
 }
 
@@ -109,59 +109,64 @@ pub(super) enum ObjectState<S: Sequencer> {
     Deleted(S::Instant),
 }
 
-/// Locking modes.
+/// Locking modes of a database object.
+///
+/// If the [`Database`](super::Database) implements multi-version concurrency control, read access
+/// to a database object is not controlled by the lock mode.
 #[derive(Debug)]
 pub(super) enum LockMode<S: Sequencer> {
     /// The database object is prepared to be created.
     Created(Owner<S>),
 
-    /// The database object is prepared to be created, but there are waiting transactions.
+    /// The database object is prepared to be created, and there can be transactions trying to
+    /// create the same database object.
     CreatedAwaitable(Box<ExclusiveAwaitable<S>>),
 
-    /// The database object is locked shared by a single transaction.
+    /// A single transaction owns the database object to prevent it from being modified .
     Shared(Owner<S>),
 
-    /// The database object which may not be visible to some readers is shared by one or more
-    /// transactions.
+    /// One of more transactions share ownership of the database object to prevent it from being
+    /// modified, and there can be transactions trying to gain access to the database object.
     SharedAwaitable(Box<SharedAwaitable<S>>),
 
     /// The database object is locked by the transaction.
     Exclusive(Owner<S>),
 
-    /// The database object which may not be visible to some readers is locked by the transaction.
+    /// The database object is locked by the transaction, and there can be transactions trying to
+    /// gain access to the database object.
     ExclusiveAwaitable(Box<ExclusiveAwaitable<S>>),
 
     /// The database object is being deleted by the transaction.
     Deleted(Owner<S>),
 
-    /// The database object which may not be visible to some readers is being deleted by the
-    /// transaction.
+    /// The database object is being deleted by the transaction, and there can be transactions
+    /// trying to gain access to the database object.
     DeletedAwaitable(Box<ExclusiveAwaitable<S>>),
 }
 
 /// Types of access requests.
 ///
-/// The instant when the request was made is stored in it, and the value is used by the deadlock
-/// detector.
+/// The wall-clock time instant when the request was made is stored in it, and the value is used by
+/// the deadlock detector.
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
-    /// A request to create a database object.
+    /// Create a database object.
     Create(Instant, Owner<S>),
 
-    /// A request to acquire a shared lock on the database object.
+    /// Acquire a shared lock on a database object.
     Share(Instant, Owner<S>),
 
-    /// A request to acquire the exclusive lock on the database object.
+    /// Acquire the exclusive lock on a database object.
     Lock(Instant, Owner<S>),
 
-    /// A request to acquire the exclusive lock on the database object for deletion.
+    /// Acquire the exclusive lock on a database object to delete it.
     Delete(Instant, Owner<S>),
 }
 
 /// Shared access control information container for a database object.
 #[derive(Debug)]
 pub(super) struct SharedAwaitable<S: Sequencer> {
-    /// The instant when the database object was created.
+    /// The logical timestamp when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
@@ -176,7 +181,7 @@ pub(super) struct SharedAwaitable<S: Sequencer> {
 /// Exclusive access control information container for a database object.
 #[derive(Debug)]
 pub(super) struct ExclusiveAwaitable<S: Sequencer> {
-    /// The instant when the database object was created.
+    /// The logical timestamp when the database object was created.
     ///
     /// The value is equal to `S::Instant::default()` if the database object is globally visible.
     creation_instant: S::Instant,
@@ -184,7 +189,7 @@ pub(super) struct ExclusiveAwaitable<S: Sequencer> {
     /// The only owner.
     owner: Owner<S>,
 
-    /// Access data before promotion.
+    /// Access control data before promotion.
     prior_state: Option<Box<LockMode<S>>>,
 
     /// The wait queue of the database object.
@@ -197,16 +202,25 @@ struct WaitQueue<S: Sequencer>(VecDeque<Request<S>>);
 
 impl<S: Sequencer> AccessController<S> {
     /// Tries to gain read access to the database object.
-    //
-    // This method returns `true` if no access control is defined for the database object,
-    // therefore any access control mapping must be removed only if the corresponding database
-    // object is always visible to all the readers, or it has become unreachable to readers.
+    ///
+    /// This method is used by a database system implementing multi-version concurrency control. It
+    /// compares the sequencer instant and transaction information in the supplied [`Snapshot`]
+    /// with the creation or deletion sequencer instant, or the owner contained in the access
+    /// control data, and then returns `true` if the [`Snapshot`] is eligible to read the database
+    /// object. If the creation or deletion sequencer instant cannot be immediately read, e.g., the
+    /// transaction is being committed at the moment, it may wait for the credible sequencer
+    /// instant value to be determined until the specified timeout is reached.
+    ///
+    /// This method just returns `true` if no access control is defined for the database object,
+    /// therefore any access control mapping must be removed only if the corresponding database
+    /// object can always be visible to all the readers, or the database object has become totally
+    /// unreachable to readers after being logically deleted.
     ///
     /// # Errors
     ///
     /// An [`Error`] is returned if the specified deadline was reached or memory allocation failed
     /// when pushing a [`Waker`](std::task::Waker) into the owner
-    /// [`Transaction`](super::Transaction).
+    /// [`Transaction`](super::Transaction) if the transaction is being committed.
     ///
     /// # Examples
     ///
@@ -287,8 +301,7 @@ impl<S: Sequencer> AccessController<S> {
                                         .grant_read_access(snapshot, deadline)
                                         .map(|r| !r)
                                 } else {
-                                    // The database object was created after the reader had
-                                    // started.
+                                    // The deletion cannot be seen.
                                     Ok(false)
                                 }
                             }

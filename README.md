@@ -100,8 +100,7 @@ use sap_tsf::{Database, ToObjectID};
 struct O(usize);
 
 
-// `ToObjectID` is implemented for `O` so that `AccessController` can derive the
-// identifier of a database object represented by an instace of `O`.
+// `ToObjectID` is implemented for `O`.
 impl ToObjectID for O {
     fn to_object_id(&self) -> usize {
         self.0
@@ -120,8 +119,8 @@ async {
 
     journal.submit();
 
-    // The transaction writes its own commit instant value onto the database object, and only
-    // future readers and writers can gain access to the database object.
+    // The transaction writes its own commit instant value onto the access data of the database
+    // object, and future readers and writers will be able to gain access to the database object.
     assert!(transaction.commit().await.is_ok());
 
     let snapshot = database.snapshot();
@@ -130,24 +129,25 @@ async {
     let transaction_succ = database.transaction();
     let mut journal_succ = transaction_succ.journal();
 
-    // The transaction owns the database object to prevent any other transactions to get write
-    // access to it.
+    // The transaction will own database object to prevent any other transactions from gaining
+    // write access to it.
     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
     assert_eq!(journal_succ.submit(), 1);
 
     let transaction_fail = database.transaction();
     let mut journal_fail = transaction_fail.journal();
+
+    // Another transaction fails to take ownership of the database object.
     assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
 
     let mut journal_delete = transaction_succ.journal();
 
     // The transaction will delete the database object.
     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
-
     assert_eq!(journal_delete.submit(), 2);
  
-    // The transaction deleted the database object by writing its commit instant value onto
-    // the database object.
+    // The transaction deletes the database object by writing its commit instant value onto
+    // the access data associated with the database object.
     assert!(transaction_succ.commit().await.is_ok());
 
     // Further access to the database object is prohibited.
