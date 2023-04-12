@@ -251,12 +251,13 @@ impl<S: Sequencer> Anchor<S> {
         self.is_rolled_back()
     }
 
-    /// Checks if the reader represented by the [`Snapshot`] can read changes made by the [`Journal`].
+    /// Checks if the reader represented by the [`Snapshot`] can read changes made by the
+    /// [`Journal`].
     ///
     /// # Errors
     ///
-    /// An [`AwaitEOT`] is returned if the reader might be able to read the database object if the
-    /// transaction is committed.
+    /// An [`AwaitEOT`] is returned if the reader might be able to read the database object since
+    /// the transaction is being committed.
     pub(super) fn grant_read_access<'d>(
         &self,
         snapshot: &'d Snapshot<'_, '_, '_, S>,
@@ -307,8 +308,7 @@ impl<S: Sequencer> Anchor<S> {
         Ok(false)
     }
 
-    /// Checks if the supplied [`Journal`] is able to update a piece of data created by the
-    /// [`Journal`] represented by `self`.
+    /// Checks if the supplied [`Journal`] is able to modify any outcomes of `self`.
     ///
     /// Returns the relationship between the requester and `self`.
     pub(super) fn grant_write_access(&self, anchor: &Anchor<S>) -> Relationship<S> {
