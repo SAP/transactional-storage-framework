@@ -406,7 +406,6 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(true);
             }
         };
-        entry.get_mut().cleanup_state();
 
         let result = Self::try_create(entry.get_mut(), journal.anchor(), deadline)?;
         if let Some(result) = result {
@@ -480,7 +479,6 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(true);
             }
         };
-        entry.get_mut().cleanup_state();
 
         let result = Self::try_share(entry.get_mut(), journal.anchor(), deadline)?;
         if let Some(result) = result {
@@ -566,7 +564,6 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(true);
             }
         };
-        entry.get_mut().cleanup_state();
 
         let result = Self::try_lock(entry.get_mut(), journal.anchor(), deadline)?;
         if let Some(result) = result {
@@ -655,7 +652,6 @@ impl<S: Sequencer> AccessController<S> {
                 return Ok(true);
             }
         };
-        entry.get_mut().cleanup_state();
 
         let result = Self::try_delete(entry.get_mut(), journal.anchor(), deadline)?;
         if let Some(result) = result {
@@ -887,6 +883,7 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
+        object_state.cleanup_state();
         if let ObjectState::Owned(ownership) = object_state {
             let (owner, awaitable) = match ownership {
                 Ownership::Created(owner) => (owner, false),
@@ -942,97 +939,70 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
-        match object_state {
-            ObjectState::Owned(ownership) => {
-                let is_created = matches!(ownership, Ownership::Created(_));
-                let is_deleted = matches!(ownership, Ownership::Deleted(_));
-                match ownership {
-                    Ownership::Created(owner)
-                    | Ownership::Locked(owner)
-                    | Ownership::Deleted(owner) => {
-                        // The state of the owner needs to be checked.
-                        match owner.grant_write_access(new_owner) {
-                            Relationship::Committed(commit_instant) => {
-                                if is_deleted {
-                                    return Err(Error::SerializationFailure);
-                                }
-                                *ownership = if is_created {
-                                    Ownership::ProtectedAwaitable(
-                                        SharedAwaitable::with_instant_and_owner(
-                                            commit_instant,
-                                            Owner::new(new_owner),
-                                        ),
-                                    )
-                                } else {
-                                    Ownership::Protected(Owner::new(new_owner))
-                                };
-                                return Ok(Some(true));
+        loop {
+            object_state.cleanup_state();
+            match object_state {
+                ObjectState::Owned(ownership) => {
+                    match ownership {
+                        Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
+                            return Self::try_share_exclusively_owned(
+                                ownership, new_owner, deadline,
+                            );
+                        }
+                        Ownership::CreatedAwaitable(_)
+                        | Ownership::LockedAwaitable(_)
+                        | Ownership::DeletedAwaitable(_) => {
+                            let (result_available, result_or_wait) =
+                                Self::try_share_exclusive_awaitable(
+                                    ownership, new_owner, deadline,
+                                )?;
+                            if result_available {
+                                return Ok(Some(result_or_wait));
+                            } else if result_or_wait {
+                                return Ok(None);
                             }
-                            Relationship::RolledBack => {
-                                // The owner was rolled back.
-                                *ownership = Ownership::Protected(Owner::new(new_owner));
-                                return Ok(Some(true));
-                            }
-                            Relationship::Linearizable => {
+                        }
+                        Ownership::Protected(owner) => {
+                            if let Relationship::Linearizable = owner.grant_write_access(new_owner)
+                            {
                                 // The transaction already owns the database object.
                                 return Ok(Some(false));
                             }
-                            Relationship::Concurrent => {
-                                // Competing with other operations in the same transaction is
-                                // considered to be a deadlock.
-                                return Err(Error::Deadlock);
-                            }
-                            Relationship::Unknown => {
-                                if deadline.is_some() {
-                                    *ownership = Self::augment_wait_queue(
-                                        is_created,
-                                        is_deleted,
-                                        owner.clone(),
-                                    );
-                                    return Ok(None);
-                                }
-                            }
-                        };
-                    }
-                    Ownership::CreatedAwaitable(_)
-                    | Ownership::LockedAwaitable(_)
-                    | Ownership::DeletedAwaitable(_) => {
-                        return Self::try_share_exclusive_awaitable(ownership, new_owner, deadline);
-                    }
-                    Ownership::Protected(owner) => {
-                        if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
-                            // The transaction already owns the database object.
-                            return Ok(Some(false));
-                        }
-                        let mut shared_awaitable = SharedAwaitable::with_owner(owner.clone());
-                        shared_awaitable.owner_set.insert(Owner::new(new_owner));
-                        *ownership = Ownership::ProtectedAwaitable(shared_awaitable);
-                        return Ok(Some(true));
-                    }
-                    Ownership::ProtectedAwaitable(shared_awaitable) => {
-                        if shared_awaitable.owner_set.iter().any(|o| {
-                            matches!(o.grant_write_access(new_owner), Relationship::Linearizable)
-                        }) {
-                            // The transaction already owns the database object.
-                            return Ok(Some(false));
-                        } else if shared_awaitable.wait_queue.is_empty() {
+                            let mut shared_awaitable = SharedAwaitable::with_owner(owner.clone());
                             shared_awaitable.owner_set.insert(Owner::new(new_owner));
+                            *ownership = Ownership::ProtectedAwaitable(shared_awaitable);
                             return Ok(Some(true));
-                        } else if deadline.is_some() {
-                            return Ok(None);
+                        }
+                        Ownership::ProtectedAwaitable(shared_awaitable) => {
+                            if shared_awaitable.owner_set.iter().any(|o| {
+                                matches!(
+                                    o.grant_write_access(new_owner),
+                                    Relationship::Linearizable
+                                )
+                            }) {
+                                // The transaction already owns the database object.
+                                return Ok(Some(false));
+                            } else if shared_awaitable.wait_queue.is_empty() {
+                                shared_awaitable.owner_set.insert(Owner::new(new_owner));
+                                return Ok(Some(true));
+                            } else if deadline.is_some() {
+                                return Ok(None);
+                            }
+                            break;
                         }
                     }
                 }
-            }
-            ObjectState::Created(instant) => {
-                // The database object is not owned or locked.
-                *object_state = ObjectState::Owned(Ownership::ProtectedAwaitable(
-                    SharedAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
-                ));
-                return Ok(Some(true));
-            }
-            ObjectState::Deleted(_) => {
-                // Already deleted.
+                ObjectState::Created(instant) => {
+                    // The database object is not owned or locked.
+                    *object_state = ObjectState::Owned(Ownership::ProtectedAwaitable(
+                        SharedAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                    ));
+                    return Ok(Some(true));
+                }
+                ObjectState::Deleted(_) => {
+                    // Already deleted.
+                    break;
+                }
             }
         }
         Err(Error::SerializationFailure)
@@ -1046,65 +1016,78 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
-        match object_state {
-            ObjectState::Owned(ownership) => match ownership {
-                Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
-                    return Self::try_lock_exclusively_owned(ownership, new_owner, deadline);
-                }
-                Ownership::CreatedAwaitable(_)
-                | Ownership::LockedAwaitable(_)
-                | Ownership::DeletedAwaitable(_) => {
-                    return Self::try_lock_exclusive_awaitable(ownership, new_owner, deadline);
-                }
-                Ownership::Protected(owner) => {
-                    if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
-                        // It is possible to promote the access permission in this transaction.
-                        let mut exclusive_awaitable =
-                            ExclusiveAwaitable::with_owner(Owner::new(new_owner));
-                        exclusive_awaitable.set_prior_state(Ownership::Protected(owner.clone()));
-                        *ownership = Ownership::LockedAwaitable(exclusive_awaitable);
-                        return Ok(Some(true));
-                    } else if owner.is_terminated() {
-                        *ownership = Ownership::Locked(Owner::new(new_owner));
-                        return Ok(Some(true));
-                    } else if deadline.is_some() {
-                        *ownership = Ownership::ProtectedAwaitable(SharedAwaitable::with_owner(
-                            owner.clone(),
-                        ));
-                        return Ok(None);
+        loop {
+            object_state.cleanup_state();
+            match object_state {
+                ObjectState::Owned(ownership) => match ownership {
+                    Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
+                        return Self::try_lock_exclusively_owned(ownership, new_owner, deadline);
                     }
-                }
-                Ownership::ProtectedAwaitable(shared_awaitable) => {
-                    if shared_awaitable.cleanup_inactive_owners() {
-                        if shared_awaitable.creation_instant == S::Instant::default() {
-                            *ownership = Ownership::Locked(Owner::new(new_owner));
-                        } else {
-                            *ownership = Ownership::LockedAwaitable(
-                                ExclusiveAwaitable::with_instant_and_owner(
-                                    shared_awaitable.creation_instant,
-                                    Owner::new(new_owner),
-                                ),
-                            );
+                    Ownership::CreatedAwaitable(_)
+                    | Ownership::LockedAwaitable(_)
+                    | Ownership::DeletedAwaitable(_) => {
+                        let (result_available, result_or_wait) =
+                            Self::try_lock_exclusive_awaitable(ownership, new_owner, deadline)?;
+                        if result_available {
+                            return Ok(Some(result_or_wait));
+                        } else if result_or_wait {
+                            return Ok(None);
                         }
-                        return Ok(Some(true));
-                    } else if let Some(exclusive_awaitable) =
-                        shared_awaitable.try_promote_to_exclusive(new_owner)
-                    {
-                        *ownership = Ownership::LockedAwaitable(exclusive_awaitable);
-                        return Ok(Some(true));
-                    } else if deadline.is_some() {
-                        return Ok(None);
                     }
+                    Ownership::Protected(owner) => {
+                        if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
+                            // It is possible to promote the access permission in this transaction.
+                            let mut exclusive_awaitable =
+                                ExclusiveAwaitable::with_owner(Owner::new(new_owner));
+                            exclusive_awaitable
+                                .set_prior_state(Ownership::Protected(owner.clone()));
+                            *ownership = Ownership::LockedAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
+                        } else if owner.is_terminated() {
+                            *ownership = Ownership::Locked(Owner::new(new_owner));
+                            return Ok(Some(true));
+                        } else if deadline.is_some() {
+                            *ownership = Ownership::ProtectedAwaitable(
+                                SharedAwaitable::with_owner(owner.clone()),
+                            );
+                            return Ok(None);
+                        }
+                        break;
+                    }
+                    Ownership::ProtectedAwaitable(shared_awaitable) => {
+                        if shared_awaitable.cleanup_inactive_owners() {
+                            if shared_awaitable.creation_instant == S::Instant::default() {
+                                *ownership = Ownership::Locked(Owner::new(new_owner));
+                            } else {
+                                *ownership = Ownership::LockedAwaitable(
+                                    ExclusiveAwaitable::with_instant_and_owner(
+                                        shared_awaitable.creation_instant,
+                                        Owner::new(new_owner),
+                                    ),
+                                );
+                            }
+                            return Ok(Some(true));
+                        } else if let Some(exclusive_awaitable) =
+                            shared_awaitable.try_promote_to_exclusive(new_owner)
+                        {
+                            *ownership = Ownership::LockedAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
+                        } else if deadline.is_some() {
+                            return Ok(None);
+                        }
+                        break;
+                    }
+                },
+                ObjectState::Created(instant) => {
+                    *object_state = ObjectState::Owned(Ownership::LockedAwaitable(
+                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                    ));
+                    return Ok(Some(true));
                 }
-            },
-            ObjectState::Created(instant) => {
-                *object_state = ObjectState::Owned(Ownership::LockedAwaitable(
-                    ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
-                ));
-                return Ok(Some(true));
-            }
-            ObjectState::Deleted(_) => {
-                // Already deleted.
+                ObjectState::Deleted(_) => {
+                    // Already deleted.
+                    break;
+                }
             }
         }
         Err(Error::SerializationFailure)
@@ -1118,80 +1101,151 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
-        match object_state {
-            ObjectState::Owned(ownership) => match ownership {
-                Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
-                    return Self::try_delete_exclusively_owned(ownership, new_owner, deadline);
-                }
-                Ownership::CreatedAwaitable(_)
-                | Ownership::LockedAwaitable(_)
-                | Ownership::DeletedAwaitable(_) => {
-                    return Self::try_delete_exclusive_awaitable(ownership, new_owner, deadline);
-                }
-                Ownership::Protected(owner) => {
-                    if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
-                        // It is possible to promote the access permission in this transaction.
-                        let mut exclusive_awaitable =
-                            ExclusiveAwaitable::with_owner(Owner::new(new_owner));
-                        exclusive_awaitable.set_prior_state(Ownership::Protected(owner.clone()));
-                        *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
-                        return Ok(Some(true));
-                    } else if owner.is_terminated() {
-                        *ownership = Ownership::Deleted(Owner::new(new_owner));
-                        return Ok(Some(true));
-                    } else if deadline.is_some() {
-                        // Allocate a wait queue and retry.
-                        *ownership = Ownership::ProtectedAwaitable(SharedAwaitable::with_owner(
-                            owner.clone(),
-                        ));
-                        return Ok(None);
+        loop {
+            object_state.cleanup_state();
+            match object_state {
+                ObjectState::Owned(ownership) => match ownership {
+                    Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
+                        return Self::try_delete_exclusively_owned(ownership, new_owner, deadline);
                     }
-                }
-                Ownership::ProtectedAwaitable(shared_awaitable) => {
-                    if shared_awaitable.cleanup_inactive_owners() {
-                        if shared_awaitable.creation_instant == S::Instant::default() {
-                            *ownership = Ownership::Deleted(Owner::new(new_owner));
-                        } else {
-                            *ownership = Ownership::DeletedAwaitable(
-                                ExclusiveAwaitable::with_instant_and_owner(
-                                    shared_awaitable.creation_instant,
-                                    Owner::new(new_owner),
-                                ),
-                            );
+                    Ownership::CreatedAwaitable(_)
+                    | Ownership::LockedAwaitable(_)
+                    | Ownership::DeletedAwaitable(_) => {
+                        let (result_available, result_or_wait) =
+                            Self::try_delete_exclusive_awaitable(ownership, new_owner, deadline)?;
+                        if result_available {
+                            return Ok(Some(result_or_wait));
+                        } else if result_or_wait {
+                            return Ok(None);
                         }
-                        return Ok(Some(true));
                     }
-                    if let Some(exclusive_awaitable) =
-                        shared_awaitable.try_promote_to_exclusive(new_owner)
-                    {
-                        *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
-                        return Ok(Some(true));
-                    } else if deadline.is_some() {
-                        return Ok(None);
+                    Ownership::Protected(owner) => {
+                        if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
+                            // It is possible to promote the access permission in this transaction.
+                            let mut exclusive_awaitable =
+                                ExclusiveAwaitable::with_owner(Owner::new(new_owner));
+                            exclusive_awaitable
+                                .set_prior_state(Ownership::Protected(owner.clone()));
+                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
+                        } else if owner.is_terminated() {
+                            *ownership = Ownership::Deleted(Owner::new(new_owner));
+                            return Ok(Some(true));
+                        } else if deadline.is_some() {
+                            // Allocate a wait queue and retry.
+                            *ownership = Ownership::ProtectedAwaitable(
+                                SharedAwaitable::with_owner(owner.clone()),
+                            );
+                            return Ok(None);
+                        }
+                        break;
                     }
+                    Ownership::ProtectedAwaitable(shared_awaitable) => {
+                        if shared_awaitable.cleanup_inactive_owners() {
+                            if shared_awaitable.creation_instant == S::Instant::default() {
+                                *ownership = Ownership::Deleted(Owner::new(new_owner));
+                            } else {
+                                *ownership = Ownership::DeletedAwaitable(
+                                    ExclusiveAwaitable::with_instant_and_owner(
+                                        shared_awaitable.creation_instant,
+                                        Owner::new(new_owner),
+                                    ),
+                                );
+                            }
+                            return Ok(Some(true));
+                        }
+                        if let Some(exclusive_awaitable) =
+                            shared_awaitable.try_promote_to_exclusive(new_owner)
+                        {
+                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                            return Ok(Some(true));
+                        } else if deadline.is_some() {
+                            return Ok(None);
+                        }
+                        break;
+                    }
+                },
+                ObjectState::Created(instant) => {
+                    *object_state = ObjectState::Owned(Ownership::DeletedAwaitable(
+                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                    ));
+                    return Ok(Some(true));
                 }
-            },
-            ObjectState::Created(instant) => {
-                *object_state = ObjectState::Owned(Ownership::DeletedAwaitable(
-                    ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
-                ));
-                return Ok(Some(true));
-            }
-            ObjectState::Deleted(_) => {
-                // Already deleted.
+                ObjectState::Deleted(_) => {
+                    // Already deleted.
+                    break;
+                }
             }
         }
         Err(Error::SerializationFailure)
     }
 
-    /// Takes shared ownership of the exclusively owned and `awaitable` database object.
+    /// Takes shared ownership of the exclusively owned database object.
     ///
     /// Returns `Ok(None)` if the result will be out after waiting.
-    fn try_share_exclusive_awaitable(
+    fn try_share_exclusively_owned(
         ownership: &mut Ownership<S>,
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
+        let (owner, is_created, is_deleted) = match ownership {
+            Ownership::Created(owner) => (owner, true, false),
+            Ownership::Locked(owner) => (owner, false, false),
+            Ownership::Deleted(owner) => (owner, false, true),
+            _ => return Err(Error::WrongParameter),
+        };
+
+        // The state of the owner needs to be checked.
+        match owner.grant_write_access(new_owner) {
+            Relationship::Committed(commit_instant) => {
+                if is_deleted {
+                    return Err(Error::SerializationFailure);
+                }
+                *ownership = if is_created {
+                    Ownership::ProtectedAwaitable(SharedAwaitable::with_instant_and_owner(
+                        commit_instant,
+                        Owner::new(new_owner),
+                    ))
+                } else {
+                    Ownership::Protected(Owner::new(new_owner))
+                };
+                Ok(Some(true))
+            }
+            Relationship::RolledBack => {
+                // The owner was rolled back.
+                *ownership = Ownership::Protected(Owner::new(new_owner));
+                Ok(Some(true))
+            }
+            Relationship::Linearizable => {
+                // The transaction already owns the database object.
+                Ok(Some(false))
+            }
+            Relationship::Concurrent => {
+                // Competing with other operations in the same transaction is
+                // considered to be a deadlock.
+                Err(Error::Deadlock)
+            }
+            Relationship::Unknown => {
+                if deadline.is_some() {
+                    *ownership = Self::augment_wait_queue(is_created, is_deleted, owner.clone());
+                    Ok(None)
+                } else {
+                    // No deadline is specified.
+                    Err(Error::SerializationFailure)
+                }
+            }
+        }
+    }
+
+    /// Takes shared ownership of the exclusively owned and `awaitable` database object.
+    ///
+    /// Returns `(true, result)` if the result is available, `(false, true)` if the result will be
+    /// out after waiting, or `(false, false)` if the operation needs to be retried.
+    fn try_share_exclusive_awaitable(
+        ownership: &mut Ownership<S>,
+        new_owner: &ebr::Arc<JournalAnchor<S>>,
+        deadline: Option<Instant>,
+    ) -> Result<(bool, bool), Error> {
         let (exclusive_awaitable, is_created, is_deleted) =
             Self::exclusive_awaitable_access_defails(ownership)?;
 
@@ -1213,20 +1267,22 @@ impl<S: Sequencer> AccessController<S> {
                             creation_instant,
                             Owner::new(new_owner),
                         ));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::RolledBack => {
                 // The owner was rolled back.
-                debug_assert!(exclusive_awaitable.prior_ownership.is_none());
+                if exclusive_awaitable.prior_ownership.is_some() {
+                    return Ok((false, false));
+                }
                 if exclusive_awaitable.wait_queue.is_empty() {
                     *ownership = Ownership::Protected(Owner::new(new_owner));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::Linearizable => {
                 // The transaction already has the exclusive ownership.
-                return Ok(Some(false));
+                return Ok((true, false));
             }
             Relationship::Concurrent => {
                 // Competing with other operations in the same transaction is considered to be a
@@ -1237,7 +1293,7 @@ impl<S: Sequencer> AccessController<S> {
         };
 
         if deadline.is_some() {
-            Ok(None)
+            Ok((false, true))
         } else {
             // No deadline is specified.
             Err(Error::SerializationFailure)
@@ -1304,12 +1360,13 @@ impl<S: Sequencer> AccessController<S> {
 
     /// Takes or exclusive ownership of the exclusively owned `awaitable` database object.
     ///
-    /// Returns `Ok(None)` if the result will be out after waiting.
+    /// Returns `(true, result)` if the result is available, `(false, true)` if the result will be
+    /// out after waiting, or `(false, false)` if the operation needs to be retried.
     fn try_lock_exclusive_awaitable(
         ownership: &mut Ownership<S>,
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
-    ) -> Result<Option<bool>, Error> {
+    ) -> Result<(bool, bool), Error> {
         let (exclusive_awaitable, is_created, is_deleted) =
             Self::exclusive_awaitable_access_defails(ownership)?;
 
@@ -1331,20 +1388,22 @@ impl<S: Sequencer> AccessController<S> {
                             creation_instant,
                             Owner::new(new_owner),
                         ));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::RolledBack => {
                 // The owner was rolled back.
-                debug_assert!(exclusive_awaitable.prior_ownership.is_none());
+                if exclusive_awaitable.prior_ownership.is_some() {
+                    return Ok((false, false));
+                }
                 if exclusive_awaitable.wait_queue.is_empty() {
                     *ownership = Ownership::Locked(Owner::new(new_owner));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::Linearizable => {
                 // Exclusive ownership is weaker than ownership for creation or deletion.
-                return Ok(Some(false));
+                return Ok((true, false));
             }
             Relationship::Concurrent => {
                 // Competing with other operations in the same transaction is considered to be a
@@ -1355,7 +1414,7 @@ impl<S: Sequencer> AccessController<S> {
         };
 
         if deadline.is_some() {
-            Ok(None)
+            Ok((false, true))
         } else {
             // No deadline is specified.
             Err(Error::SerializationFailure)
@@ -1434,12 +1493,13 @@ impl<S: Sequencer> AccessController<S> {
 
     /// Takes exclusive ownership of the exclusively owned `awaitable` database object to delete it.
     ///
-    /// Returns `Ok(None)` if the result will be out after waiting.
+    /// Returns `(true, result)` if the result is available, `(false, true)` if the result will be
+    /// out after waiting, or `(false, false)` if the operation needs to be retried.
     fn try_delete_exclusive_awaitable(
         ownership: &mut Ownership<S>,
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
-    ) -> Result<Option<bool>, Error> {
+    ) -> Result<(bool, bool), Error> {
         let (exclusive_awaitable, is_created, is_deleted) =
             Self::exclusive_awaitable_access_defails(ownership)?;
 
@@ -1461,21 +1521,23 @@ impl<S: Sequencer> AccessController<S> {
                             creation_instant,
                             Owner::new(new_owner),
                         ));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::RolledBack => {
                 // The owner was rolled back.
-                debug_assert!(exclusive_awaitable.prior_ownership.is_none());
+                if exclusive_awaitable.prior_ownership.is_some() {
+                    return Ok((false, false));
+                }
                 if exclusive_awaitable.wait_queue.is_empty() {
                     *ownership = Ownership::Deleted(Owner::new(new_owner));
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::Linearizable => {
                 if is_deleted {
                     // The transaction owns the database object to delete it.
-                    return Ok(Some(false));
+                    return Ok((true, false));
                 } else if exclusive_awaitable.wait_queue.is_empty() {
                     // The database object is locked by the transaction and the wait queue is
                     // empty, therefore the journal is eligible to promote the access mode.
@@ -1493,7 +1555,7 @@ impl<S: Sequencer> AccessController<S> {
                             .set_prior_state(Ownership::LockedAwaitable(old_exclusive_awaitable));
                     }
                     *ownership = Ownership::DeletedAwaitable(new_exclusive_awaitable);
-                    return Ok(Some(true));
+                    return Ok((true, true));
                 }
             }
             Relationship::Concurrent => {
@@ -1505,7 +1567,7 @@ impl<S: Sequencer> AccessController<S> {
         };
 
         if deadline.is_some() {
-            Ok(None)
+            Ok((false, true))
         } else {
             // No deadline is specified.
             Err(Error::SerializationFailure)
@@ -1803,7 +1865,8 @@ impl<S: Sequencer> SharedAwaitable<S> {
                 o.grant_write_access(new_owner),
                 Relationship::<S>::Linearizable
             )
-        }) {
+        }) || self.owner_set.is_empty()
+        {
             // One of the owners is not compatible.
             return None;
         }
@@ -1974,7 +2037,11 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Barrier;
 
     static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
 
@@ -2546,5 +2613,63 @@ mod test {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn parallel_mutex() {
+        let num_tasks = 1;
+        let num_operations = 256;
+        let barrier = Arc::new(Barrier::new(num_tasks));
+        let database = Arc::new(Database::default());
+        let data = Arc::new(AtomicUsize::default());
+        let mut task_handles = Vec::with_capacity(num_tasks);
+        for _ in 0..num_tasks {
+            let barrier_clone = barrier.clone();
+            let database_clone = database.clone();
+            let data_clone = data.clone();
+            task_handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                for i in 0..num_operations {
+                    let transaction = database_clone.transaction();
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        database_clone
+                            .access_controller()
+                            .lock(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                            .await,
+                        Ok(true)
+                    );
+                    assert_eq!(journal.submit(), 1);
+                    let data_current = data_clone.load(Relaxed);
+                    data_clone.store(data_current + 1, Relaxed);
+                    if i % 2 == 0 {
+                        assert!(transaction.commit().await.is_ok());
+                    } else {
+                        transaction.rollback().await;
+                    }
+
+                    let transaction = database_clone.transaction();
+                    let mut journal = transaction.journal();
+                    assert_eq!(
+                        database_clone
+                            .access_controller()
+                            .share(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                            .await,
+                        Ok(true)
+                    );
+                    assert_eq!(journal.submit(), 1);
+                    assert!(data_clone.load(Relaxed) >= data_current);
+                    if i % 2 == 1 {
+                        assert!(transaction.commit().await.is_ok());
+                    } else {
+                        transaction.rollback().await;
+                    }
+                }
+            }));
+        }
+        for r in futures::future::join_all(task_handles).await {
+            assert!(r.is_ok());
+        }
+        assert_eq!(data.load(Relaxed), num_operations * num_tasks);
     }
 }
