@@ -32,8 +32,6 @@ fn create(c: &mut Criterion) {
         BenchmarkId::new("AccessController: create", size),
         &size,
         |b, &s| {
-            // Insert a call to `to_async` to convert the bencher to async mode.
-            // The timing loops are the same as with the normal bencher.
             b.to_async(FuturesExecutor)
                 .iter(|| create_check(s, database.clone()));
         },
