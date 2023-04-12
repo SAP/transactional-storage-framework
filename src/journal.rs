@@ -365,7 +365,7 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Tells the [`Anchor`] that there is a transaction waiting for a recourse owned by the
     /// [`Anchor`].
-    pub(super) fn need_to_wake_up_others(&self) {
+    pub(super) fn set_wake_up_others(&self) {
         self.wake_up_others.store(true, Release);
     }
 
@@ -431,7 +431,7 @@ impl<S: Sequencer> Anchor<S> {
 
     fn wake_up_others(&self, message_sender: &SyncSender<Task>) {
         if self.wake_up_others.load(Acquire) {
-            // The result can be ignored since messages pending in the queue means that the access
+            // The result can be ignored since messages pending in the queue mean that the access
             // controller will be scanned in the future.
             let _: Result<(), TrySendError<Task>> =
                 message_sender.try_send(Task::ScanAccessController);
@@ -482,17 +482,20 @@ impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
         } else {
             cx.waker().wake_by_ref();
         }
+
+        // TODO: make this non-blocking.
         if self
             .message_sender
-            .try_send(Task::Monitor(self.object_id))
+            .send(Task::Monitor(self.object_id))
             .is_err()
         {
             // The message channel is congested.
             cx.waker().wake_by_ref();
         }
+        // TODO: make this non-blocking.
         if self
             .message_sender
-            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .send(Task::WakeUp(self.deadline, cx.waker().clone()))
             .is_err()
         {
             // The message channel is congested.
@@ -544,9 +547,10 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
             return Poll::Ready(Ok(()));
         }
 
+        // TODO: make this non-blocking.
         if self
             .message_sender
-            .try_send(Task::WakeUp(self.deadline, cx.waker().clone()))
+            .send(Task::WakeUp(self.deadline, cx.waker().clone()))
             .is_err()
         {
             // The message channel is congested.

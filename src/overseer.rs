@@ -38,12 +38,10 @@ pub enum Task {
     WakeUp(Instant, Waker),
 
     /// The [`Overseer`] should monitor the database object.
-    #[allow(dead_code)]
     Monitor(usize),
 
     /// The [`Overseer`] should scan the access controller entries corresponding to monitored
     /// database objects.
-    #[allow(dead_code)]
     ScanAccessController,
 }
 
@@ -57,7 +55,7 @@ impl Overseer {
         kernel: Arc<Kernel<S, P>>,
     ) -> Overseer {
         let (sender, receiver) =
-            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into));
+            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 2);
         Overseer {
             worker: Some(thread::spawn(move || {
                 Self::oversee(&receiver, &kernel);

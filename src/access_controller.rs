@@ -1894,9 +1894,9 @@ impl<S: Sequencer> SharedAwaitable<S> {
     /// Pushes a request into the wait queue.
     fn push_request(&mut self, request: Request<S>) {
         self.wait_queue.push_back(request);
-        self.owner_set
-            .iter()
-            .for_each(|o| o.need_to_wake_up_others());
+        self.owner_set.iter().for_each(|o| {
+            o.set_wake_up_others();
+        });
     }
 }
 
@@ -1973,7 +1973,7 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
     /// Pushes a request into the wait queue.
     fn push_request(&mut self, request: Request<S>) {
         self.wait_queue.push_back(request);
-        self.owner.need_to_wake_up_others();
+        self.owner.set_wake_up_others();
     }
 }
 
@@ -2617,6 +2617,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn parallel_mutex() {
+        // TODO: fix me.
         let num_tasks = 1;
         let num_operations = 256;
         let barrier = Arc::new(Barrier::new(num_tasks));
