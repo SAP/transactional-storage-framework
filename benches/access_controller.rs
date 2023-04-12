@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2023 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use criterion::async_executor::FuturesExecutor;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use sap_tsf::{AtomicCounter, Database, ToObjectID, VolatileDevice};
