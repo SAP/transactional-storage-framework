@@ -1077,9 +1077,7 @@ impl<S: Sequencer> AccessController<S> {
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if shared_awaitable.cleanup_inactive_owners() {
                         if shared_awaitable.creation_instant == S::Instant::default() {
-                            *ownership = Ownership::Locked(Owner {
-                                anchor: new_owner.clone(),
-                            });
+                            *ownership = Ownership::Locked(Owner::new(new_owner));
                         } else {
                             *ownership = Ownership::LockedAwaitable(
                                 ExclusiveAwaitable::with_instant_and_owner(
@@ -1120,90 +1118,67 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
-        loop {
-            match object_state {
-                ObjectState::Owned(ownership) => match ownership {
-                    Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
-                        if let Some(result) =
-                            Self::try_delete_exclusively_owned(ownership, new_owner, deadline)?
-                        {
-                            return Ok(Some(result));
-                        }
-                    }
-                    Ownership::CreatedAwaitable(_)
-                    | Ownership::LockedAwaitable(_)
-                    | Ownership::DeletedAwaitable(_) => {
-                        return Self::try_delete_exclusive_awaitable(
-                            ownership, new_owner, deadline,
-                        );
-                    }
-                    Ownership::Protected(owner) => {
-                        if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
-                            // It is possible to promote the access permission in this transaction.
-                            let mut exclusive_awaitable = ExclusiveAwaitable::with_owner(Owner {
-                                anchor: new_owner.clone(),
-                            });
-                            exclusive_awaitable
-                                .set_prior_state(Ownership::Protected(owner.clone()));
-                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
-                            return Ok(Some(true));
-                        } else if owner.is_terminated() {
-                            *ownership = Ownership::Deleted(Owner {
-                                anchor: new_owner.clone(),
-                            });
-                            return Ok(Some(true));
-                        }
+        match object_state {
+            ObjectState::Owned(ownership) => match ownership {
+                Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
+                    return Self::try_delete_exclusively_owned(ownership, new_owner, deadline);
+                }
+                Ownership::CreatedAwaitable(_)
+                | Ownership::LockedAwaitable(_)
+                | Ownership::DeletedAwaitable(_) => {
+                    return Self::try_delete_exclusive_awaitable(ownership, new_owner, deadline);
+                }
+                Ownership::Protected(owner) => {
+                    if let Relationship::Linearizable = owner.grant_write_access(new_owner) {
+                        // It is possible to promote the access permission in this transaction.
+                        let mut exclusive_awaitable =
+                            ExclusiveAwaitable::with_owner(Owner::new(new_owner));
+                        exclusive_awaitable.set_prior_state(Ownership::Protected(owner.clone()));
+                        *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                        return Ok(Some(true));
+                    } else if owner.is_terminated() {
+                        *ownership = Ownership::Deleted(Owner::new(new_owner));
+                        return Ok(Some(true));
+                    } else if deadline.is_some() {
                         // Allocate a wait queue and retry.
                         *ownership = Ownership::ProtectedAwaitable(SharedAwaitable::with_owner(
                             owner.clone(),
                         ));
+                        return Ok(None);
                     }
-                    Ownership::ProtectedAwaitable(shared_awaitable) => {
-                        if shared_awaitable.cleanup_inactive_owners() {
-                            if shared_awaitable.creation_instant == S::Instant::default() {
-                                *ownership = Ownership::Deleted(Owner {
-                                    anchor: new_owner.clone(),
-                                });
-                            } else {
-                                *ownership = Ownership::DeletedAwaitable(
-                                    ExclusiveAwaitable::with_instant_and_owner(
-                                        shared_awaitable.creation_instant,
-                                        Owner {
-                                            anchor: new_owner.clone(),
-                                        },
-                                    ),
-                                );
-                            }
-                            return Ok(Some(true));
+                }
+                Ownership::ProtectedAwaitable(shared_awaitable) => {
+                    if shared_awaitable.cleanup_inactive_owners() {
+                        if shared_awaitable.creation_instant == S::Instant::default() {
+                            *ownership = Ownership::Deleted(Owner::new(new_owner));
+                        } else {
+                            *ownership = Ownership::DeletedAwaitable(
+                                ExclusiveAwaitable::with_instant_and_owner(
+                                    shared_awaitable.creation_instant,
+                                    Owner::new(new_owner),
+                                ),
+                            );
                         }
-                        if let Some(exclusive_awaitable) =
-                            shared_awaitable.try_promote_to_exclusive(new_owner)
-                        {
-                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
-                            return Ok(Some(true));
-                        } else if deadline.is_some() {
-                            return Ok(None);
-                        }
-
-                        // The database object cannot be deleted immediately.
-                        break;
+                        return Ok(Some(true));
                     }
-                },
-                ObjectState::Created(instant) => {
-                    *object_state = ObjectState::Owned(Ownership::DeletedAwaitable(
-                        ExclusiveAwaitable::with_instant_and_owner(
-                            *instant,
-                            Owner {
-                                anchor: new_owner.clone(),
-                            },
-                        ),
-                    ));
-                    return Ok(Some(true));
+                    if let Some(exclusive_awaitable) =
+                        shared_awaitable.try_promote_to_exclusive(new_owner)
+                    {
+                        *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                        return Ok(Some(true));
+                    } else if deadline.is_some() {
+                        return Ok(None);
+                    }
                 }
-                ObjectState::Deleted(_) => {
-                    // Already deleted.
-                    break;
-                }
+            },
+            ObjectState::Created(instant) => {
+                *object_state = ObjectState::Owned(Ownership::DeletedAwaitable(
+                    ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                ));
+                return Ok(Some(true));
+            }
+            ObjectState::Deleted(_) => {
+                // Already deleted.
             }
         }
         Err(Error::SerializationFailure)
@@ -1836,12 +1811,8 @@ impl<S: Sequencer> SharedAwaitable<S> {
         // If the requester is the only shared owner of the database object, it
         // is eligible to promote it to `ExclusiveAwaitable`
         let wait_queue = take(&mut self.wait_queue);
-        let mut exclusive_awaitable = ExclusiveAwaitable::with_owner_and_wait_queue(
-            Owner {
-                anchor: new_owner.clone(),
-            },
-            wait_queue,
-        );
+        let mut exclusive_awaitable =
+            ExclusiveAwaitable::with_owner_and_wait_queue(Owner::new(new_owner), wait_queue);
         exclusive_awaitable.set_prior_state(Ownership::ProtectedAwaitable(Box::new(self.clone())));
         Some(exclusive_awaitable)
     }
@@ -2125,7 +2096,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn access_promote() {
+    async fn access_promote_rewind() {
         for num_shared_locks in 0..4 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                 let database = Database::default();
@@ -2242,6 +2213,63 @@ mod test {
                     );
                     assert_eq!(result, Ok(true));
                     assert_eq!(blocker_result, Err(Error::Timeout));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn access_promote_commit() {
+        for num_shared_locks in 1..3 {
+            for waiting_action in [AccessAction::Lock, AccessAction::Delete] {
+                for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
+                    let database = Database::default();
+                    let access_controller = database.access_controller();
+                    let transaction = database.transaction();
+                    for i in 0..num_shared_locks {
+                        let mut journal = transaction.journal();
+                        assert_eq!(
+                            take_access_action(
+                                AccessAction::Share,
+                                access_controller,
+                                &mut journal,
+                                None
+                            )
+                            .await,
+                            Ok(i == 0)
+                        );
+                        assert_eq!(journal.submit(), i + 1);
+                    }
+                    let waiting_transaction = database.transaction();
+                    let mut waiting_journal = waiting_transaction.journal();
+                    let (waiting_result, _) = futures::join!(
+                        take_access_action(
+                            waiting_action,
+                            access_controller,
+                            &mut waiting_journal,
+                            Some(Instant::now() + TIMEOUT_UNEXPECTED)
+                        ),
+                        async {
+                            let mut journal = transaction.journal();
+                            assert_eq!(
+                                take_access_action(
+                                    promotion_action,
+                                    access_controller,
+                                    &mut journal,
+                                    Some(Instant::now() + TIMEOUT_UNEXPECTED),
+                                )
+                                .await,
+                                Ok(true)
+                            );
+                            assert_eq!(journal.submit(), num_shared_locks + 1);
+                            assert!(transaction.commit().await.is_ok());
+                        }
+                    );
+                    if promotion_action == AccessAction::Delete {
+                        assert_eq!(waiting_result, Err(Error::SerializationFailure));
+                    } else {
+                        assert_eq!(waiting_result, Ok(true));
+                    }
                 }
             }
         }
