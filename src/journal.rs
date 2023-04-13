@@ -74,6 +74,9 @@ pub(super) struct AwaitResponse<'d> {
     /// The object identifier of the desired resource.
     object_id: usize,
 
+    /// Indicates that the object identifier was sent to the [`Overseer`].
+    object_id_registered: bool,
+
     /// The corresponding [`Overseer`].
     overseer: &'d Overseer,
 
@@ -433,6 +436,7 @@ impl<'d> AwaitResponse<'d> {
         drop(entry);
         AwaitResponse {
             object_id,
+            object_id_registered: false,
             overseer,
             deadline,
             result_placeholder,
@@ -452,27 +456,23 @@ impl<'d> Future for AwaitResponse<'d> {
             if self.deadline < Instant::now() {
                 // The deadline was reached.
                 result_waker.0.replace(Err(Error::Timeout));
-
-                // Need to wake up other waiting transactions.
-                self.overseer.send_task(Task::Monitor(self.object_id));
                 return Poll::Ready(Err(Error::Timeout));
             }
             result_waker.1.replace(cx.waker().clone());
         } else {
             cx.waker().wake_by_ref();
+            return Poll::Pending;
         }
 
-        // TODO: make this non-blocking.
-        if !self.overseer.send_task(Task::Monitor(self.object_id)) {
-            // The message channel is congested.
+        if !self.object_id_registered {
+            if self.overseer.send_task(Task::Monitor(self.object_id)) {
+                self.get_mut().object_id_registered = true;
+            }
             cx.waker().wake_by_ref();
-        }
-        // TODO: make this non-blocking.
-        if !self
+        } else if !self
             .overseer
             .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {
-            // The message channel is congested.
             cx.waker().wake_by_ref();
         }
         Poll::Pending
@@ -498,10 +498,7 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
             // The transaction has just been committed or rolled back right after the `Waker` was
             // pushed into the transaction.
             return Poll::Ready(Ok(()));
-        }
-
-        // TODO: make this non-blocking.
-        if !self
+        } else if !self
             .overseer
             .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {

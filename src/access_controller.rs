@@ -774,24 +774,31 @@ impl<S: Sequencer> AccessController<S> {
                     wait_queue.remove_oldest();
                     continue;
                 }
-                let result = match &request {
-                    Request::Create(_, new_owner, _) => {
-                        Self::try_create(object_state, &new_owner.anchor, Some(Instant::now()))
-                    }
-                    Request::Protect(_, new_owner, _) => {
-                        Self::try_share(object_state, &new_owner.anchor, Some(Instant::now()))
-                    }
-                    Request::Lock(_, new_owner, _) => {
-                        Self::try_lock(object_state, &new_owner.anchor, Some(Instant::now()))
-                    }
-                    Request::Delete(_, new_owner, _) => {
-                        Self::try_delete(object_state, &new_owner.anchor, Some(Instant::now()))
-                    }
+                let (result, new_owner) = match &request {
+                    Request::Create(_, new_owner, _) => (
+                        Self::try_create(object_state, &new_owner.anchor, Some(Instant::now())),
+                        new_owner,
+                    ),
+                    Request::Protect(_, new_owner, _) => (
+                        Self::try_share(object_state, &new_owner.anchor, Some(Instant::now())),
+                        new_owner,
+                    ),
+                    Request::Lock(_, new_owner, _) => (
+                        Self::try_lock(object_state, &new_owner.anchor, Some(Instant::now())),
+                        new_owner,
+                    ),
+                    Request::Delete(_, new_owner, _) => (
+                        Self::try_delete(object_state, &new_owner.anchor, Some(Instant::now())),
+                        new_owner,
+                    ),
                 };
                 match result {
                     Ok(Some(result)) => {
                         // The result is out.
                         result_waker.0.replace(Ok(result));
+
+                        // The new owner also needs to wake up other waiting transactions.
+                        new_owner.set_wake_up_others();
                     }
                     Ok(None) => {
                         // The request will be retried later.
@@ -2658,8 +2665,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn parallel_mutex() {
-        // TODO: fix me.
-        let num_tasks = 1;
+        let num_tasks = 16;
         let num_operations = 256;
         let barrier = Arc::new(Barrier::new(num_tasks));
         let database = Arc::new(Database::default());
@@ -2713,5 +2719,86 @@ mod test {
             assert!(r.is_ok());
         }
         assert_eq!(data.load(Relaxed), num_operations * num_tasks);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn parallel_create_delete() {
+        let num_tasks = 16;
+        let barrier = Arc::new(Barrier::new(num_tasks));
+        let database = Arc::new(Database::default());
+        let data = Arc::new(AtomicUsize::new(usize::MAX));
+        let mut task_handles = Vec::with_capacity(num_tasks);
+        for _ in 0..num_tasks {
+            let barrier_clone = barrier.clone();
+            let database_clone = database.clone();
+            let data_clone = data.clone();
+            task_handles.push(tokio::spawn(async move {
+                barrier_clone.wait().await;
+                let transaction = database_clone.transaction();
+                let mut journal = transaction.journal();
+                match database_clone
+                    .access_controller()
+                    .create(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .await
+                {
+                    Ok(result) => {
+                        assert!(result);
+                        assert_eq!(data_clone.load(Relaxed), usize::MAX);
+                        data_clone.store(0, Relaxed);
+                    }
+                    Err(error) => {
+                        assert_eq!(error, Error::SerializationFailure);
+                    }
+                }
+                assert_eq!(journal.submit(), 1);
+                assert!(transaction.commit().await.is_ok());
+
+                assert_ne!(data_clone.load(Relaxed), usize::MAX);
+
+                let transaction = database_clone.transaction();
+                let mut journal = transaction.journal();
+                assert_eq!(
+                    database_clone
+                        .access_controller()
+                        .lock(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                        .await,
+                    Ok(true)
+                );
+                assert_eq!(journal.submit(), 1);
+
+                let current = data_clone.load(Relaxed);
+                data_clone.store(current + 1, Relaxed);
+                assert!(transaction.commit().await.is_ok());
+
+                let transaction = database_clone.transaction();
+                let mut journal = transaction.journal();
+                match database_clone
+                    .access_controller()
+                    .delete(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .await
+                {
+                    Ok(result) => {
+                        assert!(result);
+                        assert_eq!(journal.submit(), 1);
+                        let current = data_clone.load(Relaxed);
+                        if current == num_tasks {
+                            data_clone.store(num_tasks * 2, Relaxed);
+                            assert!(transaction.commit().await.is_ok());
+                        } else {
+                            transaction.rollback().await;
+                        }
+                    }
+                    Err(error) => {
+                        assert_eq!(error, Error::SerializationFailure);
+                        assert_eq!(journal.submit(), 1);
+                        transaction.rollback().await;
+                    }
+                }
+            }));
+        }
+        for r in futures::future::join_all(task_handles).await {
+            assert!(r.is_ok());
+        }
+        assert_eq!(data.load(Relaxed), num_tasks * 2);
     }
 }
