@@ -2,13 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::overseer::Task;
+use super::overseer::Overseer;
 use super::sequencer::ToInstant;
-use super::Sequencer;
+use super::{Database, PersistenceLayer, Sequencer};
 use std::cmp;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::Acquire;
-use std::sync::mpsc::SyncSender;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
 ///
@@ -26,11 +25,10 @@ use std::sync::mpsc::SyncSender;
 ///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
-    tracker: S::Tracker,
-    #[allow(dead_code)]
-    message_sender: &'d SyncSender<Task>,
+    tracker: Option<S::Tracker>,
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
     journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
+    overseer: &'d Overseer,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
@@ -50,29 +48,25 @@ pub(super) struct JournalSnapshot<'t, 'j> {
 
 impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Creates a new [`Snapshot`].
-    pub(super) fn from_parts(
-        sequencer: &'d S,
-        message_sender: &'d SyncSender<Task>,
+    pub(super) fn from_parts<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
         transaction_snapshot: Option<TransactionSnapshot<'t>>,
         journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
     ) -> Snapshot<'d, 't, 'j, S> {
-        let tracker = sequencer.track(Acquire);
+        let tracker = database.sequencer().track(Acquire);
         Snapshot {
-            tracker,
-            message_sender,
+            tracker: Some(tracker),
             transaction_snapshot,
             journal_snapshot,
+            overseer: database.overseer(),
         }
     }
 
     /// Returns the time point value of the database snapshot.
     pub(super) fn database_snapshot(&self) -> S::Instant {
-        self.tracker.to_instant()
-    }
-
-    /// Returns a reference to the message sender.
-    pub(super) fn message_sender(&self) -> &SyncSender<Task> {
-        self.message_sender
+        self.tracker
+            .as_ref()
+            .map_or_else(S::Instant::default, ToInstant::to_instant)
     }
 
     /// Returns a reference to its [`TransactionSnapshot`].
@@ -84,19 +78,24 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
         self.journal_snapshot.as_ref()
     }
+
+    /// Returns the corresponding [`Overseer`].
+    pub(super) fn overseer(&self) -> &Overseer {
+        self.overseer
+    }
 }
 
 impl<'d, 't, 'j, S: Sequencer> PartialEq<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn eq(&self, other: &S::Instant) -> bool {
-        self.tracker.to_instant().eq(other)
+        self.database_snapshot().eq(other)
     }
 }
 
 impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S> {
     #[inline]
     fn partial_cmp(&self, other: &S::Instant) -> Option<cmp::Ordering> {
-        self.tracker.to_instant().partial_cmp(other)
+        self.database_snapshot().partial_cmp(other)
     }
 }
 

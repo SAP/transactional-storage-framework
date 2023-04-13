@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::access_controller::{ObjectState, Owner};
-use super::overseer::Task;
+use super::access_controller::ObjectState;
+use super::overseer::{Overseer, Task};
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
@@ -15,8 +15,7 @@ use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
@@ -46,14 +45,6 @@ pub(super) struct Anchor<S: Sequencer> {
     /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
     submit_instant: AtomicUsize,
 
-    /// A placeholder for asynchronous resource acquisition requests.
-    ///
-    /// The field must be reset before making a new asynchronous request to an
-    /// [`AccessController`](super::AccessController). The data is protected by a [`Mutex`],
-    /// however the [`Mutex`] is only try-locked, and if it fails, the task immediately yields the
-    /// current executor.
-    access_request_result_placeholder: Mutex<AccessRequestResult>,
-
     /// A flag indicating that the changes in the [`Journal`] are is being rolled back.
     rolled_back: AtomicBool,
 
@@ -65,34 +56,32 @@ pub(super) struct Anchor<S: Sequencer> {
     next: ebr::AtomicArc<Anchor<S>>,
 }
 
-/// [`AwaitResponse`] is a [`Future`] to await any response to the request to acquire the specified
-/// resource.
-#[derive(Debug)]
-pub(super) struct AwaitResponse<'d, S: Sequencer> {
-    /// The owner.
-    owner: Owner<S>,
-
-    /// The object identifier of the desired resource.
-    object_id: usize,
-
-    /// The message sender to which send a wake up message.
-    message_sender: &'d SyncSender<Task>,
-
-    /// The deadline.
-    deadline: Instant,
-}
-
 /// The result of the current access permission request.
 #[derive(Debug, Default)]
 pub(super) struct AccessRequestResult {
-    /// [`Waker`] to wake up when the result is ready.
-    waker: Option<Waker>,
+    /// The result can be accessed by both the requester and the processor, therefore the data is
+    /// protected by a [`Mutex`].
+    result_waker: Mutex<ResultWakerPair>,
+}
 
-    /// Result of the resource acquisition attempt.
-    ///
-    /// `true` is set if the resource is newly acquired. `false` is set if the transaction already
-    /// has ownership.
-    result: Option<Result<bool, Error>>,
+/// Access request result and [`Waker`] pair.
+pub(super) type ResultWakerPair = (Option<Result<bool, Error>>, Option<Waker>);
+
+/// [`AwaitResponse`] is a [`Future`] to await any response to the request to acquire the specified
+/// resource.
+#[derive(Debug)]
+pub(super) struct AwaitResponse<'d> {
+    /// The object identifier of the desired resource.
+    object_id: usize,
+
+    /// The corresponding [`Overseer`].
+    overseer: &'d Overseer,
+
+    /// The deadline.
+    deadline: Instant,
+
+    /// The placeholder for the result and [`Waker`].
+    result_placeholder: Arc<AccessRequestResult>,
 }
 
 /// [`AwaitEOT`] is returned by an [`Anchor`] for the caller to await the final transaction state
@@ -102,8 +91,8 @@ pub(super) struct AwaitEOT<'d, S: Sequencer> {
     /// The transaction to be committed or rolled back.
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
 
-    /// The message sender to which send a wake up message.
-    message_sender: &'d SyncSender<Task>,
+    /// The associated [`Overseer`] that handles end-of-transaction messages.
+    overseer: &'d Overseer,
 
     /// The deadline.
     deadline: Instant,
@@ -178,8 +167,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     #[must_use]
     pub fn snapshot<'j>(&'j self) -> Snapshot<'d, 't, 'j, S> {
         Snapshot::from_parts(
-            self.transaction.sequencer(),
-            self.transaction.message_sender(),
+            self.transaction.database(),
             Some(
                 self.transaction
                     .transaction_snapshot(self.anchor.creation_instant),
@@ -188,9 +176,9 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
         )
     }
 
-    /// Returns a reference to the message sender owned by the [`Database`](super::Database).
-    pub(super) fn message_sender(&self) -> &'d SyncSender<Task> {
-        self.transaction.message_sender()
+    /// Returns a reference to the [`Overseer`].
+    pub(super) fn overseer(&self) -> &'d Overseer {
+        self.transaction.database().overseer()
     }
 
     /// Returns a reference to its [`Anchor`].
@@ -218,7 +206,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
     fn drop(&mut self) {
         if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
-            self.anchor.rollback(self.transaction.message_sender());
+            self.anchor.rollback(self.transaction.database().overseer());
         }
     }
 }
@@ -301,7 +289,7 @@ impl<S: Sequencer> Anchor<S> {
             }
 
             if let Some(deadline) = deadline {
-                return Err(self.await_eot(snapshot.message_sender(), deadline));
+                return Err(self.await_eot(snapshot.overseer(), deadline));
             }
         }
 
@@ -347,22 +335,6 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
-    /// Clears its [`AccessRequestResult`] field.
-    pub(super) fn clear_access_request_result_placeholder(&self) {
-        // Locking is infallible.
-        let placeholder = self.access_request_result_placeholder.try_lock();
-        debug_assert!(placeholder.is_ok());
-
-        if let Ok(mut placeholder) = placeholder {
-            *placeholder = AccessRequestResult::default();
-        }
-    }
-
-    /// Returns a reference to its [`AccessRequestResult`] field.
-    pub(super) fn access_request_result_placeholder(&self) -> &Mutex<AccessRequestResult> {
-        &self.access_request_result_placeholder
-    }
-
     /// Tells the [`Anchor`] that there is a transaction waiting for a recourse owned by the
     /// [`Anchor`].
     pub(super) fn set_wake_up_others(&self) {
@@ -372,12 +344,12 @@ impl<S: Sequencer> Anchor<S> {
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
     pub(super) fn await_eot<'d>(
         &self,
-        message_sender: &'d SyncSender<Task>,
+        overseer: &'d Overseer,
         deadline: Instant,
     ) -> AwaitEOT<'d, S> {
         AwaitEOT {
             transaction_anchor: self.transaction_anchor.clone(),
-            message_sender,
+            overseer,
             deadline,
         }
     }
@@ -398,14 +370,14 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Wakes up any waiting transactions.
-    pub(super) fn commit(&self, message_sender: &SyncSender<Task>) {
-        self.wake_up_others(message_sender);
+    pub(super) fn commit(&self, overseer: &Overseer) {
+        self.wake_up_others(overseer);
     }
 
     /// Rolls back the changes contained in the associated [`Journal`].
-    pub(super) fn rollback(&self, message_sender: &SyncSender<Task>) {
+    pub(super) fn rollback(&self, overseer: &Overseer) {
         self.rolled_back.store(true, Release);
-        self.wake_up_others(message_sender);
+        self.wake_up_others(overseer);
     }
 
     /// Reads its submit instant.
@@ -422,107 +394,88 @@ impl<S: Sequencer> Anchor<S> {
             transaction_anchor,
             creation_instant,
             submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
-            access_request_result_placeholder: Mutex::default(),
             rolled_back: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),
         }
     }
 
-    fn wake_up_others(&self, message_sender: &SyncSender<Task>) {
+    fn wake_up_others(&self, overseer: &Overseer) {
         if self.wake_up_others.load(Acquire) {
             // The result can be ignored since messages pending in the queue mean that the access
             // controller will be scanned in the future.
-            let _: Result<(), TrySendError<Task>> =
-                message_sender.try_send(Task::ScanAccessController);
+            overseer.send_task(Task::ScanAccessController);
         }
     }
 }
 
-impl<'d, S: Sequencer> AwaitResponse<'d, S> {
+impl AccessRequestResult {
+    /// Gives full access to the inner data with the mutex acquired.
+    ///
+    /// It may block the thread; the only component that can be blocked is
+    /// [`Overseer`], therefore this must be called by [`Overseer`].
+    ///
+    /// `None` is returned if the [`Mutex`] is poisoned.
+    pub(super) fn lock_sync(&self) -> Option<MutexGuard<ResultWakerPair>> {
+        self.result_waker.lock().ok()
+    }
+}
+
+impl<'d> AwaitResponse<'d> {
     /// Creates a new [`AwaitResponse`].
-    pub(super) fn new(
-        owner: Owner<S>,
+    pub(super) fn new<S: Sequencer>(
         entry: OccupiedEntry<usize, ObjectState<S>>,
-        message_sender: &'d SyncSender<Task>,
+        overseer: &'d Overseer,
         deadline: Instant,
-    ) -> AwaitResponse<'d, S> {
+        result_placeholder: Arc<AccessRequestResult>,
+    ) -> AwaitResponse<'d> {
         let object_id = *entry.key();
         drop(entry);
-        owner.clear_access_request_result_placeholder();
         AwaitResponse {
-            owner,
             object_id,
-            message_sender,
+            overseer,
             deadline,
+            result_placeholder,
         }
     }
 }
 
-impl<'d, S: Sequencer> Future for AwaitResponse<'d, S> {
+impl<'d> Future for AwaitResponse<'d> {
     type Output = Result<bool, Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Ok(mut placeholder) = self.owner.access_request_result_placeholder().try_lock() {
-            if let Some(result) = placeholder.result.take() {
-                return Poll::Ready(result);
+        if let Ok(mut result_waker) = self.result_placeholder.result_waker.try_lock() {
+            if let Some(result) = result_waker.0.as_ref() {
+                return Poll::Ready(result.clone());
             }
             if self.deadline < Instant::now() {
                 // The deadline was reached.
-                let result = placeholder.set_result(Err(Error::Timeout));
-                debug_assert!(result.is_ok());
+                result_waker.0.replace(Err(Error::Timeout));
 
                 // Need to wake up other waiting transactions.
-                let _: Result<(), TrySendError<Task>> =
-                    self.message_sender.try_send(Task::Monitor(self.object_id));
+                self.overseer.send_task(Task::Monitor(self.object_id));
                 return Poll::Ready(Err(Error::Timeout));
             }
-            placeholder.waker.replace(cx.waker().clone());
+            result_waker.1.replace(cx.waker().clone());
         } else {
             cx.waker().wake_by_ref();
         }
 
         // TODO: make this non-blocking.
-        if self
-            .message_sender
-            .send(Task::Monitor(self.object_id))
-            .is_err()
-        {
+        if !self.overseer.send_task(Task::Monitor(self.object_id)) {
             // The message channel is congested.
             cx.waker().wake_by_ref();
         }
         // TODO: make this non-blocking.
-        if self
-            .message_sender
-            .send(Task::WakeUp(self.deadline, cx.waker().clone()))
-            .is_err()
+        if !self
+            .overseer
+            .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {
             // The message channel is congested.
             cx.waker().wake_by_ref();
         }
         Poll::Pending
-    }
-}
-
-impl AccessRequestResult {
-    /// Sets the result.
-    pub(super) fn set_result(&mut self, result: Result<bool, Error>) -> Result<(), Error> {
-        if let Some(result) = self.result.as_ref() {
-            // `Error::Timeout` can be set by the requester.
-            debug_assert_eq!(*result, Err(Error::Timeout));
-            return Err(Error::Timeout);
-        }
-        self.result.replace(result);
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-        Ok(())
-    }
-
-    /// Checks if a result is set.
-    pub(super) fn is_result_set(&self) -> bool {
-        self.result.is_some()
     }
 }
 
@@ -548,10 +501,9 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
         }
 
         // TODO: make this non-blocking.
-        if self
-            .message_sender
-            .send(Task::WakeUp(self.deadline, cx.waker().clone()))
-            .is_err()
+        if !self
+            .overseer
+            .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {
             // The message channel is congested.
             cx.waker().wake_by_ref();

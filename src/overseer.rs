@@ -55,7 +55,7 @@ impl Overseer {
         kernel: Arc<Kernel<S, P>>,
     ) -> Overseer {
         let (sender, receiver) =
-            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 2);
+            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 4096);
         Overseer {
             worker: Some(thread::spawn(move || {
                 Self::oversee(&receiver, &kernel);
@@ -64,9 +64,11 @@ impl Overseer {
         }
     }
 
-    /// Returns a reference to the [`SyncSender`].
-    pub(super) fn message_sender(&self) -> &SyncSender<Task> {
-        &self.sender
+    /// Sends a [`Task`] to the [`Overseer`].
+    ///
+    /// Returns `false` if the [`Task`] could not be sent.
+    pub(super) fn send_task(&self, task: Task) -> bool {
+        self.sender.try_send(task).is_ok()
     }
 
     /// Oversees the specified database kernel.
@@ -152,11 +154,10 @@ mod test {
     use crate::Database;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::mpsc::SyncSender;
     use std::task::{Context, Poll};
     use std::time::Instant;
 
-    struct AfterNSecs<'d>(Instant, u64, &'d SyncSender<Task>);
+    struct AfterNSecs<'d>(Instant, u64, &'d Overseer);
 
     impl<'d> Future for AfterNSecs<'d> {
         type Output = ();
@@ -164,14 +165,10 @@ mod test {
             if self.0 + Duration::from_secs(self.1) < Instant::now() {
                 Poll::Ready(())
             } else {
-                if self
-                    .2
-                    .try_send(Task::WakeUp(
-                        self.0 + Duration::from_secs(self.1),
-                        cx.waker().clone(),
-                    ))
-                    .is_err()
-                {
+                if !self.2.send_task(Task::WakeUp(
+                    self.0 + Duration::from_secs(self.1),
+                    cx.waker().clone(),
+                )) {
                     cx.waker().wake_by_ref();
                 }
                 Poll::Pending
@@ -183,8 +180,8 @@ mod test {
     async fn overseer() {
         let database = Database::default();
         let now = Instant::now();
-        let after1sec = AfterNSecs(now, 1, database.message_sender());
-        let after2secs = AfterNSecs(now, 2, database.message_sender());
+        let after1sec = AfterNSecs(now, 1, database.overseer());
+        let after2secs = AfterNSecs(now, 2, database.overseer());
         after1sec.await;
         assert!(now.elapsed() > Duration::from_millis(128));
         after2secs.await;

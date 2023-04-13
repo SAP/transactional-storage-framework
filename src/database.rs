@@ -8,7 +8,6 @@ use super::{
     Sequencer, Snapshot, Transaction, VolatileDevice,
 };
 use scc::{ebr, HashIndex};
-use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -101,7 +100,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     #[inline]
     #[must_use]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(&self.kernel.sequencer, self.message_sender(), None, None)
+        Snapshot::from_parts(self, None, None)
     }
 
     /// Returns a reference to its [`AccessController`].
@@ -297,9 +296,9 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         &self.kernel.sequencer
     }
 
-    /// Returns a message sender to the [`Overseer`].
-    pub(super) fn message_sender(&self) -> &SyncSender<Task> {
-        self.overseer.message_sender()
+    /// Returns a reference to its [`Overseer`].
+    pub(super) fn overseer(&self) -> &Overseer {
+        &self.overseer
     }
 }
 
@@ -332,7 +331,7 @@ impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
 impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     #[inline]
     fn drop(&mut self) {
-        while self.message_sender().send(Task::Shutdown).is_err() {}
+        while !self.overseer.send_task(Task::Shutdown) {}
     }
 }
 

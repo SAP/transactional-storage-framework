@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::journal::Anchor as JournalAnchor;
-use super::overseer::Task;
 use super::snapshot::TransactionSnapshot;
 use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
@@ -13,7 +12,6 @@ use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::mpsc::SyncSender;
 use std::task::Waker;
 use std::task::{Context, Poll};
 
@@ -109,8 +107,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
         Snapshot::from_parts(
-            self.database.sequencer(),
-            self.database.message_sender(),
+            self.database,
             Some(self.transaction_snapshot(self.now())),
             None,
         )
@@ -182,7 +179,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 current = Some(record);
                 break;
             }
-            record.rollback(self.database.message_sender());
+            record.rollback(self.database.overseer());
             current = record.set_next(None, Relaxed);
         }
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
@@ -284,9 +281,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.database.sequencer()
     }
 
-    /// Returns a reference to its message sender.
-    pub(super) fn message_sender(&self) -> &'d SyncSender<Task> {
-        self.database.message_sender()
+    /// Returns a reference to the corresponding [`Database`].
+    pub(super) fn database(&self) -> &'d Database<S, P> {
+        self.database
     }
 
     /// Takes [`Anchor`].
@@ -331,7 +328,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
-            record.commit(self.database.message_sender());
+            record.commit(self.database.overseer());
             current = record.set_next(None, Relaxed);
         }
 
