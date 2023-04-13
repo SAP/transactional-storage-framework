@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::journal::AccessRequestResult;
 use super::journal::Anchor as JournalAnchor;
 use super::journal::{AwaitResponse, Relationship};
 use super::{Error, Journal, PersistenceLayer, Sequencer, Snapshot};
@@ -11,6 +12,7 @@ use std::cmp;
 use std::collections::{BTreeSet, VecDeque};
 use std::mem::take;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// [`AccessController`] grants or rejects access to a database object identified as a [`usize`]
@@ -163,16 +165,16 @@ pub(super) enum Ownership<S: Sequencer> {
 #[derive(Debug)]
 pub(super) enum Request<S: Sequencer> {
     /// Requests to create the database object.
-    Create(Instant, Owner<S>),
+    Create(Instant, Owner<S>, Arc<AccessRequestResult>),
 
     /// Requests to protect the database object.
-    Protect(Instant, Owner<S>),
+    Protect(Instant, Owner<S>, Arc<AccessRequestResult>),
 
     /// Requests to lock the database object.
-    Lock(Instant, Owner<S>),
+    Lock(Instant, Owner<S>, Arc<AccessRequestResult>),
 
     /// Requests to delete the database object.
-    Delete(Instant, Owner<S>),
+    Delete(Instant, Owner<S>, Arc<AccessRequestResult>),
 }
 
 /// [`SharedAwaitable`] contains multiple owners and a wait queue.
@@ -415,11 +417,15 @@ impl<S: Sequencer> AccessController<S> {
             ObjectState::Owned(Ownership::CreatedAwaitable(exclusive_awaitable)),
         ) = (deadline, entry.get_mut())
         {
-            let message_sender = journal.message_sender();
-            let owner = Owner::from(journal);
-            let request = Request::Create(Instant::now(), owner.clone());
+            let overseer = journal.overseer();
+            let result_placeholder = Arc::new(AccessRequestResult::default());
+            let request = Request::Create(
+                Instant::now(),
+                Owner::from(journal),
+                result_placeholder.clone(),
+            );
             exclusive_awaitable.push_request(request);
-            return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+            return AwaitResponse::new(entry, overseer, deadline, result_placeholder).await;
         }
 
         // The database object has been created, deleted, or invisible.
@@ -489,20 +495,30 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Protect(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Protect(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Protect(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Protect(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 _ => (),
@@ -574,20 +590,30 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Lock(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Lock(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Lock(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Lock(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 _ => (),
@@ -662,21 +688,31 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Delete(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Delete(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
                         // Wait for the database resource to be available to the transaction.
-                        let message_sender = journal.message_sender();
-                        let owner = Owner::from(journal);
-                        let request = Request::Delete(Instant::now(), owner.clone());
+                        let overseer = journal.overseer();
+                        let result_placeholder = Arc::new(AccessRequestResult::default());
+                        let request = Request::Delete(
+                            Instant::now(),
+                            Owner::from(journal),
+                            result_placeholder.clone(),
+                        );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(owner, entry, message_sender, deadline).await;
+                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
+                            .await;
                     }
                 }
                 _ => (),
@@ -726,40 +762,54 @@ impl<S: Sequencer> AccessController<S> {
         mut wait_queue: WaitQueue<S>,
     ) -> Option<WaitQueue<S>> {
         while let Some(request) = wait_queue.clone_oldest() {
-            if request.owner().is_result_set() {
-                // The request must have been timed out.
-                wait_queue.remove_oldest();
-                continue;
-            }
-            let result = match &request {
-                Request::Create(_, new_owner) => {
-                    Self::try_create(object_state, &new_owner.anchor, Some(Instant::now()))
-                }
-                Request::Protect(_, new_owner) => {
-                    Self::try_share(object_state, &new_owner.anchor, Some(Instant::now()))
-                }
-                Request::Lock(_, new_owner) => {
-                    Self::try_lock(object_state, &new_owner.anchor, Some(Instant::now()))
-                }
-                Request::Delete(_, new_owner) => {
-                    Self::try_delete(object_state, &new_owner.anchor, Some(Instant::now()))
-                }
+            let result_placeholder = match &request {
+                Request::Create(_, _, result_placeholder)
+                | Request::Protect(_, _, result_placeholder)
+                | Request::Lock(_, _, result_placeholder)
+                | Request::Delete(_, _, result_placeholder) => result_placeholder,
             };
-            match result {
-                Ok(Some(result)) => {
+            if let Some(mut result_waker) = result_placeholder.lock_sync() {
+                if result_waker.0.is_some() {
+                    // The request was timed out.
                     wait_queue.remove_oldest();
-                    request.owner().set_result(Ok(result));
+                    continue;
                 }
-                Ok(None) => {
-                    break;
+                let result = match &request {
+                    Request::Create(_, new_owner, _) => {
+                        Self::try_create(object_state, &new_owner.anchor, Some(Instant::now()))
+                    }
+                    Request::Protect(_, new_owner, _) => {
+                        Self::try_share(object_state, &new_owner.anchor, Some(Instant::now()))
+                    }
+                    Request::Lock(_, new_owner, _) => {
+                        Self::try_lock(object_state, &new_owner.anchor, Some(Instant::now()))
+                    }
+                    Request::Delete(_, new_owner, _) => {
+                        Self::try_delete(object_state, &new_owner.anchor, Some(Instant::now()))
+                    }
+                };
+                match result {
+                    Ok(Some(result)) => {
+                        // The result is out.
+                        result_waker.0.replace(Ok(result));
+                    }
+                    Ok(None) => {
+                        // The request will be retried later.
+                        break;
+                    }
+                    Err(error) => {
+                        // An error was returned.
+                        result_waker.0.replace(Err(error));
+                    }
                 }
-                Err(error) => {
-                    wait_queue.remove_oldest();
-                    request.owner().set_result(Err(error));
+                if let Some(waker) = result_waker.1.take() {
+                    waker.wake();
                 }
+            } else {
+                // The `Mutex` was poisoned.
+                wait_queue.remove_oldest();
             }
         }
-
         if wait_queue.is_empty() {
             None
         } else {
@@ -1608,25 +1658,6 @@ impl<S: Sequencer> Owner<S> {
             anchor: anchor.clone(),
         }
     }
-
-    /// Sets the access control result.
-    fn set_result(&self, result: Result<bool, Error>) {
-        if let Ok(mut r) = self.access_request_result_placeholder().lock() {
-            if let Err(error) = r.set_result(result) {
-                // `Error::Timeout` can be set by the requester.
-                debug_assert_eq!(error, Error::Timeout);
-            }
-        }
-    }
-
-    /// Checks if a result was set.
-    fn is_result_set(&self) -> bool {
-        if let Ok(r) = self.access_request_result_placeholder().lock() {
-            r.is_result_set()
-        } else {
-            false
-        }
-    }
 }
 
 impl<S: Sequencer> Clone for Owner<S> {
@@ -1790,26 +1821,22 @@ impl<S: Sequencer> ObjectState<S> {
     }
 }
 
-impl<S: Sequencer> Request<S> {
-    /// Returns a reference to its `owner` field.
-    fn owner(&self) -> &Owner<S> {
-        match self {
-            Request::Create(_, owner)
-            | Request::Protect(_, owner)
-            | Request::Lock(_, owner)
-            | Request::Delete(_, owner) => owner,
-        }
-    }
-}
-
 impl<S: Sequencer> Clone for Request<S> {
     #[inline]
     fn clone(&self) -> Self {
         match self {
-            Self::Create(instant, owner) => Self::Create(*instant, owner.clone()),
-            Self::Protect(instant, owner) => Self::Protect(*instant, owner.clone()),
-            Self::Lock(instant, owner) => Self::Lock(*instant, owner.clone()),
-            Self::Delete(instant, owner) => Self::Delete(*instant, owner.clone()),
+            Self::Create(instant, owner, result_placeholder) => {
+                Self::Create(*instant, owner.clone(), result_placeholder.clone())
+            }
+            Self::Protect(instant, owner, result_placeholder) => {
+                Self::Protect(*instant, owner.clone(), result_placeholder.clone())
+            }
+            Self::Lock(instant, owner, result_placeholder) => {
+                Self::Lock(*instant, owner.clone(), result_placeholder.clone())
+            }
+            Self::Delete(instant, owner, result_placeholder) => {
+                Self::Delete(*instant, owner.clone(), result_placeholder.clone())
+            }
         }
     }
 }
@@ -2028,7 +2055,21 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
     fn drop(&mut self) {
         self.0.drain(..).for_each(|r| {
             // The wait queue is being dropped due to memory allocation failure.
-            r.owner().set_result(Err(Error::OutOfMemory));
+
+            let result_placeholder = match &r {
+                Request::Create(_, _, result_placeholder)
+                | Request::Protect(_, _, result_placeholder)
+                | Request::Lock(_, _, result_placeholder)
+                | Request::Delete(_, _, result_placeholder) => result_placeholder,
+            };
+            if let Some(mut result_waker) = result_placeholder.lock_sync() {
+                if result_waker.0.is_none() {
+                    result_waker.0.replace(Err(Error::OutOfMemory));
+                }
+                if let Some(waker) = result_waker.1.take() {
+                    waker.wake();
+                }
+            }
         });
     }
 }
