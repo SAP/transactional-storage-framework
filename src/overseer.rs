@@ -66,7 +66,10 @@ impl Overseer {
 
     /// Sends a [`Task`] to the [`Overseer`].
     ///
-    /// Returns `false` if the [`Task`] could not be sent.
+    /// Returns `false` if the [`Task`] could not be sent. It is usually not a problem since it
+    /// means that the send buffer is full, and therefore the worker thread is guaranteed to run
+    /// afterwards., However certain types of tasks that need very specific information, e.g.,
+    /// [`Task::Monitor`] will need to be sent to the [`Overseer`] eventually.
     pub(super) fn send_task(&self, task: Task) -> bool {
         self.sender.try_send(task).is_ok()
     }
