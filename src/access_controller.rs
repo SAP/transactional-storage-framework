@@ -2037,6 +2037,7 @@ impl<S: Sequencer> WaitQueue<S> {
 }
 
 impl<S: Sequencer> Clone for WaitQueue<S> {
+    #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
@@ -2059,6 +2060,7 @@ impl<S: Sequencer> DerefMut for WaitQueue<S> {
 }
 
 impl<S: Sequencer> Drop for WaitQueue<S> {
+    #[inline]
     fn drop(&mut self) {
         self.0.drain(..).for_each(|r| {
             // The wait queue is being dropped due to memory allocation failure.

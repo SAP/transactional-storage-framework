@@ -207,6 +207,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 }
 
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
+    #[inline]
     fn drop(&mut self) {
         if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
             self.anchor.rollback(self.transaction.database().overseer());
