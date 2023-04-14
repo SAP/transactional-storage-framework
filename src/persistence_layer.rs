@@ -13,7 +13,7 @@ use std::task::{Context, Poll, Waker};
 /// the persistence layer of the database.
 ///
 /// Any [`PersistenceLayer`] implementation must be linearizable such that any [`PersistenceLayer`]
-/// method invokation after a previously concluded [`PersistenceLayer`] call should be recovered
+/// method invocation after a previously concluded [`PersistenceLayer`] call should be recovered
 /// in the same order, e.g., `commit(1, 1)` returned an [`AwaitIO`], and then `commit(2, 2)` is
 /// invoked, `commit(1, 1)` should be recovered before `commit(2, 2)` whether or not the returned
 /// [`AwaitIO`] was awaited.
@@ -103,7 +103,8 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 /// successfully materialized in memory and ready for being persisted.
 ///
 /// Dropping an [`AwaitIO`] without awaiting it is allowed if the user does not need to wait for an
-/// IO completion.
+/// IO completion. If an [`AwaitIO`] returns an [`Error`], all the future [`PersistenceLayer`]
+/// operations shall fail until recovered.
 #[derive(Debug)]
 pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     persistence_layer: &'p P,

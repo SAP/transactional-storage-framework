@@ -209,6 +209,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// clock value. It requires a mutable reference to the [`Transaction`], thus ensuring
     /// exclusivity.
     ///
+    /// # Errors
+    ///
+    /// An [`Error`] is returned if the corresponding log record could not be constructed.
+    ///
     /// # Examples
     ///
     /// ```
@@ -216,7 +220,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// assert_eq!(transaction.rewind(1), 0);
+    /// assert_eq!(transaction.rewind(1), Ok(0));
     ///
     /// for _ in 0..3 {
     ///     let journal = transaction.journal();
@@ -224,12 +228,12 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// }
     ///
     /// assert_eq!(transaction.now(), 3);
-    /// assert_eq!(transaction.rewind(4), 3);
-    /// assert_eq!(transaction.rewind(3), 3);
-    /// assert_eq!(transaction.rewind(1), 1);
+    /// assert_eq!(transaction.rewind(4), Ok(3));
+    /// assert_eq!(transaction.rewind(3), Ok(3));
+    /// assert_eq!(transaction.rewind(1), Ok(1));
     /// ```
     #[inline]
-    pub fn rewind(&mut self, instant: usize) -> usize {
+    pub fn rewind(&mut self, instant: usize) -> Result<usize, Error> {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             if record.submit_instant() <= instant {
@@ -241,7 +245,17 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         }
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
-        new_instant
+
+        let io_completion = self
+            .database
+            .persistence_layer()
+            .rewind(self.id(), new_instant)?;
+
+        // Do not wait for an IO completion.
+        #[allow(clippy::drop_non_drop)]
+        drop(io_completion);
+
+        Ok(new_instant)
     }
 
     /// Prepares the [Transaction] for commit.
@@ -317,6 +331,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
     /// Rolls back the changes made by the [Transaction].
     ///
+    /// # Panics
+    ///
+    /// Any failure when rolling back the transaction, e.g., memory allocation failure or an IO
+    /// error, will lead to a panic.
+    ///
     /// # Examples
     ///
     /// ```
@@ -324,15 +343,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// async {
-    ///     transaction.rollback().await;
-    /// };
+    /// transaction.rollback();
     /// ```
-    #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn rollback(mut self) {
+    pub fn rollback(mut self) {
         self.rollback_internal();
-        // TODO: asynchronously persist the fact.
         drop(self);
     }
 
@@ -413,7 +428,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.anchor.state.store(State::RollingBack.into(), Release);
         self.anchor.wake_up();
 
-        let result = self.rewind(0);
+        let result = self.rewind(0).unwrap();
         debug_assert_eq!(result, 0);
 
         self.anchor.state.store(State::RolledBack.into(), Release);
@@ -561,13 +576,13 @@ mod test {
                 Arc::get_mut(&mut transaction)
                     .unwrap()
                     .rewind(num_submitted_journals - i - 1),
-                num_submitted_journals - i - 1
+                Ok(num_submitted_journals - i - 1)
             );
             assert_eq!(
                 Arc::get_mut(&mut transaction)
                     .unwrap()
                     .rewind(UNREACHABLE_TRANSACTION_INSTANT),
-                num_submitted_journals - i - 1
+                Ok(num_submitted_journals - i - 1)
             );
         }
         assert_eq!(transaction.now(), UNFINISHED_TRANSACTION_INSTANT);

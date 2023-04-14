@@ -136,10 +136,10 @@ pub(super) enum Relationship<S: Sequencer> {
 }
 
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
-    /// The transaction identifier.
+    /// The journal identifier.
     ///
-    /// The identifier is unique in the process, however the same identifier can be used after the
-    /// transaction is committed or rolled back by an unrelated database transaction.
+    /// The identifier is only unique in the same transaction, and the same identifier can be used
+    /// later if the journal was rolled back.
     ///
     /// # Examples
     ///
