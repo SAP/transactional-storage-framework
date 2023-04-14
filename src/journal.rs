@@ -29,6 +29,12 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
+/// The type of journal identifiers.
+///
+/// The identifier of a journal is only within the transaction, and the same identifier can be used
+/// after the journal was rolled back.
+pub type ID = usize;
+
 /// [`Anchor`] is a piece of data that outlives its associated [`Journal`] allowing asynchronous
 /// operations.
 #[derive(Debug)]
@@ -130,6 +136,28 @@ pub(super) enum Relationship<S: Sequencer> {
 }
 
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
+    /// The transaction identifier.
+    ///
+    /// The identifier is unique in the process, however the same identifier can be used after the
+    /// transaction is committed or rolled back by an unrelated database transaction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::{Database, Transaction};
+    ///
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
+    /// let journal_1 = transaction.journal();
+    /// let journal_2 = transaction.journal();
+    /// assert_ne!(journal_1.id(), journal_2.id());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn id(&self) -> ID {
+        self.anchor.id()
+    }
+
     /// Submits the [`Journal`] to the [`Transaction`].
     ///
     /// The logical clock of the corresponding [`Transaction`] advances towards the next time
@@ -216,6 +244,11 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 }
 
 impl<S: Sequencer> Anchor<S> {
+    /// The identifier of the corresponding journal is returned.
+    pub(super) fn id(&self) -> ID {
+        self as *const Anchor<S> as usize
+    }
+
     /// The transaction identifier is returned.
     pub(super) fn transaction_id(&self) -> usize {
         self.transaction_anchor.as_ptr() as usize
