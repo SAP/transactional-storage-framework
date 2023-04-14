@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 /// Developers are able to implement their own sequencing mechanism other than a simple atomic
 /// counter by implementing the [`Sequencer`] trait, for instance, the system timestamp generator
 /// can directly be used, or an efficient hardware-aided counter can also be incorporated.
-pub trait Sequencer: 'static + Debug + Default + Send + Sync {
+pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
     /// [`Instant`](Sequencer::Instant) is a partially ordered type representing an instant in a
     /// database system.
     ///
@@ -33,7 +33,7 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync {
     ///
     /// The [`Default`] value is regarded as `⊥`, and the value is not allowed to be used by a
     /// transaction as its commit time point value.
-    type Instant: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync;
+    type Instant: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync + Unpin;
 
     /// [`Tracker`](Sequencer::Tracker) allows the sequencer to track every actively used
     /// [`Instant`](Sequencer::Instant) instance associated with a [`Snapshot`](super::Snapshot).
