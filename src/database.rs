@@ -310,7 +310,7 @@ impl Default for Database<AtomicCounter, MemoryDevice<AtomicCounter>> {
     /// Creates an empty default [`Database`] instance.
     ///
     /// The type of the [`Sequencer`] is [`AtomicCounter`], and the persistence layer is of
-    /// [`Memory`].
+    /// [`MemoryDevice`].
     ///
     /// # Examples
     ///

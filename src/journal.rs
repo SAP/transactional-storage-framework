@@ -222,7 +222,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 
     /// Creates a new [`JournalSnapshot`].
     fn journal_snapshot(&self) -> JournalSnapshot {
-        JournalSnapshot::new(self.anchor.as_ref() as *const _ as usize)
+        JournalSnapshot::new(self.anchor.id())
     }
 }
 

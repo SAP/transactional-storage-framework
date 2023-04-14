@@ -18,12 +18,10 @@ use std::sync::atomic::Ordering::Acquire;
 /// There are three types of [`Snapshot`] which can be created using different methods.
 ///  1. [`Database::snapshot`](super::Database::snapshot) creates a [`Snapshot`] which only
 ///     contains globally committed data.
-///  2. [`Transaction::snapshot`](super::Transaction::snapshot) creates a [`Snapshot`] which
-///     contains globally committed data and changes in submitted [`Journal`](super::Journal)
-///     instances in the same transaction.
-///  3. [`Journal::snapshot`](super::Journal::snapshot) creates a [`Snapshot`] which contains
-///     globally committed data, changes in submitted [`Journal`](super::Journal) instances in the
-///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
+///  2. [`Transaction::snapshot`](super::Transaction::snapshot) creates a [`Snapshot`] which only
+///     contains changes in submitted [`Journal`](super::Journal) instances in the transaction.
+///  3. [`Journal::snapshot`](super::Journal::snapshot) creates a [`Snapshot`] which only contains
+///     changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     /// The logical instant of the database system being tracked by [`Database`].
@@ -41,7 +39,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     /// The associated [`Journal`](super::Journal).
     ///
     /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
-    /// database made by the [`Journal`].
+    /// database made by the [`Journal`](super::Journal).
     journal_snapshot: Option<JournalSnapshot<'j>>,
 
     /// Enables the [`Snapshot`] to silently sleep until a transaction to be committed or rolled
@@ -79,7 +77,8 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// if they are both created by different [`Database`] instances, `self` is returned, or if
     /// they both have transaction snapshots, that of `self` is taken.
     ///
-    /// This method allows a journal snapshot taken from a different transaction.
+    /// This method allows a journal snapshot taken from different transactions as long as they
+    /// are from the same [`Database`].
     ///
     /// # Examples
     ///
@@ -220,5 +219,60 @@ impl<'j> JournalSnapshot<'j> {
             id,
             _phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::Database;
+
+    #[tokio::test]
+    async fn combine() {
+        let database = Database::default();
+
+        assert!(database.transaction().commit().await.is_ok());
+
+        let database_other = Database::default();
+        let database_snapshot = database.snapshot();
+        assert_eq!(
+            database_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        let transaction_other = database_other.transaction();
+        let transaction_snapshot_other = transaction_other.snapshot();
+        let database_snapshot = database_snapshot.combine(transaction_snapshot_other);
+        assert_eq!(
+            database_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(database_snapshot.transaction_snapshot().is_none());
+
+        let transaction = database.transaction();
+        let transaction_snapshot = transaction.snapshot();
+
+        let combined_snapshot = database_snapshot.combine(transaction_snapshot);
+        assert_eq!(
+            combined_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+
+        let journal = transaction.journal();
+        let journal_snapshot = journal.snapshot();
+
+        let combined_snapshot = combined_snapshot.combine(journal_snapshot);
+        assert_eq!(
+            combined_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+        assert!(combined_snapshot.journal_snapshot().is_some());
+
+        let transaction_snapshot = transaction.snapshot();
+        let journal_snapshot = journal.snapshot();
+        let combined_snapshot = journal_snapshot.combine(transaction_snapshot);
+        assert_eq!(combined_snapshot.database_snapshot(), 0);
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+        assert!(combined_snapshot.journal_snapshot().is_some());
     }
 }
