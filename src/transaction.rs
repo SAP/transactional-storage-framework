@@ -38,6 +38,40 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
+/// The type of transaction identifiers.
+///
+/// The identifier of a transaction is only valid during the lifetime of the transaction. The same
+/// identifier can be used by an unrelated transaction afterwards.
+pub type ID = usize;
+
+/// Possible [`Transaction`] states.
+#[derive(Clone, Copy, Eq, Debug, Ord, PartialEq, PartialOrd)]
+pub enum State {
+    /// The transaction is active.
+    Active,
+
+    /// The transaction is being committed.
+    Committing,
+
+    /// The transaction is committed.
+    Committed,
+
+    /// The transaction is being rolled back.
+    RollingBack,
+
+    /// The transaction is rolled back.
+    RolledBack,
+}
+
+/// [`Committable`] gives one last chance of rolling back the transaction.
+///
+/// The transaction is bound to be rolled back if no actions are taken before dropping the
+/// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
+/// [`Committable`] instance is dropped or awaited.
+pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
+    transaction: Option<Transaction<'d, S, P>>,
+}
+
 /// `0` as a transaction logical time point value represents an unfinished job.
 pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 
@@ -48,6 +82,29 @@ pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 /// [`UNREACHABLE_TRANSACTION_INSTANT`], and changes made at [`UNREACHABLE_TRANSACTION_INSTANT`]
 /// can never be visible to any other jobs in the same transaction.
 pub const UNREACHABLE_TRANSACTION_INSTANT: usize = usize::MAX;
+
+/// [Anchor] contains data that is required to outlive the [Transaction] instance.
+#[derive(Debug)]
+pub(super) struct Anchor<S: Sequencer> {
+    /// The transaction state.
+    ///
+    /// An integer represents a transaction state.
+    ///  * 0: active.
+    ///  * 1: commit started.
+    ///  * 2: committed.
+    ///  * 3: abort started.
+    ///  * 4: aborted.
+    state: AtomicUsize,
+
+    /// The instant when the commit has begun.
+    prepare_instant: S::Instant,
+
+    /// The instant when the commit is completed.
+    commit_instant: S::Instant,
+
+    /// An unordered bag of [`Waker`] for readers.
+    waiting_readers: Bag<Waker, 4>,
+}
 
 impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// The transaction identifier.
@@ -65,8 +122,8 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// assert_ne!(transaction.id(), 0);
     /// ```
     #[inline]
-    pub fn id(&self) -> usize {
-        self.anchor.as_ptr() as usize
+    pub fn id(&self) -> ID {
+        self.anchor.as_ptr() as ID
     }
 
     /// Creates a new [`Journal`].
@@ -152,6 +209,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// clock value. It requires a mutable reference to the [`Transaction`], thus ensuring
     /// exclusivity.
     ///
+    /// # Errors
+    ///
+    /// An [`Error`] is returned if the corresponding log record could not be constructed.
+    ///
     /// # Examples
     ///
     /// ```
@@ -159,7 +220,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// assert_eq!(transaction.rewind(1), 0);
+    /// assert_eq!(transaction.rewind(1), Ok(0));
     ///
     /// for _ in 0..3 {
     ///     let journal = transaction.journal();
@@ -167,12 +228,12 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// }
     ///
     /// assert_eq!(transaction.now(), 3);
-    /// assert_eq!(transaction.rewind(4), 3);
-    /// assert_eq!(transaction.rewind(3), 3);
-    /// assert_eq!(transaction.rewind(1), 1);
+    /// assert_eq!(transaction.rewind(4), Ok(3));
+    /// assert_eq!(transaction.rewind(3), Ok(3));
+    /// assert_eq!(transaction.rewind(1), Ok(1));
     /// ```
     #[inline]
-    pub fn rewind(&mut self, instant: usize) -> usize {
+    pub fn rewind(&mut self, instant: usize) -> Result<usize, Error> {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             if record.submit_instant() <= instant {
@@ -184,7 +245,17 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         }
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
-        new_instant
+
+        let io_completion = self
+            .database
+            .persistence_layer()
+            .rewind(self.id(), new_instant)?;
+
+        // Do not wait for an IO completion.
+        #[allow(clippy::drop_non_drop)]
+        drop(io_completion);
+
+        Ok(new_instant)
     }
 
     /// Prepares the [Transaction] for commit.
@@ -209,15 +280,27 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///     }
     /// };
     /// ```
-    #[allow(clippy::unused_async)]
     #[inline]
     pub async fn prepare(self) -> Result<Committable<'d, S, P>, Error> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
+        let prepare_instant = self.sequencer().now(Relaxed);
+
         // Safety: it is the sole writer of its own `anchor`.
-        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
-        anchor_mut_ref.prepare_instant = self.sequencer().now(Relaxed);
-        anchor_mut_ref.state.store(1, Release);
+        unsafe {
+            let anchor_mut_ref = &mut *(addr_of!(*self.anchor) as *mut Anchor<S>);
+            anchor_mut_ref.prepare_instant = prepare_instant;
+            anchor_mut_ref
+                .state
+                .store(State::Committing.into(), Release);
+        }
+
+        let io_completion = self
+            .database
+            .persistence_layer()
+            .prepare(self.id(), prepare_instant)?;
+        io_completion.await?;
+
         Ok(Committable {
             transaction: Some(self),
         })
@@ -248,6 +331,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
     /// Rolls back the changes made by the [Transaction].
     ///
+    /// # Panics
+    ///
+    /// Any failure when rolling back the transaction, e.g., memory allocation failure or an IO
+    /// error, will lead to a panic.
+    ///
     /// # Examples
     ///
     /// ```
@@ -255,15 +343,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// async {
-    ///     transaction.rollback().await;
-    /// };
+    /// transaction.rollback();
     /// ```
-    #[allow(clippy::unused_async)]
     #[inline]
-    pub async fn rollback(mut self) {
+    pub fn rollback(mut self) {
         self.rollback_internal();
-        // TODO: asynchronously persist the fact.
         drop(self);
     }
 
@@ -344,7 +428,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.anchor.state.store(State::RollingBack.into(), Release);
         self.anchor.wake_up();
 
-        let result = self.rewind(0);
+        let result = self.rewind(0).unwrap();
         debug_assert_eq!(result, 0);
 
         self.anchor.state.store(State::RolledBack.into(), Release);
@@ -362,15 +446,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'d, S, P> {
     }
 }
 
-/// [`Committable`] gives one last chance of rolling back the transaction.
-///
-/// The transaction is bound to be rolled back if no actions are taken before dropping the
-/// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
-/// [`Committable`] instance is dropped or awaited.
-pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
-    transaction: Option<Transaction<'d, S, P>>,
-}
-
 impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> {
     type Output = Result<S::Instant, Error>;
 
@@ -385,25 +460,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
     }
 }
 
-/// [`Transaction`] state.
-#[derive(Clone, Copy, Eq, Debug, Ord, PartialEq, PartialOrd)]
-pub enum State {
-    /// The transaction is active.
-    Active,
-
-    /// The transaction is being committed.
-    Committing,
-
-    /// The transaction is committed.
-    Committed,
-
-    /// The transaction is being rolled back.
-    RollingBack,
-
-    /// The transaction is rolled back.
-    RolledBack,
-}
-
 impl From<State> for usize {
     #[inline]
     fn from(v: State) -> usize {
@@ -415,29 +471,6 @@ impl From<State> for usize {
             State::RolledBack => 4,
         }
     }
-}
-
-/// [Anchor] contains data that is required to outlive the [Transaction] instance.
-#[derive(Debug)]
-pub(super) struct Anchor<S: Sequencer> {
-    /// The transaction state.
-    ///
-    /// An integer represents a transaction state.
-    ///  * 0: active.
-    ///  * 1: commit started.
-    ///  * 2: committed.
-    ///  * 3: abort started.
-    ///  * 4: aborted.
-    state: AtomicUsize,
-
-    /// The instant when the commit has begun.
-    prepare_instant: S::Instant,
-
-    /// The instant when the commit is completed.
-    commit_instant: S::Instant,
-
-    /// An unordered bag of [`Waker`] for readers.
-    waiting_readers: Bag<Waker, 4>,
 }
 
 impl<S: Sequencer> Anchor<S> {
@@ -543,13 +576,13 @@ mod test {
                 Arc::get_mut(&mut transaction)
                     .unwrap()
                     .rewind(num_submitted_journals - i - 1),
-                num_submitted_journals - i - 1
+                Ok(num_submitted_journals - i - 1)
             );
             assert_eq!(
                 Arc::get_mut(&mut transaction)
                     .unwrap()
                     .rewind(UNREACHABLE_TRANSACTION_INSTANT),
-                num_submitted_journals - i - 1
+                Ok(num_submitted_journals - i - 1)
             );
         }
         assert_eq!(transaction.now(), UNFINISHED_TRANSACTION_INSTANT);

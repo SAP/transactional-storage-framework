@@ -2283,7 +2283,7 @@ mod test {
                             Ok(false)
                         );
                     }
-                    assert_eq!(transaction.rewind(num_shared_locks), num_shared_locks);
+                    assert_eq!(transaction.rewind(num_shared_locks), Ok(num_shared_locks));
                 }
             }
         }
@@ -2435,7 +2435,7 @@ mod test {
                             if transaction_action == TransactionAction::Commit {
                                 assert!(transaction.commit().await.is_ok());
                             } else if transaction_action == TransactionAction::Rollback {
-                                transaction.rollback().await;
+                                transaction.rollback();
                             }
                         };
                         let post_action_runner = async {
@@ -2695,7 +2695,7 @@ mod test {
                     if i % 2 == 0 {
                         assert!(transaction.commit().await.is_ok());
                     } else {
-                        transaction.rollback().await;
+                        transaction.rollback();
                     }
 
                     let transaction = database_clone.transaction();
@@ -2712,7 +2712,7 @@ mod test {
                     if i % 2 == 1 {
                         assert!(transaction.commit().await.is_ok());
                     } else {
-                        transaction.rollback().await;
+                        transaction.rollback();
                     }
                 }
             }));
@@ -2787,13 +2787,13 @@ mod test {
                             data_clone.store(num_tasks * 2, Relaxed);
                             assert!(transaction.commit().await.is_ok());
                         } else {
-                            transaction.rollback().await;
+                            transaction.rollback();
                         }
                     }
                     Err(error) => {
                         assert_eq!(error, Error::SerializationFailure);
                         assert_eq!(journal.submit(), 1);
-                        transaction.rollback().await;
+                        transaction.rollback();
                     }
                 }
             }));

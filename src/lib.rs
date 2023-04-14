@@ -26,12 +26,13 @@ pub use error::Error;
 
 mod journal;
 pub use journal::Journal;
+pub use journal::ID as JournalID;
 
 mod metadata;
 pub use metadata::Metadata;
 
 mod persistence_layer;
-pub use persistence_layer::{PersistenceLayer, VolatileDevice};
+pub use persistence_layer::{AwaitIO, PersistenceLayer, VolatileDevice};
 
 pub mod sequencer;
 pub use sequencer::{AtomicCounter, Sequencer};
@@ -40,6 +41,7 @@ mod snapshot;
 pub use snapshot::Snapshot;
 
 mod transaction;
+pub use transaction::ID as TransactionID;
 pub use transaction::{Committable, Transaction};
 
 mod overseer;

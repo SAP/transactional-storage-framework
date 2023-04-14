@@ -4,7 +4,7 @@
 
 use super::overseer::Overseer;
 use super::sequencer::ToInstant;
-use super::{Database, PersistenceLayer, Sequencer};
+use super::{Database, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use std::cmp;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::Acquire;
@@ -34,7 +34,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
 /// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
-    id: usize,
+    id: TransactionID,
     instant: usize,
     _phantom: PhantomData<&'t ()>,
 }
@@ -42,7 +42,7 @@ pub(super) struct TransactionSnapshot<'t> {
 /// Data representing the current state of the [`Journal`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct JournalSnapshot<'t, 'j> {
-    anchor_addr: usize,
+    id: JournalID,
     _phantom: PhantomData<(&'t (), &'j ())>,
 }
 
@@ -101,7 +101,7 @@ impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S
 
 impl<'t> TransactionSnapshot<'t> {
     /// Creates a new [`TransactionSnapshot`].
-    pub(super) fn new(id: usize, instant: usize) -> TransactionSnapshot<'t> {
+    pub(super) fn new(id: TransactionID, instant: usize) -> TransactionSnapshot<'t> {
         TransactionSnapshot {
             id,
             instant,
@@ -122,9 +122,9 @@ impl<'t> PartialOrd for TransactionSnapshot<'t> {
 
 impl<'t, 'j> JournalSnapshot<'t, 'j> {
     /// Creates a new [`JournalSnapshot`].
-    pub(super) fn new(anchor_addr: usize) -> JournalSnapshot<'t, 'j> {
+    pub(super) fn new(id: JournalID) -> JournalSnapshot<'t, 'j> {
         JournalSnapshot {
-            anchor_addr,
+            id,
             _phantom: PhantomData,
         }
     }

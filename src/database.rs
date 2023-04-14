@@ -42,7 +42,6 @@ pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
     access_controller: AccessController<S>,
 
     /// The persistence layer of the database.
-    #[allow(dead_code)]
     persistence_layer: P,
 }
 
@@ -294,6 +293,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Returns a reference to its [`Sequencer`].
     pub(super) fn sequencer(&self) -> &S {
         &self.kernel.sequencer
+    }
+
+    /// Returns a reference to the [`PersistenceLayer`].
+    pub(super) fn persistence_layer(&self) -> &P {
+        &self.kernel.persistence_layer
     }
 
     /// Returns a reference to its [`Overseer`].
