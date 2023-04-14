@@ -125,7 +125,7 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
 
 /// Volatile memory device.
 #[derive(Debug, Default)]
-pub struct VolatileDevice<S: Sequencer> {
+pub struct MemoryDevice<S: Sequencer> {
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -151,7 +151,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     }
 }
 
-impl<S: Sequencer> PersistenceLayer<S> for VolatileDevice<S> {
+impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
     #[inline]
     fn recover(
         &self,

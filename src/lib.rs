@@ -32,7 +32,7 @@ mod metadata;
 pub use metadata::Metadata;
 
 mod persistence_layer;
-pub use persistence_layer::{AwaitIO, PersistenceLayer, VolatileDevice};
+pub use persistence_layer::{AwaitIO, MemoryDevice, PersistenceLayer};
 
 pub mod sequencer;
 pub use sequencer::{AtomicCounter, Sequencer};
@@ -43,6 +43,8 @@ pub use snapshot::Snapshot;
 mod transaction;
 pub use transaction::ID as TransactionID;
 pub use transaction::{Committable, Transaction};
+
+mod telemetry;
 
 mod overseer;
 

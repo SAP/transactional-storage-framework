@@ -155,7 +155,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         Journal::new(self, self.anchor.clone())
     }
 
-    /// Captures the current state of the [`Database`] and the [`Transaction`] as a [`Snapshot`].
+    /// Captures the current state of the [`Transaction`] as a [`Snapshot`].
     ///
     /// If the number of submitted [`Journal`] instances is equal to or greater than
     /// `usize::MAX`, recent changes in the transaction will not be visible to the [`Snapshot`]
@@ -172,11 +172,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// ```
     #[inline]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(
-            self.database,
-            Some(self.transaction_snapshot(self.now())),
-            None,
-        )
+        Snapshot::from_transaction(self.database, self.transaction_snapshot(self.now()))
     }
 
     /// Participates in a distributed transaction.

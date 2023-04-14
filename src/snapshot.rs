@@ -25,39 +25,88 @@ use std::sync::atomic::Ordering::Acquire;
 ///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
+    /// The logical instant of the database system being tracked by [`Database`].
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database until the instant.
     tracker: Option<S::Tracker>,
+
+    /// The logical instant of the transaction.
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database made by the transaction until the instant.
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
-    journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
+
+    /// The associated [`Journal`](super::Journal).
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database made by the [`Journal`].
+    journal_snapshot: Option<JournalSnapshot<'j>>,
+
+    /// Enables the [`Snapshot`] to silently sleep until a transaction to be committed or rolled
+    /// back.
     overseer: &'d Overseer,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
+    /// The transaction identifier.
     id: TransactionID,
+
+    /// The logical instant of the transaction.
     instant: usize,
+
+    /// Limits the lifetime to that of the transaction.
     _phantom: PhantomData<&'t ()>,
 }
 
 /// Data representing the current state of the [`Journal`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct JournalSnapshot<'t, 'j> {
+pub(super) struct JournalSnapshot<'j> {
+    /// The journal identifier.
     id: JournalID,
-    _phantom: PhantomData<(&'t (), &'j ())>,
+
+    /// Limits the lifetime to that of the journal.
+    _phantom: PhantomData<&'j ()>,
 }
 
 impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
-    /// Creates a new [`Snapshot`].
-    pub(super) fn from_parts<P: PersistenceLayer<S>>(
+    /// Creates a new [`Snapshot`] from a [`Database`]
+    pub(super) fn from_database<P: PersistenceLayer<S>>(
         database: &'d Database<S, P>,
-        transaction_snapshot: Option<TransactionSnapshot<'t>>,
-        journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
     ) -> Snapshot<'d, 't, 'j, S> {
         let tracker = database.sequencer().track(Acquire);
         Snapshot {
             tracker: Some(tracker),
-            transaction_snapshot,
-            journal_snapshot,
+            transaction_snapshot: None,
+            journal_snapshot: None,
+            overseer: database.overseer(),
+        }
+    }
+
+    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
+    pub(super) fn from_transaction<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+        transaction_snapshot: TransactionSnapshot<'t>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        Snapshot {
+            tracker: None,
+            transaction_snapshot: Some(transaction_snapshot),
+            journal_snapshot: None,
+            overseer: database.overseer(),
+        }
+    }
+
+    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
+    pub(super) fn from_journal<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+        journal_snapshot: JournalSnapshot<'j>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        Snapshot {
+            tracker: None,
+            transaction_snapshot: None,
+            journal_snapshot: Some(journal_snapshot),
             overseer: database.overseer(),
         }
     }
@@ -75,7 +124,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     }
 
     /// Returns a reference to its [`JournalSnapshot`].
-    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
+    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'j>> {
         self.journal_snapshot.as_ref()
     }
 
@@ -120,9 +169,9 @@ impl<'t> PartialOrd for TransactionSnapshot<'t> {
     }
 }
 
-impl<'t, 'j> JournalSnapshot<'t, 'j> {
+impl<'j> JournalSnapshot<'j> {
     /// Creates a new [`JournalSnapshot`].
-    pub(super) fn new(id: JournalID) -> JournalSnapshot<'t, 'j> {
+    pub(super) fn new(id: JournalID) -> JournalSnapshot<'j> {
         JournalSnapshot {
             id,
             _phantom: PhantomData,
