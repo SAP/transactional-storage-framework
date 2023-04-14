@@ -2160,7 +2160,7 @@ mod test {
                         Some(Instant::now() + TIMEOUT_UNEXPECTED),
                     )
                     .await,
-                Ok(access_action != AccessAction::Delete),
+                Ok(access_action == AccessAction::Create),
             );
             assert_eq!(journal.submit(), 1);
             let transaction_snapshot = transaction.snapshot();
@@ -2172,7 +2172,7 @@ mod test {
                         Some(Instant::now() + TIMEOUT_UNEXPECTED),
                     )
                     .await,
-                Ok(access_action != AccessAction::Delete),
+                Ok(access_action == AccessAction::Create),
             );
             assert!(transaction.commit().await.is_ok());
             let database_snapshot = database.snapshot();

@@ -4,8 +4,8 @@
 
 use super::overseer::{Overseer, Task};
 use super::{
-    AccessController, AtomicCounter, Container, Error, Journal, Metadata, PersistenceLayer,
-    Sequencer, Snapshot, Transaction, VolatileDevice,
+    AccessController, AtomicCounter, Container, Error, Journal, MemoryDevice, Metadata,
+    PersistenceLayer, Sequencer, Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use std::time::Instant;
 /// [`Database`] provides the interface for users to interact with each individual transactional
 /// [`Container`] in it.
 #[derive(Debug)]
-pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = VolatileDevice<S>> {
+pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = MemoryDevice<S>> {
     /// The kernel of the database.
     ///
     /// The kernel of the database has to be allocated on the heap in order to provide stable
@@ -51,10 +51,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{AtomicCounter, Database, VolatileDevice};
+    /// use sap_tsf::{AtomicCounter, Database, MemoryDevice};
     ///
     /// let database: Database<AtomicCounter> =
-    ///     Database::with_persistence_layer(VolatileDevice::default());
+    ///     Database::with_persistence_layer(MemoryDevice::default());
     /// ```
     #[inline]
     #[must_use]
@@ -99,7 +99,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     #[inline]
     #[must_use]
     pub fn snapshot(&self) -> Snapshot<S> {
-        Snapshot::from_parts(self, None, None)
+        Snapshot::from_database(self)
     }
 
     /// Returns a reference to its [`AccessController`].
@@ -306,11 +306,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     }
 }
 
-impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
+impl Default for Database<AtomicCounter, MemoryDevice<AtomicCounter>> {
     /// Creates an empty default [`Database`] instance.
     ///
     /// The type of the [`Sequencer`] is [`AtomicCounter`], and the persistence layer is of
-    /// [`VolatileDevice`].
+    /// [`MemoryDevice`].
     ///
     /// # Examples
     ///
@@ -325,7 +325,7 @@ impl Default for Database<AtomicCounter, VolatileDevice<AtomicCounter>> {
             sequencer: AtomicCounter::default(),
             container_map: HashIndex::default(),
             access_controller: AccessController::default(),
-            persistence_layer: VolatileDevice::default(),
+            persistence_layer: MemoryDevice::default(),
         });
         let overseer = Overseer::spawn(kernel.clone());
         Database { kernel, overseer }

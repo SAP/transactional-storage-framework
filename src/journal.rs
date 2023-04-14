@@ -181,8 +181,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
         self.transaction.record(&self.anchor)
     }
 
-    /// Captures the current state of the [`Database`](super::Database), the [`Transaction`], and
-    /// the [`Journal`] as a [`Snapshot`].
+    /// Captures the current state of the [`Journal`] as a [`Snapshot`].
     ///
     /// # Examples
     ///
@@ -197,14 +196,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     #[inline]
     #[must_use]
     pub fn snapshot<'j>(&'j self) -> Snapshot<'d, 't, 'j, S> {
-        Snapshot::from_parts(
-            self.transaction.database(),
-            Some(
-                self.transaction
-                    .transaction_snapshot(self.anchor.creation_instant),
-            ),
-            Some(self.journal_snapshot()),
-        )
+        Snapshot::from_journal(self.transaction.database(), self.journal_snapshot())
     }
 
     /// Returns a reference to the [`Overseer`].
@@ -229,8 +221,8 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     }
 
     /// Creates a new [`JournalSnapshot`].
-    fn journal_snapshot<'j>(&'j self) -> JournalSnapshot<'t, 'j> {
-        JournalSnapshot::new(self.anchor.as_ref() as *const _ as usize)
+    fn journal_snapshot(&self) -> JournalSnapshot {
+        JournalSnapshot::new(self.anchor.id())
     }
 }
 

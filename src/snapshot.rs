@@ -7,6 +7,7 @@ use super::sequencer::ToInstant;
 use super::{Database, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use std::cmp;
 use std::marker::PhantomData;
+use std::ptr;
 use std::sync::atomic::Ordering::Acquire;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
@@ -17,48 +18,100 @@ use std::sync::atomic::Ordering::Acquire;
 /// There are three types of [`Snapshot`] which can be created using different methods.
 ///  1. [`Database::snapshot`](super::Database::snapshot) creates a [`Snapshot`] which only
 ///     contains globally committed data.
-///  2. [`Transaction::snapshot`](super::Transaction::snapshot) creates a [`Snapshot`] which
-///     contains globally committed data and changes in submitted [`Journal`](super::Journal)
-///     instances in the same transaction.
-///  3. [`Journal::snapshot`](super::Journal::snapshot) creates a [`Snapshot`] which contains
-///     globally committed data, changes in submitted [`Journal`](super::Journal) instances in the
-///     same transaction, and changes that are pending in the [`Journal`](super::Journal).
+///  2. [`Transaction::snapshot`](super::Transaction::snapshot) creates a [`Snapshot`] which only
+///     contains changes in submitted [`Journal`](super::Journal) instances in the transaction.
+///  3. [`Journal::snapshot`](super::Journal::snapshot) creates a [`Snapshot`] which only contains
+///     changes that are pending in the [`Journal`](super::Journal).
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
+    /// The logical instant of the database system being tracked by [`Database`].
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database until the instant.
     tracker: Option<S::Tracker>,
+
+    /// The logical instant of the transaction.
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database made by the transaction until the instant.
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
-    journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
+
+    /// The associated [`Journal`](super::Journal).
+    ///
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
+    /// database made by the [`Journal`](super::Journal).
+    journal_snapshot: Option<JournalSnapshot<'j>>,
+
+    /// Enables the [`Snapshot`] to silently sleep until a transaction to be committed or rolled
+    /// back.
     overseer: &'d Overseer,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TransactionSnapshot<'t> {
+    /// The transaction identifier.
     id: TransactionID,
+
+    /// The logical instant of the transaction.
     instant: usize,
+
+    /// Limits the lifetime to that of the transaction.
     _phantom: PhantomData<&'t ()>,
 }
 
 /// Data representing the current state of the [`Journal`](super::Transaction).
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct JournalSnapshot<'t, 'j> {
+pub(super) struct JournalSnapshot<'j> {
+    /// The journal identifier.
     id: JournalID,
-    _phantom: PhantomData<(&'t (), &'j ())>,
+
+    /// Limits the lifetime to that of the journal.
+    _phantom: PhantomData<&'j ()>,
 }
 
 impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
-    /// Creates a new [`Snapshot`].
-    pub(super) fn from_parts<P: PersistenceLayer<S>>(
-        database: &'d Database<S, P>,
-        transaction_snapshot: Option<TransactionSnapshot<'t>>,
-        journal_snapshot: Option<JournalSnapshot<'t, 'j>>,
-    ) -> Snapshot<'d, 't, 'j, S> {
-        let tracker = database.sequencer().track(Acquire);
-        Snapshot {
-            tracker: Some(tracker),
+    /// Combines two [`Snapshot`] instances to form a single [`Snapshot`].
+    ///
+    /// If the supplied [`Snapshot`] conflicts with `self`, `self` is prioritized. For instance,
+    /// if they are both created by different [`Database`] instances, `self` is returned, or if
+    /// they both have transaction snapshots, that of `self` is taken.
+    ///
+    /// This method allows a journal snapshot taken from different transactions as long as they
+    /// are from the same [`Database`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::Database;
+    ///
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
+    /// let database_snapshot = database.snapshot();
+    /// let transaction_snapshot = transaction.snapshot();
+    /// let combined_snapshot = transaction_snapshot.combine(database_snapshot);
+    /// ````
+    #[inline]
+    #[must_use]
+    pub fn combine(mut self, mut other: Snapshot<'d, 't, 'j, S>) -> Snapshot<'d, 't, 'j, S> {
+        if !ptr::eq(self.overseer, other.overseer) {
+            // They are from different `Database` instances of the same lifetime.
+            return self;
+        }
+        let tracker = self.tracker.take().or_else(|| other.tracker.take());
+        let transaction_snapshot = self
+            .transaction_snapshot
+            .take()
+            .or_else(|| other.transaction_snapshot.take());
+        let journal_snapshot = self
+            .journal_snapshot
+            .take()
+            .or_else(|| other.journal_snapshot.take());
+        Self {
+            tracker,
             transaction_snapshot,
             journal_snapshot,
-            overseer: database.overseer(),
+            overseer: self.overseer,
         }
     }
 
@@ -69,19 +122,58 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             .map_or_else(S::Instant::default, ToInstant::to_instant)
     }
 
-    /// Returns a reference to its [`TransactionSnapshot`].
-    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
-        self.transaction_snapshot.as_ref()
+    /// Creates a new [`Snapshot`] from a [`Database`]
+    pub(super) fn from_database<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        let tracker = database.sequencer().track(Acquire);
+        Snapshot {
+            tracker: Some(tracker),
+            transaction_snapshot: None,
+            journal_snapshot: None,
+            overseer: database.overseer(),
+        }
+    }
+
+    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
+    pub(super) fn from_journal<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+        journal_snapshot: JournalSnapshot<'j>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        Snapshot {
+            tracker: None,
+            transaction_snapshot: None,
+            journal_snapshot: Some(journal_snapshot),
+            overseer: database.overseer(),
+        }
+    }
+
+    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
+    pub(super) fn from_transaction<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+        transaction_snapshot: TransactionSnapshot<'t>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        Snapshot {
+            tracker: None,
+            transaction_snapshot: Some(transaction_snapshot),
+            journal_snapshot: None,
+            overseer: database.overseer(),
+        }
     }
 
     /// Returns a reference to its [`JournalSnapshot`].
-    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'t, 'j>> {
+    pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'j>> {
         self.journal_snapshot.as_ref()
     }
 
     /// Returns the corresponding [`Overseer`].
     pub(super) fn overseer(&self) -> &Overseer {
         self.overseer
+    }
+
+    /// Returns a reference to its [`TransactionSnapshot`].
+    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
+        self.transaction_snapshot.as_ref()
     }
 }
 
@@ -120,12 +212,67 @@ impl<'t> PartialOrd for TransactionSnapshot<'t> {
     }
 }
 
-impl<'t, 'j> JournalSnapshot<'t, 'j> {
+impl<'j> JournalSnapshot<'j> {
     /// Creates a new [`JournalSnapshot`].
-    pub(super) fn new(id: JournalID) -> JournalSnapshot<'t, 'j> {
+    pub(super) fn new(id: JournalID) -> JournalSnapshot<'j> {
         JournalSnapshot {
             id,
             _phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::Database;
+
+    #[tokio::test]
+    async fn combine() {
+        let database = Database::default();
+
+        assert!(database.transaction().commit().await.is_ok());
+
+        let database_other = Database::default();
+        let database_snapshot = database.snapshot();
+        assert_eq!(
+            database_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        let transaction_other = database_other.transaction();
+        let transaction_snapshot_other = transaction_other.snapshot();
+        let database_snapshot = database_snapshot.combine(transaction_snapshot_other);
+        assert_eq!(
+            database_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(database_snapshot.transaction_snapshot().is_none());
+
+        let transaction = database.transaction();
+        let transaction_snapshot = transaction.snapshot();
+
+        let combined_snapshot = database_snapshot.combine(transaction_snapshot);
+        assert_eq!(
+            combined_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+
+        let journal = transaction.journal();
+        let journal_snapshot = journal.snapshot();
+
+        let combined_snapshot = combined_snapshot.combine(journal_snapshot);
+        assert_eq!(
+            combined_snapshot.database_snapshot(),
+            database.snapshot().database_snapshot()
+        );
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+        assert!(combined_snapshot.journal_snapshot().is_some());
+
+        let transaction_snapshot = transaction.snapshot();
+        let journal_snapshot = journal.snapshot();
+        let combined_snapshot = journal_snapshot.combine(transaction_snapshot);
+        assert_eq!(combined_snapshot.database_snapshot(), 0);
+        assert!(combined_snapshot.transaction_snapshot().is_some());
+        assert!(combined_snapshot.journal_snapshot().is_some());
     }
 }
