@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, JournalID, Sequencer, TransactionID};
+use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
 /// the persistence layer of the database.
 ///
-/// Any [`PersistenceLayer`] implementation must be linearizable such that any [`PersistenceLayer`]
+/// [`PersistenceLayer`] implementations must be linearizable such that any [`PersistenceLayer`]
 /// method invocation after a previously concluded [`PersistenceLayer`] call should be recovered
 /// in the same order, e.g., `commit(1, 1)` returned an [`AwaitIO`], and then `commit(2, 2)` is
 /// invoked, `commit(1, 1)` should be recovered before `commit(2, 2)` whether or not the returned
@@ -26,7 +26,18 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// # Errors
     ///
     /// Returns an [`Error`] if the database could not be recovered.
-    fn recover(&self, until: Option<S::Instant>) -> Result<(), Error>;
+    fn recover(
+        &self,
+        until: Option<S::Instant>,
+        database: &mut Database<S, Self>,
+    ) -> Result<(), Error>;
+
+    /// The transaction is participating in a distributed transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
+    fn participate(&self, id: TransactionID, xid: &[u8]) -> Result<AwaitIO<S, Self>, Error>;
 
     /// The database is being modified by the [`Journal`](super::Journal).
     ///
@@ -48,7 +59,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn submit(
         &self,
         id: TransactionID,
-        submitted_journal_id: JournalID,
+        journal_id: JournalID,
         transaction_instant: usize,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
@@ -118,6 +129,14 @@ pub struct VolatileDevice<S: Sequencer> {
     _phantom: std::marker::PhantomData<S>,
 }
 
+impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
+    /// Forgets the IO operation.
+    #[inline]
+    pub fn forget(self) {
+        // Do nothing.
+    }
+}
+
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     type Output = Result<(), Error>;
 
@@ -134,8 +153,21 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
 impl<S: Sequencer> PersistenceLayer<S> for VolatileDevice<S> {
     #[inline]
-    fn recover(&self, _until: Option<<S as Sequencer>::Instant>) -> Result<(), Error> {
+    fn recover(
+        &self,
+        _until: Option<<S as Sequencer>::Instant>,
+        _database: &mut Database<S, Self>,
+    ) -> Result<(), Error> {
         Ok(())
+    }
+
+    #[inline]
+    fn participate(&self, _id: TransactionID, _xid: &[u8]) -> Result<AwaitIO<S, Self>, Error> {
+        Ok(AwaitIO {
+            persistence_layer: self,
+            io_id: 0,
+            _phantom: PhantomData,
+        })
     }
 
     #[inline]
@@ -156,7 +188,7 @@ impl<S: Sequencer> PersistenceLayer<S> for VolatileDevice<S> {
     fn submit(
         &self,
         _id: TransactionID,
-        _submitted_journal_id: JournalID,
+        _journal_id: JournalID,
         _transaction_instant: usize,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO {

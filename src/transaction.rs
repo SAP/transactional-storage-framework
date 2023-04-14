@@ -4,7 +4,7 @@
 
 use super::journal::Anchor as JournalAnchor;
 use super::snapshot::TransactionSnapshot;
-use super::{Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
+use super::{AwaitIO, Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
 use scc::Bag;
 use std::future::Future;
@@ -31,6 +31,11 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// [`Transaction`] assigns each submitted [`Journal`] a logical time point value in increasing
     /// order.
     journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
+
+    /// The identifier of the [`Transaction`] as part of a distributed transaction.
+    ///
+    /// It is `None` if the transaction is not part of a distributed transaction.
+    xid: Option<Vec<u8>>,
 
     /// A piece of data that is shared between [`Journal`] and [`Transaction`].
     ///
@@ -69,7 +74,11 @@ pub enum State {
 /// [`Committable`] instance. On the other hands, the transaction stays uncommitted until the
 /// [`Committable`] instance is dropped or awaited.
 pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
+    /// The corresponding transaction.
     transaction: Option<Transaction<'d, S, P>>,
+
+    /// [`AwaitIO`] for its own commit log record.
+    commit_log_io: Option<(AwaitIO<'d, S, P>, S::Instant)>,
 }
 
 /// `0` as a transaction logical time point value represents an unfinished job.
@@ -170,6 +179,31 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         )
     }
 
+    /// Participates in a distributed transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the transaction is currently participating in a distributed
+    /// transaction, or persisting the supplied identifier failed.
+    #[inline]
+    pub async fn participate(&mut self, xid: &[u8]) -> Result<(), Error> {
+        if let Some(own_xid) = self.xid.as_ref() {
+            if own_xid == xid {
+                Ok(())
+            } else {
+                Err(Error::UnexpectedState)
+            }
+        } else {
+            let io_completion = self
+                .database
+                .persistence_layer()
+                .participate(self.id(), xid)?;
+            io_completion.await?;
+            self.xid.replace(xid.into());
+            Ok(())
+        }
+    }
+
     /// Gets the current local clock value of the [`Transaction`].
     ///
     /// The returned value amounts to the number of submitted [`Journal`] instances in the
@@ -252,8 +286,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
             .rewind(self.id(), new_instant)?;
 
         // Do not wait for an IO completion.
-        #[allow(clippy::drop_non_drop)]
-        drop(io_completion);
+        io_completion.forget();
 
         Ok(new_instant)
     }
@@ -299,10 +332,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
             .database
             .persistence_layer()
             .prepare(self.id(), prepare_instant)?;
-        io_completion.await?;
+
+        if self.xid.is_some() {
+            io_completion.await?;
+        }
 
         Ok(Committable {
             transaction: Some(self),
+            commit_log_io: None,
         })
     }
 
@@ -356,6 +393,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         Transaction {
             database,
             journal_strand: ebr::AtomicArc::null(),
+            xid: None,
             anchor: ebr::Arc::new(Anchor::new()),
         }
     }
@@ -395,16 +433,25 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         TransactionSnapshot::new(self.id(), instant)
     }
 
+    /// Generates a commit log record.
+    fn generate_commit_log_record(&mut self) -> Result<(AwaitIO<'d, S, P>, S::Instant), Error> {
+        let commit_instant = self.sequencer().advance(Release);
+        let io_completion = self
+            .database
+            .persistence_layer()
+            .commit(self.id(), commit_instant)?;
+        Ok((io_completion, commit_instant))
+    }
+
     /// Post-processes its transaction commit.
     ///
-    /// Only a `Committable` instance is allowed to call this function.
-    fn commit_internal(&mut self) -> S::Instant {
+    /// Only [`Committable`] is allowed to call this function.
+    fn post_commit(&mut self, commit_instant: S::Instant) {
+        debug_assert_ne!(commit_instant, S::Instant::default());
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
         // Safety: it is the sole writer of its own `anchor`.
         let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
-        let commit_instant = self.sequencer().advance(Release);
-        debug_assert_ne!(commit_instant, S::Instant::default());
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
@@ -415,8 +462,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
             record.commit(self.database.overseer());
             current = record.set_next(None, Relaxed);
         }
-
-        commit_instant
     }
 
     /// Rolls back all the changes.
@@ -441,7 +486,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Drop for Transaction<'d, S, P> {
         let state = self.anchor.state.load(Relaxed);
         if state == State::Active.into() || state == State::Committing.into() {
             self.rollback_internal();
-            // TODO: send a piece of information to the `Overseer` to persist the fact.
         }
     }
 }
@@ -450,13 +494,43 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
     type Output = Result<S::Instant, Error>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(commit_instant) = self.transaction.take().map(|mut t| t.commit_internal()) {
-            // TODO: persist the fact that the transaction was committed.
-            Poll::Ready(Ok(commit_instant))
-        } else {
-            Poll::Pending
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(mut transaction) = self.transaction.take() {
+            if let Some((mut io_completion, commit_instant)) = self.commit_log_io.take() {
+                match Pin::new(&mut io_completion).poll(cx) {
+                    Poll::Ready(Ok(())) => {
+                        // All done, returning the commit instant after post-processing.
+                        transaction.post_commit(commit_instant);
+                        return Poll::Ready(Ok(commit_instant));
+                    }
+                    Poll::Ready(Err(error)) => {
+                        // Something bad happened during persisting the log record.
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Pending => {
+                        // Need to wait for IO completion.
+                        self.transaction.replace(transaction);
+                        self.commit_log_io.replace((io_completion, commit_instant));
+                        return Poll::Pending;
+                    }
+                }
+            }
+            match transaction.generate_commit_log_record() {
+                Ok(commit_log_io) => {
+                    self.transaction.replace(transaction);
+                    self.commit_log_io.replace(commit_log_io);
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Err(error) => {
+                    // Failed to create a log record.
+                    return Poll::Ready(Err(error));
+                }
+            };
         }
+
+        // Already awaited.
+        Poll::Ready(Err(Error::UnexpectedState))
     }
 }
 

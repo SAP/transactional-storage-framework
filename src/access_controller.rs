@@ -2445,7 +2445,7 @@ mod test {
                                 post_access_action,
                                 access_controller,
                                 &mut journal,
-                                None,
+                                Some(Instant::now() + TIMEOUT_UNEXPECTED),
                             )
                             .await
                         };

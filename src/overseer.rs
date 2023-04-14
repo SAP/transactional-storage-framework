@@ -111,6 +111,9 @@ impl Overseer {
                 }
             }
 
+            // The monitored database objects and deadlines have to be always checked on every
+            // iteration as sending `ScanAccessController` tasks to `Overseer` may fail when the
+            // send buffer is full.
             Self::scan_access_controller(
                 kernel.access_controller(),
                 &mut monitored_database_object_ids,
