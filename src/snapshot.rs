@@ -7,6 +7,7 @@ use super::sequencer::ToInstant;
 use super::{Database, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use std::cmp;
 use std::marker::PhantomData;
+use std::ptr;
 use std::sync::atomic::Ordering::Acquire;
 
 /// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
@@ -72,6 +73,56 @@ pub(super) struct JournalSnapshot<'j> {
 }
 
 impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
+    /// Combines two [`Snapshot`] instances to form a single [`Snapshot`].
+    ///
+    /// If the supplied [`Snapshot`] conflicts with `self`, `self` is prioritized. For instance,
+    /// if they are both created by different [`Database`] instances, `self` is returned, or if
+    /// they both have transaction snapshots, that of `self` is taken.
+    ///
+    /// This method allows a journal snapshot taken from a different transaction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sap_tsf::Database;
+    ///
+    /// let database = Database::default();
+    /// let transaction = database.transaction();
+    /// let database_snapshot = database.snapshot();
+    /// let transaction_snapshot = transaction.snapshot();
+    /// let combined_snapshot = transaction_snapshot.combine(database_snapshot);
+    /// ````
+    #[inline]
+    #[must_use]
+    pub fn combine(mut self, mut other: Snapshot<'d, 't, 'j, S>) -> Snapshot<'d, 't, 'j, S> {
+        if !ptr::eq(self.overseer, other.overseer) {
+            // They are from different `Database` instances of the same lifetime.
+            return self;
+        }
+        let tracker = self.tracker.take().or_else(|| other.tracker.take());
+        let transaction_snapshot = self
+            .transaction_snapshot
+            .take()
+            .or_else(|| other.transaction_snapshot.take());
+        let journal_snapshot = self
+            .journal_snapshot
+            .take()
+            .or_else(|| other.journal_snapshot.take());
+        Self {
+            tracker,
+            transaction_snapshot,
+            journal_snapshot,
+            overseer: self.overseer,
+        }
+    }
+
+    /// Returns the time point value of the database snapshot.
+    pub(super) fn database_snapshot(&self) -> S::Instant {
+        self.tracker
+            .as_ref()
+            .map_or_else(S::Instant::default, ToInstant::to_instant)
+    }
+
     /// Creates a new [`Snapshot`] from a [`Database`]
     pub(super) fn from_database<P: PersistenceLayer<S>>(
         database: &'d Database<S, P>,
@@ -80,19 +131,6 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
         Snapshot {
             tracker: Some(tracker),
             transaction_snapshot: None,
-            journal_snapshot: None,
-            overseer: database.overseer(),
-        }
-    }
-
-    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
-    pub(super) fn from_transaction<P: PersistenceLayer<S>>(
-        database: &'d Database<S, P>,
-        transaction_snapshot: TransactionSnapshot<'t>,
-    ) -> Snapshot<'d, 't, 'j, S> {
-        Snapshot {
-            tracker: None,
-            transaction_snapshot: Some(transaction_snapshot),
             journal_snapshot: None,
             overseer: database.overseer(),
         }
@@ -111,16 +149,17 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
         }
     }
 
-    /// Returns the time point value of the database snapshot.
-    pub(super) fn database_snapshot(&self) -> S::Instant {
-        self.tracker
-            .as_ref()
-            .map_or_else(S::Instant::default, ToInstant::to_instant)
-    }
-
-    /// Returns a reference to its [`TransactionSnapshot`].
-    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
-        self.transaction_snapshot.as_ref()
+    /// Creates a new [`Snapshot`] from a [`TransactionSnapshot`]
+    pub(super) fn from_transaction<P: PersistenceLayer<S>>(
+        database: &'d Database<S, P>,
+        transaction_snapshot: TransactionSnapshot<'t>,
+    ) -> Snapshot<'d, 't, 'j, S> {
+        Snapshot {
+            tracker: None,
+            transaction_snapshot: Some(transaction_snapshot),
+            journal_snapshot: None,
+            overseer: database.overseer(),
+        }
     }
 
     /// Returns a reference to its [`JournalSnapshot`].
@@ -131,6 +170,11 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Returns the corresponding [`Overseer`].
     pub(super) fn overseer(&self) -> &Overseer {
         self.overseer
+    }
+
+    /// Returns a reference to its [`TransactionSnapshot`].
+    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
+        self.transaction_snapshot.as_ref()
     }
 }
 
