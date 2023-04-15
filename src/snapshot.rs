@@ -10,30 +10,30 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::sync::atomic::Ordering::Acquire;
 
-/// [`Snapshot`] represents a consistent view on the [`Database`](super::Database).
-///
-/// A [`Snapshot`] has a [`Instant`](Sequencer::Instant) value corresponding to a database
-/// snapshot, and the database snapshot stays stable until the [`Snapshot`] is dropped.
+/// [`Snapshot`] provides a consistent view on the [`Database`](super::Database).
 ///
 /// There are three types of [`Snapshot`] which can be created using different methods.
-///  1. [`Database::snapshot`](super::Database::snapshot) creates a [`Snapshot`] which only
-///     contains globally committed data.
+///  1. [`Database::snapshot`](super::Database::snapshot) creates a [`Snapshot`] which does not
+///     contain uncommitted data.
 ///  2. [`Transaction::snapshot`](super::Transaction::snapshot) creates a [`Snapshot`] which only
-///     contains changes in submitted [`Journal`](super::Journal) instances in the transaction.
+///     contains uncommitted changes to the database in submitted journals in the transaction.
 ///  3. [`Journal::snapshot`](super::Journal::snapshot) creates a [`Snapshot`] which only contains
-///     changes that are pending in the [`Journal`](super::Journal).
+///     changes to the database that are pending in the [`Journal`](super::Journal).
+///
+/// Two or more types of [`Snapshot`] can be combined into a single [`Snapshot`] via
+/// [`Snapshot::combine`] as long as they belong to the same database.
 #[derive(Clone, Debug)]
 pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     /// The logical instant of the database system being tracked by [`Database`].
     ///
-    /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
-    /// database until the instant.
+    /// This being `Some` allows the owner of the [`Snapshot`] to observe any committed changes to
+    /// the database that are not newer than the instant.
     tracker: Option<S::Tracker>,
 
     /// The logical instant of the transaction.
     ///
     /// This being `Some` allows the owner of the [`Snapshot`] to observe any changes to the
-    /// database made by the transaction until the instant.
+    /// database made by the transaction that are not newer than the transaction local instant.
     transaction_snapshot: Option<TransactionSnapshot<'t>>,
 
     /// The associated [`Journal`](super::Journal).
@@ -71,14 +71,14 @@ pub(super) struct JournalSnapshot<'j> {
 }
 
 impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
-    /// Combines two [`Snapshot`] instances to form a single [`Snapshot`].
+    /// Combines two [`Snapshot`] instances into a single [`Snapshot`].
     ///
     /// If the supplied [`Snapshot`] conflicts with `self`, `self` is prioritized. For instance,
-    /// if they are both created by different [`Database`] instances, `self` is returned, or if
-    /// they both have transaction snapshots, that of `self` is taken.
+    /// if they are created by different [`Database`] instances, `self` is returned, or ifthey both
+    /// have transaction snapshots, that of `self` is taken.
     ///
-    /// This method allows a journal snapshot taken from different transactions as long as they
-    /// are from the same [`Database`].
+    /// This method allows a journal snapshot taken from a different transaction to be combined as
+    /// long as the transaction is from the same [`Database`].
     ///
     /// # Examples
     ///
@@ -89,7 +89,10 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// let transaction = database.transaction();
     /// let database_snapshot = database.snapshot();
     /// let transaction_snapshot = transaction.snapshot();
-    /// let combined_snapshot = transaction_snapshot.combine(database_snapshot);
+    /// let journal = transaction.journal();
+    /// let journal_snapshot = journal.snapshot();
+    /// let combined_snapshot =
+    ///     journal_snapshot.combine(transaction_snapshot).combine(database_snapshot);
     /// ````
     #[inline]
     #[must_use]
@@ -113,13 +116,6 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             journal_snapshot,
             overseer: self.overseer,
         }
-    }
-
-    /// Returns the time point value of the database snapshot.
-    pub(super) fn database_snapshot(&self) -> S::Instant {
-        self.tracker
-            .as_ref()
-            .map_or_else(S::Instant::default, ToInstant::to_instant)
     }
 
     /// Creates a new [`Snapshot`] from a [`Database`]
@@ -161,6 +157,20 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
         }
     }
 
+    /// Returns the time point value of the database snapshot.
+    ///
+    /// Returns `S::Instant::default()` if no database snapshot is set.
+    pub(super) fn database_snapshot(&self) -> S::Instant {
+        self.tracker
+            .as_ref()
+            .map_or_else(S::Instant::default, ToInstant::to_instant)
+    }
+
+    /// Returns a reference to its [`TransactionSnapshot`].
+    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
+        self.transaction_snapshot.as_ref()
+    }
+
     /// Returns a reference to its [`JournalSnapshot`].
     pub(super) fn journal_snapshot(&self) -> Option<&JournalSnapshot<'j>> {
         self.journal_snapshot.as_ref()
@@ -169,11 +179,6 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Returns the corresponding [`Overseer`].
     pub(super) fn overseer(&self) -> &Overseer {
         self.overseer
-    }
-
-    /// Returns a reference to its [`TransactionSnapshot`].
-    pub(super) fn transaction_snapshot(&self) -> Option<&TransactionSnapshot<'t>> {
-        self.transaction_snapshot.as_ref()
     }
 }
 

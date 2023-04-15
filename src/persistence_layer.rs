@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
     /// Recovers the database.
     ///
-    /// If a specific logical instant is given, it only recovers the storage up until the time
+    /// If a specific logical instant is specified, it only recovers the storage up until the time
     /// point.
     ///
     /// # Errors
@@ -28,9 +28,9 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Returns an [`Error`] if the database could not be recovered.
     fn recover(
         &self,
-        until: Option<S::Instant>,
         database: &mut Database<S, Self>,
-    ) -> Result<(), Error>;
+        until: Option<S::Instant>,
+    ) -> Result<AwaitIO<S, Self>, Error>;
 
     /// The transaction is participating in a distributed transaction.
     ///
@@ -107,7 +107,9 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     ///
     /// If the IO operation is still in progress, the supplied [`Waker`] is kept in the
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
-    fn check(&self, io_id: usize, waker: &Waker) -> Option<Result<(), Error>>;
+    ///
+    /// It returns the latest known logical instant value of the database.
+    fn check(&self, io_id: usize, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -124,6 +126,8 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 /// Volatile memory device.
+///
+/// The content of the device is not persisted at all.
 #[derive(Debug, Default)]
 pub struct MemoryDevice<S: Sequencer> {
     _phantom: std::marker::PhantomData<S>,
@@ -138,7 +142,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
-    type Output = Result<(), Error>;
+    type Output = Result<S::Instant, Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -155,10 +159,14 @@ impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
     #[inline]
     fn recover(
         &self,
-        _until: Option<<S as Sequencer>::Instant>,
         _database: &mut Database<S, Self>,
-    ) -> Result<(), Error> {
-        Ok(())
+        _until: Option<<S as Sequencer>::Instant>,
+    ) -> Result<AwaitIO<S, Self>, Error> {
+        Ok(AwaitIO {
+            persistence_layer: self,
+            io_id: 0,
+            _phantom: PhantomData,
+        })
     }
 
     #[inline]
@@ -238,7 +246,7 @@ impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
     }
 
     #[inline]
-    fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<(), Error>> {
-        Some(Ok(()))
+    fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
+        Some(Ok(S::Instant::default()))
     }
 }

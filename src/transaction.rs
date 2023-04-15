@@ -494,7 +494,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
         if let Some(mut transaction) = self.transaction.take() {
             if let Some((mut io_completion, commit_instant)) = self.commit_log_io.take() {
                 match Pin::new(&mut io_completion).poll(cx) {
-                    Poll::Ready(Ok(())) => {
+                    Poll::Ready(Ok(_)) => {
                         // All done, returning the commit instant after post-processing.
                         transaction.post_commit(commit_instant);
                         return Poll::Ready(Ok(commit_instant));

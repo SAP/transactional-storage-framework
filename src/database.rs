@@ -8,6 +8,7 @@ use super::{
     PersistenceLayer, Sequencer, Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,17 +49,26 @@ pub(super) struct Kernel<S: Sequencer, P: PersistenceLayer<S>> {
 impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Creates a new [`Database`] instance from the specified [`PersistenceLayer`].
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the persistence layer failed to recover the database, or memory
+    /// allocation failed.
+    ///
     /// # Examples
     ///
     /// ```
     /// use sap_tsf::{AtomicCounter, Database, MemoryDevice};
     ///
-    /// let database: Database<AtomicCounter> =
-    ///     Database::with_persistence_layer(MemoryDevice::default());
+    /// async {
+    ///     let database: Database<AtomicCounter> =
+    ///         Database::with_persistence_layer(MemoryDevice::default(), None).await.unwrap();
+    /// };
     /// ```
     #[inline]
-    #[must_use]
-    pub fn with_persistence_layer(persistence_layer: P) -> Database<S, P> {
+    pub async fn with_persistence_layer(
+        persistence_layer: P,
+        recover_until: Option<S::Instant>,
+    ) -> Result<Database<S, P>, Error> {
         let kernel = Arc::new(Kernel {
             sequencer: S::default(),
             container_map: HashIndex::default(),
@@ -66,7 +76,16 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             persistence_layer,
         });
         let overseer = Overseer::spawn(kernel.clone());
-        Database { kernel, overseer }
+        let mut database = Database {
+            kernel: kernel.clone(),
+            overseer,
+        };
+        let io_completion = kernel
+            .persistence_layer
+            .recover(&mut database, recover_until)?;
+        let recovered_instant = io_completion.await?;
+        let _: Result<S::Instant, S::Instant> = kernel.sequencer.update(recovered_instant, Relaxed);
+        Ok(database)
     }
 
     /// Starts a [`Transaction`].
