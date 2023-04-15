@@ -74,8 +74,8 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     /// Combines two [`Snapshot`] instances into a single [`Snapshot`].
     ///
     /// If the supplied [`Snapshot`] conflicts with `self`, `self` is prioritized. For instance,
-    /// if they are created by different [`Database`] instances, `self` is returned, or ifthey both
-    /// have transaction snapshots, that of `self` is taken.
+    /// if they are created by different [`Database`] instances, `self` is returned, or if they
+    /// both have transaction snapshots, that of `self` is taken.
     ///
     /// This method allows a journal snapshot taken from a different transaction to be combined as
     /// long as the transaction is from the same [`Database`].

@@ -50,6 +50,17 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
+    /// Manually generates a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if a checkpoint could not be generated within the specified deadline.
+    fn checkpoint(
+        &self,
+        database: &Database<S, Self>,
+        deadline: Option<Instant>,
+    ) -> Result<AwaitIO<S, Self>, Error>;
+
     /// The transaction is participating in a distributed transaction.
     ///
     /// # Errors
@@ -219,6 +230,20 @@ impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
         _database: &Database<S, Self>,
         _catalog_only: bool,
         _path: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> Result<AwaitIO<S, Self>, Error> {
+        Ok(AwaitIO {
+            persistence_layer: self,
+            io_id: 0,
+            deadline,
+            _phantom: PhantomData,
+        })
+    }
+
+    #[inline]
+    fn checkpoint(
+        &self,
+        _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO {
