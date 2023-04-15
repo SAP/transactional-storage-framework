@@ -51,8 +51,8 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the persistence layer failed to recover the database, or memory
-    /// allocation failed.
+    /// Returns an error if the persistence layer failed to recover the database, memory allocation
+    /// failed, or the deadline was reached.
     ///
     /// # Examples
     ///
@@ -60,14 +60,15 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// use sap_tsf::{AtomicCounter, Database, MemoryDevice};
     ///
     /// async {
-    ///     let database: Database<AtomicCounter> =
-    ///         Database::with_persistence_layer(MemoryDevice::default(), None).await.unwrap();
+    ///     let database: Database<AtomicCounter> = Database::with_persistence_layer(
+    ///         MemoryDevice::default(), None, None).await.unwrap();
     /// };
     /// ```
     #[inline]
     pub async fn with_persistence_layer(
         persistence_layer: P,
         recover_until: Option<S::Instant>,
+        deadline: Option<Instant>,
     ) -> Result<Database<S, P>, Error> {
         let kernel = Arc::new(Kernel {
             sequencer: S::default(),
@@ -80,9 +81,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             kernel: kernel.clone(),
             overseer,
         };
-        let io_completion = kernel
-            .persistence_layer
-            .recover(&mut database, recover_until)?;
+        let io_completion =
+            kernel
+                .persistence_layer
+                .recover(&mut database, recover_until, deadline)?;
         let recovered_instant = io_completion.await?;
         let _: Result<S::Instant, S::Instant> = kernel.sequencer.update(recovered_instant, Relaxed);
         Ok(database)
