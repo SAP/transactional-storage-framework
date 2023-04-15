@@ -190,10 +190,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 Err(Error::UnexpectedState)
             }
         } else {
-            let io_completion = self
-                .database
-                .persistence_layer()
-                .participate(self.id(), xid)?;
+            let io_completion =
+                self.database
+                    .persistence_layer()
+                    .participate(self.id(), xid, None)?;
             io_completion.await?;
             self.xid.replace(xid.into());
             Ok(())
@@ -276,10 +276,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
-        let io_completion = self
-            .database
-            .persistence_layer()
-            .rewind(self.id(), new_instant)?;
+        let io_completion =
+            self.database
+                .persistence_layer()
+                .rewind(self.id(), new_instant, None)?;
 
         // Do not wait for an IO completion.
         io_completion.forget();
@@ -324,10 +324,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 .store(State::Committing.into(), Release);
         }
 
-        let io_completion = self
-            .database
-            .persistence_layer()
-            .prepare(self.id(), prepare_instant)?;
+        let io_completion =
+            self.database
+                .persistence_layer()
+                .prepare(self.id(), prepare_instant, None)?;
 
         if self.xid.is_some() {
             io_completion.await?;
@@ -432,10 +432,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// Generates a commit log record.
     fn generate_commit_log_record(&mut self) -> Result<(AwaitIO<'d, S, P>, S::Instant), Error> {
         let commit_instant = self.sequencer().advance(Release);
-        let io_completion = self
-            .database
-            .persistence_layer()
-            .commit(self.id(), commit_instant)?;
+        let io_completion =
+            self.database
+                .persistence_layer()
+                .commit(self.id(), commit_instant, None)?;
         Ok((io_completion, commit_instant))
     }
 
