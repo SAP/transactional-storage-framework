@@ -45,6 +45,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn backup(
         &self,
         database: &Database<S, Self>,
+        catalog_only: bool,
         path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
@@ -216,6 +217,7 @@ impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
     fn backup(
         &self,
         _database: &Database<S, Self>,
+        _catalog_only: bool,
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {

@@ -90,6 +90,26 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         Ok(database)
     }
 
+    /// Backs up the current snapshot of the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the persistence layer failed to back up the database, memory allocation
+    /// failed, or the deadline was reached.
+    #[inline]
+    pub async fn backup(
+        &self,
+        catalog_only: bool,
+        path: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> Result<S::Instant, Error> {
+        let io_completion =
+            self.kernel
+                .persistence_layer
+                .backup(self, catalog_only, path, deadline)?;
+        io_completion.await
+    }
+
     /// Starts a [`Transaction`].
     ///
     /// # Examples
