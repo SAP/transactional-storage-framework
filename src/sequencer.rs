@@ -39,7 +39,7 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
     /// [`Instant`](Sequencer::Instant) instance associated with a [`Snapshot`](super::Snapshot).
     ///
     /// A [`Tracker`](Sequencer::Tracker) can be cloned.
-    type Tracker: Clone + ToInstant<Self>;
+    type Tracker: Clone + Debug + ToInstant<Self>;
 
     /// Returns an [`Instant`](Sequencer::Instant) that represents a database snapshot being
     /// visible to all the current and future readers.
@@ -229,13 +229,6 @@ impl Clone for U64Tracker {
     }
 }
 
-impl ToInstant<AtomicCounter> for U64Tracker {
-    #[inline]
-    fn to_instant(&self) -> u64 {
-        self.entry().instant
-    }
-}
-
 impl Drop for U64Tracker {
     #[inline]
     fn drop(&mut self) {
@@ -249,6 +242,13 @@ unsafe impl Send for U64Tracker {}
 
 // Safety: the instance being pointed by `U64Tracker` can be accessed by other threads.
 unsafe impl Sync for U64Tracker {}
+
+impl ToInstant<AtomicCounter> for U64Tracker {
+    #[inline]
+    fn to_instant(&self) -> u64 {
+        self.entry().instant
+    }
+}
 
 #[cfg(test)]
 mod test {
