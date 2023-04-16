@@ -102,7 +102,7 @@ pub struct U64Tracker {
 
 #[derive(Debug)]
 struct Entry {
-    /// The intant.
+    /// The instant.
     instant: u64,
 
     /// The reference counter.
