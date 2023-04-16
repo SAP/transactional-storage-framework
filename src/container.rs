@@ -28,11 +28,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Container<S, P> {
 #[cfg(test)]
 mod test {
     use crate::sequencer::AtomicCounter;
-    use crate::{Container, MemoryDevice, Metadata};
+    use crate::{Container, FileIO, Metadata};
 
     #[tokio::test]
     async fn container() {
         let metadata = Metadata {};
-        let _container = Container::<AtomicCounter, MemoryDevice<AtomicCounter>>::new(metadata);
+        let _container = Container::<AtomicCounter, FileIO<AtomicCounter>>::new(metadata);
     }
 }

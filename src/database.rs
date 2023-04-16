@@ -4,8 +4,8 @@
 
 use super::overseer::{Overseer, Task};
 use super::{
-    AccessController, AtomicCounter, Container, Error, Journal, MemoryDevice, Metadata,
-    PersistenceLayer, Sequencer, Snapshot, Transaction,
+    AccessController, AtomicCounter, Container, Error, FileIO, Journal, Metadata, PersistenceLayer,
+    Sequencer, Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
 use std::sync::atomic::Ordering::Relaxed;
@@ -17,7 +17,7 @@ use std::time::Instant;
 /// [`Database`] provides the interface for users to interact with each individual transactional
 /// [`Container`] in it.
 #[derive(Debug)]
-pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = MemoryDevice<S>> {
+pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = FileIO<S>> {
     /// The kernel of the database.
     ///
     /// The kernel of the database has to be allocated on the heap in order to provide stable
@@ -57,11 +57,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{AtomicCounter, Database, MemoryDevice};
+    /// use sap_tsf::{AtomicCounter, Database, FileIO};
     ///
     /// async {
     ///     let database: Database<AtomicCounter> = Database::with_persistence_layer(
-    ///         MemoryDevice::default(), None, None).await.unwrap();
+    ///         FileIO::default(), None, None).await.unwrap();
     /// };
     /// ```
     #[inline]
@@ -359,11 +359,12 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     }
 }
 
-impl Default for Database<AtomicCounter, MemoryDevice<AtomicCounter>> {
+impl Default for Database<AtomicCounter, FileIO<AtomicCounter>> {
     /// Creates an empty default [`Database`] instance.
     ///
-    /// The type of the [`Sequencer`] is [`AtomicCounter`], and the persistence layer is of
-    /// [`MemoryDevice`].
+    /// The type of the [`Sequencer`] is [`AtomicCounter`], and that of the persistence layer is
+    /// [`FileIO`] which uses `log.fdb`, `log_shadow.fdb`, and `checkpoint.fdb` files in the
+    /// current working directory.
     ///
     /// # Examples
     ///
@@ -378,7 +379,7 @@ impl Default for Database<AtomicCounter, MemoryDevice<AtomicCounter>> {
             sequencer: AtomicCounter::default(),
             container_map: HashIndex::default(),
             access_controller: AccessController::default(),
-            persistence_layer: MemoryDevice::default(),
+            persistence_layer: FileIO::default(),
         });
         let overseer = Overseer::spawn(kernel.clone());
         Database { kernel, overseer }

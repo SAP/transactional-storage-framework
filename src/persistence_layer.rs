@@ -4,10 +4,12 @@
 
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
+use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
@@ -74,6 +76,9 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     ) -> Result<AwaitIO<S, Self>, Error>;
 
     /// The database is being modified by the [`Journal`](super::Journal).
+    ///
+    /// The content must be *idempotent*; the same log record can be applied to the database more
+    /// than once on recovery.
     ///
     /// # Errors
     ///
@@ -172,12 +177,34 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     _phantom: PhantomData<S>,
 }
 
-/// Volatile memory device.
+/// [`File`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
-/// The content of the device is not persisted at all.
-#[derive(Debug, Default)]
-pub struct MemoryDevice<S: Sequencer> {
-    _phantom: std::marker::PhantomData<S>,
+/// [`File`] spawns a thread for blocking IO operation.
+///
+/// TODO: implement page cache.
+/// TODO: implement checkpoint.
+/// TODO: use IDL.
+#[derive(Debug)]
+pub struct FileIO<S: Sequencer> {
+    /// The log file.
+    #[allow(dead_code)]
+    log: File,
+
+    /// The shadow log file.
+    ///
+    /// When generating a checkpoint, a shadow file for the log file is created temporarily.
+    #[allow(dead_code)]
+    shadow_log: Option<File>,
+
+    /// The checkpoint file.
+    #[allow(dead_code)]
+    checkpoint: File,
+
+    /// The IO worker thread.
+    worker: Option<JoinHandle<()>>,
+
+    /// This pacifies `Clippy` complaining the lack of usage of `S`.
+    _phantom: PhantomData<S>,
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
@@ -208,7 +235,49 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     }
 }
 
-impl<S: Sequencer> PersistenceLayer<S> for MemoryDevice<S> {
+impl<S: Sequencer> Default for FileIO<S> {
+    /// Creates a default [`File`].
+    ///
+    /// The default log, shadow log, and checkpoint files are set to `log.fdb`, `shadow_log.fdb`,
+    /// and `checkpoint.fdb` in the current working directory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log or checkpoint file could not be opened.
+    #[inline]
+    fn default() -> Self {
+        let log = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("log.fdb")
+            .expect("log.fdb could not be opened");
+        let checkpoint = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("checkpoint.fdb")
+            .expect("checkpoint.fdb could not be opened");
+        FileIO {
+            log,
+            shadow_log: None,
+            checkpoint,
+            worker: Some(thread::spawn(move || {})),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: Sequencer> Drop for FileIO<S> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            drop(worker.join());
+        }
+    }
+}
+
+impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn recover(
         &self,
