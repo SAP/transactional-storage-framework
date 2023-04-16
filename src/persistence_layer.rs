@@ -232,7 +232,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
 impl<S: Sequencer> FileIO<S> {
     #[allow(clippy::needless_pass_by_value)]
-    fn process(_log: File, _checkpoint: File, receiver: Receiver<IOTask>) {
+    fn process(_log0: File, _log1: File, _checkpoint: File, receiver: Receiver<IOTask>) {
         while let Ok(task) = receiver.recv() {
             if matches!(task, IOTask::Shutdown) {
                 break;
@@ -244,27 +244,38 @@ impl<S: Sequencer> FileIO<S> {
 impl<S: Sequencer> Default for FileIO<S> {
     /// Creates a default [`FileIO`].
     ///
-    /// The default log and checkpoint files are set to `database.0`, `database.1`, and
-    /// `database.dat` in the current working directory.
+    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
+    /// current working directory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `0.log`, `1.log`, or `c.dat` could not be opened.
     #[inline]
     fn default() -> Self {
+        let log0 = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("0.log")
+            .expect("0.log could not be opened");
+
+        let log1 = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("1.log")
+            .expect("1.log could not be opened");
+        let checkpoint = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("c.dat")
+            .expect("c.dat could not be opened");
         let (sender, receiver) =
             mpsc::sync_channel::<IOTask>(available_parallelism().ok().map_or(1, Into::into) * 4);
         FileIO {
             worker: Some(thread::spawn(move || {
-                let log = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open("database.0")
-                    .expect("database.0 could not be opened");
-                let checkpoint = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open("database.dat")
-                    .expect("database.dat could not be opened");
-                Self::process(log, checkpoint, receiver);
+                Self::process(log0, log1, checkpoint, receiver);
             })),
             sender,
             _phantom: PhantomData,

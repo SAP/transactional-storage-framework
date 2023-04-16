@@ -94,7 +94,9 @@ pub struct AtomicCounter {
 
 /// [`U64Tracker`] points to a tracking entry associated with its own
 /// [`Instant`](Sequencer::Instant).
+#[derive(Debug)]
 pub struct U64Tracker {
+    /// A pointer to the [`Entry`].
     ptr: *const Entry,
 }
 
