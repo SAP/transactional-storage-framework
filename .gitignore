@@ -14,7 +14,9 @@ Cargo.lock
 **/*.rs.bk
 
 # Database files
-**/*.fdb
+**/*.0
+**/*.1
+**/*.dat
 
 # macOS
 **/.DS_Store
