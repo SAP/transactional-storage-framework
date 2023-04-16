@@ -4,7 +4,7 @@
 
 use criterion::async_executor::FuturesExecutor;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use sap_tsf::{AtomicCounter, Database, MemoryDevice, ToObjectID};
+use sap_tsf::{AtomicCounter, Database, FileIO, ToObjectID};
 use std::sync::Arc;
 
 struct O(usize);
@@ -14,10 +14,7 @@ impl ToObjectID for O {
     }
 }
 
-async fn create_check(
-    size: usize,
-    database: Arc<Database<AtomicCounter, MemoryDevice<AtomicCounter>>>,
-) {
+async fn create_check(size: usize, database: Arc<Database<AtomicCounter, FileIO<AtomicCounter>>>) {
     let access_controller = database.access_controller();
     let transaction = database.transaction();
     let mut journal = transaction.journal();

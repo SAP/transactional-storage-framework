@@ -32,7 +32,7 @@ mod metadata;
 pub use metadata::Metadata;
 
 mod persistence_layer;
-pub use persistence_layer::{AwaitIO, MemoryDevice, PersistenceLayer};
+pub use persistence_layer::{AwaitIO, FileIO, PersistenceLayer};
 
 pub mod sequencer;
 pub use sequencer::{AtomicCounter, Sequencer};
