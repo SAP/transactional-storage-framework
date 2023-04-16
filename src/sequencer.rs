@@ -85,8 +85,28 @@ pub trait ToInstant<S: Sequencer> {
 /// processors.
 #[derive(Debug)]
 pub struct AtomicCounter {
+    /// The current logical clock value.
     clock: AtomicU64,
+
+    /// The list of tracked entries.
     list: Queue<Entry>,
+}
+
+/// [`U64Tracker`] points to a tracking entry associated with its own
+/// [`Instant`](Sequencer::Instant).
+#[derive(Debug)]
+pub struct U64Tracker {
+    /// A pointer to the [`Entry`].
+    ptr: *const Entry,
+}
+
+#[derive(Debug)]
+struct Entry {
+    /// The instant.
+    instant: u64,
+
+    /// The reference counter.
+    ref_cnt: AtomicU64,
 }
 
 impl Sequencer for AtomicCounter {
@@ -97,7 +117,7 @@ impl Sequencer for AtomicCounter {
     fn min(&self, _order: Ordering) -> u64 {
         let min = self.now(Acquire);
         while let Ok(Some(_)) = self.list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
-        self.list.peek(|e| e.map_or(min, |t| t.timestamp.min(min)))
+        self.list.peek(|e| e.map_or(min, |t| t.instant.min(min)))
     }
 
     #[inline]
@@ -112,12 +132,12 @@ impl Sequencer for AtomicCounter {
             let mut reuse = None;
             match self.list.push_if(
                 Entry {
-                    timestamp: candidate,
+                    instant: candidate,
                     ref_cnt: AtomicU64::new(1),
                 },
                 |e| {
                     if let Some(e) = e {
-                        if e.timestamp >= candidate {
+                        if e.instant >= candidate {
                             if e.ref_cnt
                                 .fetch_update(Relaxed, Relaxed, |r| {
                                     if r == 0 {
@@ -133,7 +153,7 @@ impl Sequencer for AtomicCounter {
                                 return false;
                             }
                             // Cannot push a new entry if the existing if larger.
-                            return e.timestamp == candidate;
+                            return e.instant == candidate;
                         }
                     }
                     true
@@ -192,12 +212,6 @@ impl Default for AtomicCounter {
     }
 }
 
-/// [`U64Tracker`] points to a tracking entry associated with its own
-/// [`Instant`](Sequencer::Instant).
-pub struct U64Tracker {
-    ptr: *const Entry,
-}
-
 impl U64Tracker {
     fn entry(&self) -> &Entry {
         // Safety: `self` is holding a strong reference to the entry, therefore the entry is
@@ -218,7 +232,7 @@ impl Clone for U64Tracker {
 impl ToInstant<AtomicCounter> for U64Tracker {
     #[inline]
     fn to_instant(&self) -> u64 {
-        self.entry().timestamp
+        self.entry().instant
     }
 }
 
@@ -235,12 +249,6 @@ unsafe impl Send for U64Tracker {}
 
 // Safety: the instance being pointed by `U64Tracker` can be accessed by other threads.
 unsafe impl Sync for U64Tracker {}
-
-#[derive(Debug)]
-struct Entry {
-    timestamp: u64,
-    ref_cnt: AtomicU64,
-}
 
 #[cfg(test)]
 mod test {

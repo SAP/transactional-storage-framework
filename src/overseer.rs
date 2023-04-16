@@ -55,7 +55,7 @@ impl Overseer {
         kernel: Arc<Kernel<S, P>>,
     ) -> Overseer {
         let (sender, receiver) =
-            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 4096);
+            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 4);
         Overseer {
             worker: Some(thread::spawn(move || {
                 Self::oversee(&receiver, &kernel);

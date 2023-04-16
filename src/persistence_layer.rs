@@ -8,18 +8,20 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::task::{Context, Poll, Waker};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, available_parallelism, JoinHandle};
 use std::time::Instant;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
 /// the persistence layer of the database.
 ///
-/// [`PersistenceLayer`] implementations must be linearizable such that any [`PersistenceLayer`]
-/// method invocation after a previously concluded [`PersistenceLayer`] call should be recovered
-/// in the same order, e.g., `commit(1, 1)` returned an [`AwaitIO`], and then `commit(2, 2)` is
-/// invoked, `commit(1, 1)` should be recovered before `commit(2, 2)` whether or not the returned
-/// [`AwaitIO`] was awaited.
+/// There is no ordering among IO operations except for [`PersistenceLayer::prepare`] and
+/// [`PersistenceLayer::commit`]; they act as an IO barrier to impose ordering among IO operations
+/// invoked after they are completed and those returned before they are invoked.
+///
+/// The content of each log record must be *idempotent*; the same log record can be applied to the
+/// database more than once on recovery if the log record is close to a checkpoint.
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
     /// Recovers the database.
     ///
@@ -77,17 +79,15 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 
     /// The database is being modified by the [`Journal`](super::Journal).
     ///
-    /// The content must be *idempotent*; the same log record can be applied to the database more
-    /// than once on recovery.
-    ///
     /// # Errors
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the device.
-    fn record(
+    fn record<W: FnOnce(&mut [u8])>(
         &self,
         id: TransactionID,
         journal_id: JournalID,
-        content: &[u8],
+        len: usize,
+        writer: W,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
@@ -186,25 +186,20 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
 /// TODO: use IDL.
 #[derive(Debug)]
 pub struct FileIO<S: Sequencer> {
-    /// The log file.
-    #[allow(dead_code)]
-    log: File,
-
-    /// The shadow log file.
-    ///
-    /// When generating a checkpoint, a shadow file for the log file is created temporarily.
-    #[allow(dead_code)]
-    shadow_log: Option<File>,
-
-    /// The checkpoint file.
-    #[allow(dead_code)]
-    checkpoint: File,
-
     /// The IO worker thread.
     worker: Option<JoinHandle<()>>,
 
+    /// The IO task sender.
+    sender: SyncSender<IOTask>,
+
     /// This pacifies `Clippy` complaining the lack of usage of `S`.
     _phantom: PhantomData<S>,
+}
+
+#[derive(Debug)]
+pub enum IOTask {
+    /// The [`FileIO`] is shutting down.
+    Shutdown,
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
@@ -235,34 +230,54 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     }
 }
 
+impl<S: Sequencer> FileIO<S> {
+    #[allow(clippy::needless_pass_by_value)]
+    fn process(_log0: File, _log1: File, _checkpoint: File, receiver: Receiver<IOTask>) {
+        while let Ok(task) = receiver.recv() {
+            if matches!(task, IOTask::Shutdown) {
+                break;
+            }
+        }
+    }
+}
+
 impl<S: Sequencer> Default for FileIO<S> {
-    /// Creates a default [`File`].
+    /// Creates a default [`FileIO`].
     ///
-    /// The default log, shadow log, and checkpoint files are set to `log.fdb`, `shadow_log.fdb`,
-    /// and `checkpoint.fdb` in the current working directory.
+    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
+    /// current working directory.
     ///
     /// # Panics
     ///
-    /// Panics if the log or checkpoint file could not be opened.
+    /// Panics if `0.log`, `1.log`, or `c.dat` could not be opened.
     #[inline]
     fn default() -> Self {
-        let log = OpenOptions::new()
+        let log0 = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open("log.fdb")
-            .expect("log.fdb could not be opened");
+            .open("0.log")
+            .expect("0.log could not be opened");
+
+        let log1 = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open("1.log")
+            .expect("1.log could not be opened");
         let checkpoint = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open("checkpoint.fdb")
-            .expect("checkpoint.fdb could not be opened");
+            .open("c.dat")
+            .expect("c.dat could not be opened");
+        let (sender, receiver) =
+            mpsc::sync_channel::<IOTask>(available_parallelism().ok().map_or(1, Into::into) * 4);
         FileIO {
-            log,
-            shadow_log: None,
-            checkpoint,
-            worker: Some(thread::spawn(move || {})),
+            worker: Some(thread::spawn(move || {
+                Self::process(log0, log1, checkpoint, receiver);
+            })),
+            sender,
             _phantom: PhantomData,
         }
     }
@@ -271,6 +286,12 @@ impl<S: Sequencer> Default for FileIO<S> {
 impl<S: Sequencer> Drop for FileIO<S> {
     #[inline]
     fn drop(&mut self) {
+        loop {
+            match self.sender.try_send(IOTask::Shutdown) {
+                Ok(_) | Err(TrySendError::Disconnected(_)) => break,
+                _ => (),
+            }
+        }
         if let Some(worker) = self.worker.take() {
             drop(worker.join());
         }
@@ -339,11 +360,12 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn record(
+    fn record<W: FnOnce(&mut [u8])>(
         &self,
         _id: TransactionID,
         _journal_id: JournalID,
-        _content: &[u8],
+        _len: usize,
+        _writer: W,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO {
