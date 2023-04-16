@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name = "atomic_counter"
 harness = false
+
+[[bench]]
+name = "util"
+harness = false
