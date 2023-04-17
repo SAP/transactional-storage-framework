@@ -78,6 +78,7 @@ impl Default for IntHasher {
         Self(ArrayOrU64 { integer: 0 })
     }
 }
+
 impl Hasher for IntHasher {
     #[inline]
     fn write(&mut self, msg: &[u8]) {
