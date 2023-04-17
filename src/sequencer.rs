@@ -7,6 +7,7 @@
 //! The [`Sequencer`] trait and the [`Instant`](Sequencer::Instant) are the basis of all the
 //! database operations as they define the flow of time.
 
+use super::utils;
 use scc::Queue;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
@@ -88,8 +89,8 @@ pub struct AtomicCounter {
     /// The current logical clock value.
     clock: AtomicU64,
 
-    /// The list of tracked entries.
-    list: Queue<Entry>,
+    /// The list of tracked entries spread over thread-local queues.
+    sharded_entry_list: Vec<Queue<Entry>>,
 }
 
 /// [`U64Tracker`] points to a tracking entry associated with its own
@@ -115,9 +116,12 @@ impl Sequencer for AtomicCounter {
 
     #[inline]
     fn min(&self, _order: Ordering) -> u64 {
-        let min = self.now(Acquire);
-        while let Ok(Some(_)) = self.list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
-        self.list.peek(|e| e.map_or(min, |t| t.instant.min(min)))
+        let mut min = self.now(Acquire);
+        for entry_list in &self.sharded_entry_list {
+            while let Ok(Some(_)) = entry_list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
+            min = entry_list.peek(|e| e.map_or(min, |t| t.instant.min(min)));
+        }
+        min
     }
 
     #[inline]
@@ -127,10 +131,11 @@ impl Sequencer for AtomicCounter {
 
     #[inline]
     fn track(&self, order: Ordering) -> Self::Tracker {
+        let shard_id = utils::shard_id() % self.sharded_entry_list.len();
         loop {
             let candidate = self.now(order);
             let mut reuse = None;
-            match self.list.push_if(
+            match self.sharded_entry_list[shard_id].push_if(
                 Entry {
                     instant: candidate,
                     ref_cnt: AtomicU64::new(1),
@@ -204,10 +209,13 @@ impl Sequencer for AtomicCounter {
 impl Default for AtomicCounter {
     #[inline]
     fn default() -> Self {
+        let num_shards = utils::num_shards();
+        let mut sharded_entry_list = Vec::with_capacity(num_shards);
+        sharded_entry_list.resize_with(num_shards, Queue::default);
         AtomicCounter {
             // Starts from `1` in order to avoid using `0`.
             clock: AtomicU64::new(1),
-            list: Queue::default(),
+            sharded_entry_list,
         }
     }
 }
@@ -259,10 +267,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn atomic_counter() {
-        let atomic_counter: Arc<AtomicCounter> = Arc::new(AtomicCounter {
-            clock: AtomicU64::new(1),
-            list: Queue::default(),
-        });
+        let atomic_counter: Arc<AtomicCounter> = Arc::new(AtomicCounter::default());
         let num_tasks = 16;
         let mut task_handles = Vec::with_capacity(num_tasks);
         let barrier = Arc::new(Barrier::new(num_tasks));
