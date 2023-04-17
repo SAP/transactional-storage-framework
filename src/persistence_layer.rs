@@ -272,7 +272,7 @@ impl<S: Sequencer> Default for FileIO<S> {
             .write(true)
             .open("c.dat")
             .expect("c.dat could not be opened");
-        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::num_shards() * 4);
+        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         FileIO {
             worker: Some(thread::spawn(move || {
                 Self::process(log0, log1, checkpoint, receiver);

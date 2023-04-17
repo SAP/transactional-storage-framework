@@ -17,6 +17,14 @@ pub struct IntHasher(ArrayOrU64);
 ///
 /// It caches the thread identifier in it that makes this function significantly faster than
 /// [`std::thread::Thread::id`].
+///
+/// # Examples
+///
+/// ```
+/// use sap_tsf::utils;
+///
+/// assert_eq!(utils::thread_id(), std::thread::current().id());
+/// ````
 #[inline]
 #[must_use]
 pub fn thread_id() -> ThreadId {
@@ -27,6 +35,14 @@ pub fn thread_id() -> ThreadId {
 ///
 /// A shard identifier is basically the hash value of the current thread identifier. Different
 /// threads can have the same shard identifier.
+///
+/// # Examples
+///
+/// ```
+/// use sap_tsf::utils;
+///
+/// let shard_id = utils::shard_id();
+/// ````
 #[inline]
 #[must_use]
 pub fn shard_id() -> usize {
@@ -40,9 +56,19 @@ pub fn shard_id() -> usize {
 }
 
 /// Returns the suggested number of shards.
+///
+/// Returns a non-zero `usize` value that is close to [`std::thread::available_parallelism`].
+///
+/// # Examples
+///
+/// ```
+/// use sap_tsf::utils;
+///
+/// assert_ne!(utils::advise_num_shards(), 0);
+/// ````
 #[inline]
 #[must_use]
-pub fn num_shards() -> usize {
+pub fn advise_num_shards() -> usize {
     available_parallelism().ok().map_or(1, Into::into)
 }
 

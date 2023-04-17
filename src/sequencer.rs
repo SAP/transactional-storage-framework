@@ -209,7 +209,7 @@ impl Sequencer for AtomicCounter {
 impl Default for AtomicCounter {
     #[inline]
     fn default() -> Self {
-        let num_shards = utils::num_shards();
+        let num_shards = utils::advise_num_shards();
         let mut sharded_entry_list = Vec::with_capacity(num_shards);
         sharded_entry_list.resize_with(num_shards, Queue::default);
         AtomicCounter {

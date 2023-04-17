@@ -54,7 +54,7 @@ impl Overseer {
     pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(
         kernel: Arc<Kernel<S, P>>,
     ) -> Overseer {
-        let (sender, receiver) = mpsc::sync_channel::<Task>(utils::num_shards() * 4);
+        let (sender, receiver) = mpsc::sync_channel::<Task>(utils::advise_num_shards() * 4);
         Overseer {
             worker: Some(thread::spawn(move || {
                 Self::oversee(&receiver, &kernel);
