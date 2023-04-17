@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::database::Kernel;
+use super::utils;
 use super::{AccessController, PersistenceLayer, Sequencer};
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Into;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::task::Waker;
-use std::thread::{self, available_parallelism, JoinHandle};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// [`Overseer`] wakes up timed out tasks and deletes unreachable database objects.
@@ -54,8 +54,7 @@ impl Overseer {
     pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(
         kernel: Arc<Kernel<S, P>>,
     ) -> Overseer {
-        let (sender, receiver) =
-            mpsc::sync_channel::<Task>(available_parallelism().ok().map_or(1, Into::into) * 4);
+        let (sender, receiver) = mpsc::sync_channel::<Task>(utils::advise_num_shards() * 4);
         Overseer {
             worker: Some(thread::spawn(move || {
                 Self::oversee(&receiver, &kernel);

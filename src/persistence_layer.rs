@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use super::utils;
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
@@ -10,7 +11,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::task::{Context, Poll, Waker};
-use std::thread::{self, available_parallelism, JoinHandle};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
@@ -271,8 +272,7 @@ impl<S: Sequencer> Default for FileIO<S> {
             .write(true)
             .open("c.dat")
             .expect("c.dat could not be opened");
-        let (sender, receiver) =
-            mpsc::sync_channel::<IOTask>(available_parallelism().ok().map_or(1, Into::into) * 4);
+        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         FileIO {
             worker: Some(thread::spawn(move || {
                 Self::process(log0, log1, checkpoint, receiver);

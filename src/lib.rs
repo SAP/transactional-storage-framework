@@ -44,6 +44,8 @@ mod transaction;
 pub use transaction::ID as TransactionID;
 pub use transaction::{Committable, Transaction};
 
+pub mod utils;
+
 mod telemetry;
 
 mod overseer;
