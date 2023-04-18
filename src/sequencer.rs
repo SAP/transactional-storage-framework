@@ -90,7 +90,10 @@ pub struct AtomicCounter {
     clock: AtomicU64,
 
     /// The list of tracked entries spread over thread-local queues.
-    sharded_entry_list: Vec<Queue<Entry>>,
+    ///
+    /// A single [`EntryContainer`] can be shared among multiple threads because of hash conflicts
+    /// or too many threads having been spawned.
+    sharded_entry_list: Vec<EntryContainer>,
 }
 
 /// [`U64Tracker`] points to a tracking entry associated with its own
@@ -110,6 +113,11 @@ struct Entry {
     ref_cnt: AtomicU64,
 }
 
+/// [`EntryContainer`] is aligned to a typical size of cache lines.
+#[repr(align(64))]
+#[derive(Debug, Default)]
+struct EntryContainer(Queue<Entry>);
+
 impl Sequencer for AtomicCounter {
     type Instant = u64;
     type Tracker = U64Tracker;
@@ -118,8 +126,8 @@ impl Sequencer for AtomicCounter {
     fn min(&self, _order: Ordering) -> u64 {
         let mut min = self.now(Acquire);
         for entry_list in &self.sharded_entry_list {
-            while let Ok(Some(_)) = entry_list.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
-            min = entry_list.peek(|e| e.map_or(min, |t| t.instant.min(min)));
+            while let Ok(Some(_)) = entry_list.0.pop_if(|e| e.ref_cnt.load(Relaxed) == 0) {}
+            min = entry_list.0.peek(|e| e.map_or(min, |t| t.instant.min(min)));
         }
         min
     }
@@ -135,7 +143,7 @@ impl Sequencer for AtomicCounter {
         loop {
             let candidate = self.now(order);
             let mut reuse = None;
-            match self.sharded_entry_list[shard_id].push_if(
+            match self.sharded_entry_list[shard_id].0.push_if(
                 Entry {
                     instant: candidate,
                     ref_cnt: AtomicU64::new(1),
@@ -211,7 +219,7 @@ impl Default for AtomicCounter {
     fn default() -> Self {
         let num_shards = utils::advise_num_shards();
         let mut sharded_entry_list = Vec::with_capacity(num_shards);
-        sharded_entry_list.resize_with(num_shards, Queue::default);
+        sharded_entry_list.resize_with(num_shards, EntryContainer::default);
         AtomicCounter {
             // Starts from `1` in order to avoid using `0`.
             clock: AtomicU64::new(1),
