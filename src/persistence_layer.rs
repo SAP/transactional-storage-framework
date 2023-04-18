@@ -17,13 +17,20 @@ use std::time::Instant;
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
 /// the persistence layer of the database.
 ///
-/// There is no ordering among IO operations except for [`PersistenceLayer::prepare`] and
-/// [`PersistenceLayer::commit`]; they act as an IO barrier to impose ordering among IO operations
-/// invoked after they are completed and those returned before they are invoked.
+/// There is no ordering among IO operations except for [`PersistenceLayer::rewind`],
+/// [`PersistenceLayer::prepare`] and [`PersistenceLayer::commit`]; other operations can be
+/// strictly ordered by locking the corresponding database resources through
+/// [`AccessController`](super::AccessController), whereas those operations are followed by
+/// releasing any acquired locks; therefore, before other transactions acquire the released locks,
+/// all the dependent log records must reach the log buffer.
 ///
 /// The content of each log record must be *idempotent*; the same log record can be applied to the
 /// database more than once on recovery if the log record is close to a checkpoint.
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
+    /// [`PersistenceLayer::LogBuffer`] is kept in a transaction journal to store own log records
+    /// until the transaction or journal is ended.
+    type LogBuffer: BufferredLogger<S, Self>;
+
     /// Recovers the database.
     ///
     /// If a specific logical instant is specified, it only recovers the storage up until the time
@@ -157,6 +164,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn check(&self, io_id: usize, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 }
 
+/// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
+/// made.
+pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + Sized {
+    /// Flushes the content.
+    fn flush(&mut self) -> Result<AwaitIO<S, P>, Error>;
+}
+
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
 /// successfully materialized in memory and ready for being persisted.
 ///
@@ -196,6 +210,10 @@ pub struct FileIO<S: Sequencer> {
     /// This pacifies `Clippy` complaining the lack of usage of `S`.
     _phantom: PhantomData<S>,
 }
+
+/// [`FileLogBuffer`] implements [`BufferredLogger`].
+#[derive(Debug, Default)]
+pub struct FileLogBuffer<S: Sequencer>(PhantomData<S>);
 
 #[derive(Debug)]
 pub enum IOTask {
@@ -299,6 +317,8 @@ impl<S: Sequencer> Drop for FileIO<S> {
 }
 
 impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
+    type LogBuffer = FileLogBuffer<S>;
+
     #[inline]
     fn recover(
         &self,
@@ -440,5 +460,12 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
         Some(Ok(S::Instant::default()))
+    }
+}
+
+impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S> {
+    #[inline]
+    fn flush(&mut self) -> Result<AwaitIO<S, FileIO<S>>, Error> {
+        Err(Error::NotFound)
     }
 }

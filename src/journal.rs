@@ -25,6 +25,9 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     /// [`Journal`] borrows [`Transaction`].
     transaction: &'t Transaction<'d, S, P>,
 
+    /// Own log buffer.
+    _log_buffer: Option<Box<P::LogBuffer>>,
+
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
 }
@@ -216,6 +219,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ) -> Journal<'d, 't, S, P> {
         Journal {
             transaction,
+            _log_buffer: None,
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.now())),
         }
     }
