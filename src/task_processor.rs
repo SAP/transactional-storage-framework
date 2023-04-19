@@ -5,7 +5,9 @@
 use super::database::Kernel;
 use super::utils;
 use super::{AccessController, PersistenceLayer, Sequencer};
+use scc::ebr;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::task::Waker;
@@ -130,6 +132,19 @@ impl TaskProcessor {
                 &mut monitored_database_object_ids,
             );
             wait_duration = Self::wake_up(&mut waker_queue);
+
+            // TODO: implement it correctly.
+            if let Some(container) = kernel.container("TODO", &ebr::Barrier::new()) {
+                let oldest = kernel.sequencer().min(Acquire);
+                let versioned_record_iter = container.iter_versioned_records();
+                for object_id in versioned_record_iter {
+                    kernel.access_controller().try_remove_access_data_sync(
+                        object_id,
+                        &|i| *i <= oldest,
+                        &mut |_| (),
+                    );
+                }
+            }
         }
     }
 

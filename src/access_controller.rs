@@ -789,15 +789,11 @@ impl<S: Sequencer> AccessController<S> {
     /// Tries to remove the access control data corresponding to the database object.
     ///
     /// It is a blocking and synchronous method, therefore this must be invoked in the background.
-    #[allow(dead_code)]
-    pub(super) fn try_remove_access_data_sync<
-        C: FnOnce(&S::Instant) -> bool,
-        D: FnOnce(&S::Instant),
-    >(
+    pub(super) fn try_remove_access_data_sync<C: Fn(&S::Instant) -> bool, D: FnMut(&S::Instant)>(
         &self,
         object_id: usize,
-        condition: C,
-        deletion_notifier: D,
+        condition: &C,
+        deletion_notifier: &mut D,
     ) -> bool {
         self.table
             .remove_if(&object_id, |o| {
@@ -807,8 +803,8 @@ impl<S: Sequencer> AccessController<S> {
                     ObjectState::Created(instant) => condition(instant),
                     ObjectState::Deleted(instant) => {
                         if condition(instant) {
-                            // Deletion of the entry must happen after the deletion is known to the
-                            // database object.
+                            // Deletion of the access control data must happen after the deletion
+                            // is known to the database object.
                             deletion_notifier(instant);
                             true
                         } else {

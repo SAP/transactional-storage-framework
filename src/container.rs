@@ -23,6 +23,26 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Container<S, P> {
             _version: std::marker::PhantomData,
         }
     }
+
+    /// Iterates over versioned records for `MVCC` garbage collection.
+    pub(super) fn iter_versioned_records(&self) -> VersionedRecordVisitor<S, P> {
+        VersionedRecordVisitor { _container: self }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct VersionedRecordVisitor<'c, S: Sequencer, P: PersistenceLayer<S>> {
+    /// The container to which it is referring.
+    _container: &'c Container<S, P>,
+}
+
+impl<'c, S: Sequencer, P: PersistenceLayer<S>> Iterator for VersionedRecordVisitor<'c, S, P> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ This project is inspired by the paper <cite>"The tale of 1000 Cores: an evaluati
 The framework is fully written in Rust, and incorporates state-of-the-art programming techniques to maximize the performance while minimizing the memory usage.
 
 * Asynchronous API: any code that accesses shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
+* Low latency API: time consuming jobs are processed in the background.
 * No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
 * Zero busy-loops: no spin-locks and busy-loops to wait for desired resources.
 
