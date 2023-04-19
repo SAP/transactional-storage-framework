@@ -345,7 +345,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
 
     /// Returns a reference to its [`Sequencer`].
     pub(super) fn sequencer(&self) -> &S {
-        &self.kernel.sequencer
+        self.kernel.sequencer()
     }
 
     /// Returns a reference to the [`PersistenceLayer`].
@@ -397,6 +397,21 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
 }
 
 impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
+    /// Returns a reference to its own [`Sequencer`].
+    pub(super) fn sequencer(&self) -> &S {
+        &self.sequencer
+    }
+
+    /// Returns the [`Container`] identified as the name.
+    pub(super) fn container<'b>(
+        &self,
+        name: &str,
+        barrier: &'b ebr::Barrier,
+    ) -> Option<&'b Container<S, P>> {
+        self.container_map
+            .read_with(name, |_, c| c.as_ref(), barrier)
+    }
+
     /// Returns a reference to its [`AccessController`].
     pub(super) fn access_controller(&self) -> &AccessController<S> {
         &self.access_controller

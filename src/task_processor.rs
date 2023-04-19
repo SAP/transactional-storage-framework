@@ -4,8 +4,11 @@
 
 use super::database::Kernel;
 use super::utils;
-use super::{AccessController, PersistenceLayer, Sequencer};
+use super::{PersistenceLayer, Sequencer};
+use scc::ebr;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::take;
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::task::Waker;
@@ -42,14 +45,21 @@ pub enum Task {
     /// * The [`Waker`] may be called after the instant if the [`TaskProcessor`] is overloaded.
     WakeUp(Instant, Waker),
 
+    /// The [`TaskProcessor`] should monitor the database container.
+    ///
+    /// TODO: implement it.
+    #[allow(dead_code)]
+    MonitorContainer(String),
+
     /// The [`TaskProcessor`] should monitor the database object.
     ///
-    /// [`TaskProcessor`] periodically checks the associated [`AccessController`] if the
-    /// corresponding access data can be cleaned up, or ownership of it can be transferred.
-    Monitor(usize),
+    /// [`TaskProcessor`] periodically checks the associated
+    /// [`AccessController`](super::AccessController) if the corresponding access data can be
+    /// removed, or ownership of it can be transferred.
+    MonitorObject(usize),
 
-    /// The [`TaskProcessor`] should check the [`AccessController`] entries corresponding to
-    /// monitored database objects.
+    /// The [`TaskProcessor`] should check the [`AccessController`](super::AccessController)
+    /// entries corresponding to monitored database objects.
     ///
     /// This task is sent to the [`TaskProcessor`] when a transaction is releasing some database
     /// resources.
@@ -58,6 +68,29 @@ pub enum Task {
 
 /// The default interval that a [`TaskProcessor`] wakes up and checks the status of the database.
 const DEFAULT_CHECK_INTERAL: Duration = Duration::from_secs(60);
+
+/// [`TaskProcessor`] processes time critical tasks on every `CONTEXT_SWITCH_THRESHOLD` operations
+/// in a long task.
+const CONTEXT_SWITCH_THRESHOLD: usize = 256;
+
+/// [`ThreadLocalData`] is privately used by [`TaskProcessor`].
+#[derive(Debug)]
+struct ThreadLocalData<S: Sequencer, P: PersistenceLayer<S>> {
+    /// The [`Kernel`] of the database.
+    kernel: Arc<Kernel<S, P>>,
+
+    /// The [`Waker`] container.
+    waker_queue: BTreeMap<Instant, Waker>,
+
+    /// A set containing the names of monitored containers.
+    monitored_containers: BTreeSet<String>,
+
+    /// A set containing the object identifiers of monitored database objects.
+    monitored_object_ids: BTreeSet<usize>,
+
+    /// Wait duration to receive a new [`Task`].
+    wait_duration: Duration,
+}
 
 impl TaskProcessor {
     /// Spawns an [`TaskProcessor`].
@@ -68,7 +101,14 @@ impl TaskProcessor {
         let (sender, receiver) = mpsc::sync_channel::<Task>(utils::advise_num_shards() * 4);
         TaskProcessor {
             processor: Some(thread::spawn(move || {
-                Self::process(&receiver, &kernel);
+                let mut thread_local_data = ThreadLocalData {
+                    kernel,
+                    waker_queue: BTreeMap::default(),
+                    monitored_containers: BTreeSet::default(),
+                    monitored_object_ids: BTreeSet::default(),
+                    wait_duration: DEFAULT_CHECK_INTERAL,
+                };
+                Self::process(&receiver, &mut thread_local_data);
             })),
             sender,
         }
@@ -79,7 +119,7 @@ impl TaskProcessor {
     /// Returns `false` if the [`Task`] could not be sent. It is usually not a problem since it
     /// means that the send buffer is full, and therefore the worker thread is guaranteed to run
     /// afterwards., However certain types of tasks that requires the [`TaskProcessor`] to take a
-    /// very specific action, e.g., [`Task::Monitor`], will need to be sent to the
+    /// very specific action, e.g., [`Task::MonitorObject`], will need to be sent to the
     /// [`TaskProcessor`] eventually by the caller.
     pub(super) fn send_task(&self, task: Task) -> bool {
         self.sender.try_send(task).is_ok()
@@ -88,13 +128,10 @@ impl TaskProcessor {
     /// Processes tasks.
     fn process<S: Sequencer, P: PersistenceLayer<S>>(
         receiver: &Receiver<Task>,
-        kernel: &Kernel<S, P>,
+        thread_local_data: &mut ThreadLocalData<S, P>,
     ) {
-        let mut waker_queue: BTreeMap<Instant, Waker> = BTreeMap::default();
-        let mut monitored_database_object_ids: BTreeSet<usize> = BTreeSet::default();
-        let mut wait_duration = DEFAULT_CHECK_INTERAL;
         loop {
-            if let Ok(task) = receiver.recv_timeout(wait_duration) {
+            if let Ok(task) = receiver.recv_timeout(thread_local_data.wait_duration) {
                 match task {
                     Task::Shutdown => break,
                     Task::WakeUp(deadline, mut waker) => {
@@ -104,7 +141,8 @@ impl TaskProcessor {
                         } else {
                             // Try `4` times, and give up inserting the `Waker`.
                             for offset in 0..4 {
-                                match waker_queue
+                                match thread_local_data
+                                    .waker_queue
                                     .insert(deadline + Duration::from_nanos(offset), waker)
                                 {
                                     Some(other_waker) => waker = other_waker,
@@ -113,8 +151,11 @@ impl TaskProcessor {
                             }
                         }
                     }
-                    Task::Monitor(object_id) => {
-                        monitored_database_object_ids.insert(object_id);
+                    Task::MonitorContainer(name) => {
+                        thread_local_data.monitored_containers.insert(name);
+                    }
+                    Task::MonitorObject(object_id) => {
+                        thread_local_data.monitored_object_ids.insert(object_id);
                     }
                     Task::ScanAccessController => {
                         // Do nothing.
@@ -125,35 +166,65 @@ impl TaskProcessor {
             // The monitored database objects and deadlines have to be always checked on every
             // iteration as sending `ScanAccessController` tasks to `Overseer` may fail when the
             // send buffer is full.
-            Self::scan_access_controller(
-                kernel.access_controller(),
-                &mut monitored_database_object_ids,
-            );
-            wait_duration = Self::wake_up(&mut waker_queue);
+            Self::process_time_critical_tasks(thread_local_data);
+
+            // Perform MVCC garbage collection.
+            let mut operation_count = 0;
+            let mut monitored_containers = take(&mut thread_local_data.monitored_containers);
+            monitored_containers.retain(|name| {
+                if let Some(container) = thread_local_data
+                    .kernel
+                    .container(name.as_str(), &ebr::Barrier::new())
+                {
+                    let oldest = thread_local_data.kernel.sequencer().min(Acquire);
+                    let versioned_record_iter = container.iter_versioned_records();
+                    let mut num_versioned_records = 0;
+                    for object_id in versioned_record_iter {
+                        if !thread_local_data
+                            .kernel
+                            .access_controller()
+                            .try_remove_access_data_sync(object_id, &|i| *i <= oldest, &mut |_| ())
+                        {
+                            num_versioned_records += 1;
+                        }
+                        if operation_count == CONTEXT_SWITCH_THRESHOLD {
+                            // Process time critical tasks periodically.
+                            Self::process_time_critical_tasks(thread_local_data);
+                            operation_count = 0;
+                        } else {
+                            operation_count += 1;
+                        }
+                    }
+                    return num_versioned_records != 0;
+                }
+                false
+            });
+            thread_local_data.monitored_containers = monitored_containers;
         }
     }
 
-    /// Scans the access controller and cleans up access control information associated with
-    /// monitored database objects.
-    fn scan_access_controller<S: Sequencer>(
-        access_controller: &AccessController<S>,
-        monitored_object_ids: &mut BTreeSet<usize>,
+    /// Performs time critical tasks.
+    ///
+    /// It firstly scans the access controller and cleans up access control information associated
+    /// with monitored database objects, then wakes up every expired [`Waker`] instances.
+    fn process_time_critical_tasks<S: Sequencer, P: PersistenceLayer<S>>(
+        thread_local_data: &mut ThreadLocalData<S, P>,
     ) {
-        monitored_object_ids
+        let access_controller = thread_local_data.kernel.access_controller();
+        thread_local_data
+            .monitored_object_ids
             .retain(|object_id| access_controller.transfer_ownership_sync(*object_id));
-    }
 
-    /// Wakes up every expired [`Waker`], and returns the time remaining until the first [`Waker`]
-    /// will be expired.
-    fn wake_up(waker_queue: &mut BTreeMap<Instant, Waker>) -> Duration {
+        let mut new_wait_duration = DEFAULT_CHECK_INTERAL;
         let now = Instant::now();
-        while let Some(entry) = waker_queue.first_entry() {
+        while let Some(entry) = thread_local_data.waker_queue.first_entry() {
             if *entry.key() >= now {
-                return *entry.key() - now;
+                new_wait_duration = *entry.key() - now;
+                break;
             }
             entry.remove().wake();
         }
-        DEFAULT_CHECK_INTERAL
+        thread_local_data.wait_duration = new_wait_duration;
     }
 }
 
