@@ -35,6 +35,7 @@ The framework is fully written in Rust, and incorporates state-of-the-art progra
 * Asynchronous API: any code that accesses shared data is always either lock-free or asynchronous, and therefore computation resources are cooperatively scheduled.
 * Low latency API: time consuming jobs are processed in the background.
 * No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
+* Versatile transaction semantics: no limitation in the length and size of a transaction, distributed transaction support via the _X/Open XA_ interface.
 * Zero busy-loops: no spin-locks and busy-loops to wait for desired resources.
 
 ## Architecture
