@@ -36,6 +36,10 @@ The framework is fully written in Rust, and incorporates state-of-the-art progra
 * No dependencies on asynchronous executors: users can freely use their own asynchronous executors; one drawback is, the framework spawns a `thread` to implement a timer, however the thread will mostly lie dormant.
 * Zero busy-loops: no spin-locks and busy-loops to wait for desired resources.
 
+## Architecture
+
+The detailed architecture of the framework is described in [Architecture](https://github.com/SAP/transactional-storage-framework/blob/main/doc/architecture.md).
+
 ## Components
 
 The framework consists of generic components that can be customizable and pluggable.
@@ -146,7 +150,7 @@ async {
     // The transaction will delete the database object.
     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
     assert_eq!(journal_delete.submit(), 2);
- 
+
     // The transaction deletes the database object by writing its commit instant value onto
     // the access data associated with the database object.
     assert!(transaction_succ.commit().await.is_ok());

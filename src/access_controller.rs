@@ -417,7 +417,7 @@ impl<S: Sequencer> AccessController<S> {
             ObjectState::Owned(Ownership::CreatedAwaitable(exclusive_awaitable)),
         ) = (deadline, entry.get_mut())
         {
-            let overseer = journal.overseer();
+            let task_processor = journal.task_processor();
             let result_placeholder = Arc::new(AccessRequestResult::default());
             let request = Request::Create(
                 Instant::now(),
@@ -425,7 +425,7 @@ impl<S: Sequencer> AccessController<S> {
                 result_placeholder.clone(),
             );
             exclusive_awaitable.push_request(request);
-            return AwaitResponse::new(entry, overseer, deadline, result_placeholder).await;
+            return AwaitResponse::new(entry, task_processor, deadline, result_placeholder).await;
         }
 
         // The database object has been created, deleted, or invisible.
@@ -495,7 +495,7 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Protect(
                             Instant::now(),
@@ -503,13 +503,18 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Protect(
                             Instant::now(),
@@ -517,8 +522,13 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 _ => (),
@@ -590,7 +600,7 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Lock(
                             Instant::now(),
@@ -598,13 +608,18 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Lock(
                             Instant::now(),
@@ -612,8 +627,13 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 _ => (),
@@ -688,7 +708,7 @@ impl<S: Sequencer> AccessController<S> {
                 | Ownership::LockedAwaitable(exclusive_awaitable)
                 | Ownership::DeletedAwaitable(exclusive_awaitable) => {
                     if let Some(deadline) = deadline {
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Delete(
                             Instant::now(),
@@ -696,14 +716,19 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         exclusive_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 Ownership::ProtectedAwaitable(shared_awaitable) => {
                     if let Some(deadline) = deadline {
                         // Wait for the database resource to be available to the transaction.
-                        let overseer = journal.overseer();
+                        let task_processor = journal.task_processor();
                         let result_placeholder = Arc::new(AccessRequestResult::default());
                         let request = Request::Delete(
                             Instant::now(),
@@ -711,8 +736,13 @@ impl<S: Sequencer> AccessController<S> {
                             result_placeholder.clone(),
                         );
                         shared_awaitable.push_request(request);
-                        return AwaitResponse::new(entry, overseer, deadline, result_placeholder)
-                            .await;
+                        return AwaitResponse::new(
+                            entry,
+                            task_processor,
+                            deadline,
+                            result_placeholder,
+                        )
+                        .await;
                     }
                 }
                 _ => (),
@@ -726,7 +756,7 @@ impl<S: Sequencer> AccessController<S> {
     /// Transfers ownership to all the eligible waiting transactions.
     ///
     /// If the database object still need to be monitored, it returns `true`. It is a blocking and
-    /// synchronous method invoked by [`Overseer`](super::overseer::Overseer).
+    /// synchronous method, therefore this must be invoked in the background.
     pub(super) fn transfer_ownership_sync(&self, object_id: usize) -> bool {
         self.table
             .update(&object_id, |_, object_state| {
@@ -757,6 +787,8 @@ impl<S: Sequencer> AccessController<S> {
     }
 
     /// Tries to remove the access control data corresponding to the database object.
+    ///
+    /// It is a blocking and synchronous method, therefore this must be invoked in the background.
     #[allow(dead_code)]
     pub(super) fn try_remove_access_data_sync<
         C: FnOnce(&S::Instant) -> bool,
@@ -767,25 +799,25 @@ impl<S: Sequencer> AccessController<S> {
         condition: C,
         deletion_notifier: D,
     ) -> bool {
-        self.table.remove_if(&object_id, |o| {
-           o.prepare_ownership_transfer();
-           match o {
-            ObjectState::Owned(_) => false,
-            ObjectState::Created(instant) => {
-                condition(instant)
-            },
-            ObjectState::Deleted(instant) => {
-                if condition(instant) {
-                    // Deletion of the entry must happen after the deletion is known to the
-                    // database object.
-                    deletion_notifier(instant);
-                    true
-                } else {
-                    false
+        self.table
+            .remove_if(&object_id, |o| {
+                o.prepare_ownership_transfer();
+                match o {
+                    ObjectState::Owned(_) => false,
+                    ObjectState::Created(instant) => condition(instant),
+                    ObjectState::Deleted(instant) => {
+                        if condition(instant) {
+                            // Deletion of the entry must happen after the deletion is known to the
+                            // database object.
+                            deletion_notifier(instant);
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 }
-            },
-        }
-        }).is_some()
+            })
+            .is_some()
     }
 
     /// Processes the supplied wait queue.

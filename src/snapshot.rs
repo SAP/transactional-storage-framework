@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::overseer::Overseer;
 use super::sequencer::ToInstant;
+use super::task_processor::TaskProcessor;
 use super::{Database, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use std::cmp;
 use std::marker::PhantomData;
@@ -44,7 +44,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
 
     /// Enables the [`Snapshot`] to silently sleep until a transaction to be committed or rolled
     /// back.
-    overseer: &'d Overseer,
+    task_processor: &'d TaskProcessor,
 }
 
 /// Data representing the current state of the [`Transaction`](super::Transaction).
@@ -97,7 +97,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     #[inline]
     #[must_use]
     pub fn combine(mut self, mut other: Snapshot<'d, 't, 'j, S>) -> Snapshot<'d, 't, 'j, S> {
-        if !ptr::eq(self.overseer, other.overseer) {
+        if !ptr::eq(self.task_processor, other.task_processor) {
             // They are from different `Database` instances of the same lifetime.
             return self;
         }
@@ -114,7 +114,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             tracker,
             transaction_snapshot,
             journal_snapshot,
-            overseer: self.overseer,
+            task_processor: self.task_processor,
         }
     }
 
@@ -127,7 +127,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             tracker: Some(tracker),
             transaction_snapshot: None,
             journal_snapshot: None,
-            overseer: database.overseer(),
+            task_processor: database.task_processor(),
         }
     }
 
@@ -140,7 +140,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             tracker: None,
             transaction_snapshot: None,
             journal_snapshot: Some(journal_snapshot),
-            overseer: database.overseer(),
+            task_processor: database.task_processor(),
         }
     }
 
@@ -153,7 +153,7 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
             tracker: None,
             transaction_snapshot: Some(transaction_snapshot),
             journal_snapshot: None,
-            overseer: database.overseer(),
+            task_processor: database.task_processor(),
         }
     }
 
@@ -176,9 +176,9 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
         self.journal_snapshot.as_ref()
     }
 
-    /// Returns the corresponding [`Overseer`].
-    pub(super) fn overseer(&self) -> &Overseer {
-        self.overseer
+    /// Returns the corresponding [`TaskProcessor`].
+    pub(super) fn task_processor(&self) -> &TaskProcessor {
+        self.task_processor
     }
 }
 

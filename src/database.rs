@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::overseer::{Overseer, Task};
+use super::task_processor::{Task, TaskProcessor};
 use super::{
     AccessController, AtomicCounter, Container, Error, FileIO, Journal, Metadata, PersistenceLayer,
     Sequencer, Snapshot, Transaction,
@@ -24,10 +24,10 @@ pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = FileI
     /// memory addresses of some data while allowing the [`Database`] to be moved freely.
     kernel: Arc<Kernel<S, P>>,
 
-    /// A background thread waking up timed out tasks and deleting unreachable database objects.
+    /// A background thread processing blocking and synchronous tasks in the background.
     ///
-    /// `overseer` has access to `kernel` by holding a strong reference to it.
-    overseer: Overseer,
+    /// `task_processor` has access to `kernel` by holding a strong reference to it.
+    task_processor: TaskProcessor,
 }
 
 /// The core of [`Database`].
@@ -76,10 +76,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             access_controller: AccessController::default(),
             persistence_layer,
         });
-        let overseer = Overseer::spawn(kernel.clone());
+        let task_processor = TaskProcessor::spawn(kernel.clone());
         let mut database = Database {
             kernel: kernel.clone(),
-            overseer,
+            task_processor,
         };
         let io_completion =
             kernel
@@ -353,9 +353,9 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
         &self.kernel.persistence_layer
     }
 
-    /// Returns a reference to its [`Overseer`].
-    pub(super) fn overseer(&self) -> &Overseer {
-        &self.overseer
+    /// Returns a reference to its [`TaskProcessor`].
+    pub(super) fn task_processor(&self) -> &TaskProcessor {
+        &self.task_processor
     }
 }
 
@@ -381,15 +381,18 @@ impl Default for Database<AtomicCounter, FileIO<AtomicCounter>> {
             access_controller: AccessController::default(),
             persistence_layer: FileIO::default(),
         });
-        let overseer = Overseer::spawn(kernel.clone());
-        Database { kernel, overseer }
+        let task_processor = TaskProcessor::spawn(kernel.clone());
+        Database {
+            kernel,
+            task_processor,
+        }
     }
 }
 
 impl<S: Sequencer, P: PersistenceLayer<S>> Drop for Database<S, P> {
     #[inline]
     fn drop(&mut self) {
-        while !self.overseer.send_task(Task::Shutdown) {}
+        while !self.task_processor.send_task(Task::Shutdown) {}
     }
 }
 

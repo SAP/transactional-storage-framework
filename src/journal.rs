@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::access_controller::ObjectState;
-use super::overseer::{Overseer, Task};
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
+use super::task_processor::{Task, TaskProcessor};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
@@ -83,11 +83,11 @@ pub(super) struct AwaitResponse<'d> {
     /// The object identifier of the desired resource.
     object_id: usize,
 
-    /// Indicates that the object identifier was sent to the [`Overseer`].
+    /// Indicates that the object identifier was sent to the [`TaskProcessor`].
     object_id_registered: bool,
 
-    /// The corresponding [`Overseer`].
-    overseer: &'d Overseer,
+    /// The corresponding [`TaskProcessor`] that monitors database resources being released.
+    task_processor: &'d TaskProcessor,
 
     /// The deadline.
     deadline: Instant,
@@ -103,8 +103,8 @@ pub(super) struct AwaitEOT<'d, S: Sequencer> {
     /// The transaction to be committed or rolled back.
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
 
-    /// The associated [`Overseer`] that handles end-of-transaction messages.
-    overseer: &'d Overseer,
+    /// The associated [`TaskProcessor`] that handles end-of-transaction messages.
+    task_processor: &'d TaskProcessor,
 
     /// The deadline.
     deadline: Instant,
@@ -202,9 +202,9 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
         Snapshot::from_journal(self.transaction.database(), self.journal_snapshot())
     }
 
-    /// Returns a reference to the [`Overseer`].
-    pub(super) fn overseer(&self) -> &'d Overseer {
-        self.transaction.database().overseer()
+    /// Returns a reference to the [`TaskProcessor`].
+    pub(super) fn task_processor(&self) -> &'d TaskProcessor {
+        self.transaction.database().task_processor()
     }
 
     /// Returns a reference to its [`Anchor`].
@@ -234,7 +234,8 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
     #[inline]
     fn drop(&mut self) {
         if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
-            self.anchor.rollback(self.transaction.database().overseer());
+            self.anchor
+                .rollback(self.transaction.database().task_processor());
         }
     }
 }
@@ -322,7 +323,7 @@ impl<S: Sequencer> Anchor<S> {
             }
 
             if let Some(deadline) = deadline {
-                return Err(self.await_eot(snapshot.overseer(), deadline));
+                return Err(self.await_eot(snapshot.task_processor(), deadline));
             }
         }
 
@@ -377,12 +378,12 @@ impl<S: Sequencer> Anchor<S> {
     /// Returns an [`AwaitEOT`] for the caller to await the end of transaction.
     pub(super) fn await_eot<'d>(
         &self,
-        overseer: &'d Overseer,
+        task_processor: &'d TaskProcessor,
         deadline: Instant,
     ) -> AwaitEOT<'d, S> {
         AwaitEOT {
             transaction_anchor: self.transaction_anchor.clone(),
-            overseer,
+            task_processor,
             deadline,
         }
     }
@@ -403,14 +404,14 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Wakes up any waiting transactions.
-    pub(super) fn commit(&self, overseer: &Overseer) {
-        self.wake_up_others(overseer);
+    pub(super) fn commit(&self, task_processor: &TaskProcessor) {
+        self.wake_up_others(task_processor);
     }
 
     /// Rolls back the changes contained in the associated [`Journal`].
-    pub(super) fn rollback(&self, overseer: &Overseer) {
+    pub(super) fn rollback(&self, task_processor: &TaskProcessor) {
         self.rolled_back.store(true, Release);
-        self.wake_up_others(overseer);
+        self.wake_up_others(task_processor);
     }
 
     /// Reads its submit instant.
@@ -433,11 +434,11 @@ impl<S: Sequencer> Anchor<S> {
         }
     }
 
-    fn wake_up_others(&self, overseer: &Overseer) {
+    fn wake_up_others(&self, task_processor: &TaskProcessor) {
         if self.wake_up_others.load(Acquire) {
             // The result can be ignored since messages pending in the queue mean that the access
             // controller will be scanned in the future.
-            overseer.send_task(Task::ScanAccessController);
+            task_processor.send_task(Task::ScanAccessController);
         }
     }
 }
@@ -445,8 +446,8 @@ impl<S: Sequencer> Anchor<S> {
 impl AccessRequestResult {
     /// Gives full access to the inner data with the mutex acquired.
     ///
-    /// It may block the thread; the only component that can be blocked is
-    /// [`Overseer`], therefore this must be called by [`Overseer`].
+    /// It may block the thread; the only component that can be blocked is [`TaskProcessor`],
+    /// therefore this must be called by [`TaskProcessor`].
     ///
     /// `None` is returned if the [`Mutex`] is poisoned.
     pub(super) fn lock_sync(&self) -> Option<MutexGuard<ResultWakerPair>> {
@@ -458,7 +459,7 @@ impl<'d> AwaitResponse<'d> {
     /// Creates a new [`AwaitResponse`].
     pub(super) fn new<S: Sequencer>(
         entry: OccupiedEntry<usize, ObjectState<S>>,
-        overseer: &'d Overseer,
+        task_processor: &'d TaskProcessor,
         deadline: Instant,
         result_placeholder: Arc<AccessRequestResult>,
     ) -> AwaitResponse<'d> {
@@ -467,7 +468,7 @@ impl<'d> AwaitResponse<'d> {
         AwaitResponse {
             object_id,
             object_id_registered: false,
-            overseer,
+            task_processor,
             deadline,
             result_placeholder,
         }
@@ -495,12 +496,12 @@ impl<'d> Future for AwaitResponse<'d> {
         }
 
         if !self.object_id_registered {
-            if self.overseer.send_task(Task::Monitor(self.object_id)) {
+            if self.task_processor.send_task(Task::Monitor(self.object_id)) {
                 self.get_mut().object_id_registered = true;
             }
             cx.waker().wake_by_ref();
         } else if !self
-            .overseer
+            .task_processor
             .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {
             cx.waker().wake_by_ref();
@@ -529,7 +530,7 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
             // pushed into the transaction.
             return Poll::Ready(Ok(()));
         } else if !self
-            .overseer
+            .task_processor
             .send_task(Task::WakeUp(self.deadline, cx.waker().clone()))
         {
             // The message channel is congested.
