@@ -788,32 +788,44 @@ impl<S: Sequencer> AccessController<S> {
 
     /// Tries to remove the access control data corresponding to the database object.
     ///
-    /// It is a blocking and synchronous method, therefore this must be invoked in the background.
+    /// Returns `true` if no longer access control data exists for the database object. It is a
+    /// blocking and synchronous method, therefore this must be invoked in the background.
     pub(super) fn try_remove_access_data_sync<C: Fn(&S::Instant) -> bool, D: FnMut(&S::Instant)>(
         &self,
         object_id: usize,
         condition: &C,
         deletion_notifier: &mut D,
     ) -> bool {
-        self.table
-            .remove_if(&object_id, |o| {
-                o.prepare_ownership_transfer();
-                match o {
-                    ObjectState::Owned(_) => false,
-                    ObjectState::Created(instant) => condition(instant),
-                    ObjectState::Deleted(instant) => {
-                        if condition(instant) {
-                            // Deletion of the access control data must happen after the deletion
-                            // is known to the database object.
-                            deletion_notifier(instant);
-                            true
-                        } else {
-                            false
-                        }
+        let mut retained = false;
+        self.table.remove_if(&object_id, |o| {
+            o.prepare_ownership_transfer();
+            match o {
+                ObjectState::Owned(_) => {
+                    retained = true;
+                    false
+                }
+                ObjectState::Created(instant) => {
+                    if condition(instant) {
+                        true
+                    } else {
+                        retained = true;
+                        false
                     }
                 }
-            })
-            .is_some()
+                ObjectState::Deleted(instant) => {
+                    if condition(instant) {
+                        // Deletion of the access control data must happen after the deletion
+                        // is known to the database object.
+                        deletion_notifier(instant);
+                        true
+                    } else {
+                        retained = true;
+                        false
+                    }
+                }
+            }
+        });
+        !retained
     }
 
     /// Processes the supplied wait queue.

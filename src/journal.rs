@@ -496,7 +496,10 @@ impl<'d> Future for AwaitResponse<'d> {
         }
 
         if !self.object_id_registered {
-            if self.task_processor.send_task(Task::Monitor(self.object_id)) {
+            if self
+                .task_processor
+                .send_task(Task::MonitorObject(self.object_id))
+            {
                 self.get_mut().object_id_registered = true;
             }
             cx.waker().wake_by_ref();
