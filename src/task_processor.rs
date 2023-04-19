@@ -12,69 +12,81 @@ use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// [`Overseer`] wakes up timed out tasks and deletes unreachable database objects.
+/// [`TaskProcessor`] receives tasks from database system workers, and processes them in the
+/// background.
 ///
-/// [`Overseer`] is the only one that is allowed to execute blocking code as the code is run in a
-/// separate background thread.
+/// [`TaskProcessor`] is the only one that is allowed to execute blocking code as the code is run
+/// in a separate background thread.
 #[derive(Debug)]
-pub struct Overseer {
-    /// The worker thread.
-    worker: Option<JoinHandle<()>>,
+pub struct TaskProcessor {
+    /// The task processor thread.
+    processor: Option<JoinHandle<()>>,
 
     /// The task sender.
     sender: SyncSender<Task>,
 }
 
-/// [`Task`] is a means of communication between an [`Overseer`] and [`Database`](super::Database).
+/// [`Task`] is sent to a [`TaskProcessor`] by database workers, and the [`TaskProcessor`] makes
+/// sure that all the received tasks are correctly processed eventually.
 #[derive(Debug)]
 pub enum Task {
     /// The [`Database`](super::Database) is shutting down.
     Shutdown,
 
-    /// The [`Waker`] should be called at around the specified deadline.
+    /// The [`Waker`] should be invoked at around the specified instant.
     ///
-    /// The [`Waker`] may be called before the deadline is reached if memory allocation failed in
-    /// the [`Overseer`].
+    /// [`TaskProcessor`] makes its best to invoke the [`Waker`] at the specified instant, however
+    /// there are cases where [`TaskProcessor`] fails to fulfill the requirement.
+    /// * The [`Waker`] may be called before the instant if memory allocation failed in the
+    /// [`TaskProcessor`].
+    /// * The [`Waker`] may be called after the instant if the [`TaskProcessor`] is overloaded.
     WakeUp(Instant, Waker),
 
-    /// The [`Overseer`] should monitor the database object.
+    /// The [`TaskProcessor`] should monitor the database object.
+    ///
+    /// [`TaskProcessor`] periodically checks the associated [`AccessController`] if the
+    /// corresponding access data can be cleaned up, or ownership of it can be transferred.
     Monitor(usize),
 
-    /// The [`Overseer`] should scan the access controller entries corresponding to monitored
-    /// database objects.
+    /// The [`TaskProcessor`] should check the [`AccessController`] entries corresponding to
+    /// monitored database objects.
+    ///
+    /// This task is sent to the [`TaskProcessor`] when a transaction is releasing some database
+    /// resources.
     ScanAccessController,
 }
 
-/// The default interval that an [`Overseer`] wakes up and checks the status of the database.
+/// The default interval that a [`TaskProcessor`] wakes up and checks the status of the database.
 const DEFAULT_CHECK_INTERAL: Duration = Duration::from_secs(60);
 
-impl Overseer {
-    /// Spawns an [`Overseer`].
+impl TaskProcessor {
+    /// Spawns an [`TaskProcessor`].
     #[inline]
     pub(super) fn spawn<S: Sequencer, P: PersistenceLayer<S>>(
         kernel: Arc<Kernel<S, P>>,
-    ) -> Overseer {
+    ) -> TaskProcessor {
         let (sender, receiver) = mpsc::sync_channel::<Task>(utils::advise_num_shards() * 4);
-        Overseer {
-            worker: Some(thread::spawn(move || {
-                Self::oversee(&receiver, &kernel);
+        TaskProcessor {
+            processor: Some(thread::spawn(move || {
+                Self::process(&receiver, &kernel);
             })),
             sender,
         }
     }
 
-    /// Sends a [`Task`] to the [`Overseer`].
+    /// Tries to send a [`Task`] to the [`TaskProcessor`].
     ///
     /// Returns `false` if the [`Task`] could not be sent. It is usually not a problem since it
     /// means that the send buffer is full, and therefore the worker thread is guaranteed to run
-    /// afterwards., However certain types of tasks that need very specific information, e.g.,
-    /// [`Task::Monitor`] will need to be sent to the [`Overseer`] eventually.
+    /// afterwards., However certain types of tasks that requires the [`TaskProcessor`] to take a
+    /// very specific action, e.g., [`Task::Monitor`], will need to be sent to the
+    /// [`TaskProcessor`] eventually by the caller.
     pub(super) fn send_task(&self, task: Task) -> bool {
         self.sender.try_send(task).is_ok()
     }
 
-    /// Oversees the specified database kernel.
-    fn oversee<S: Sequencer, P: PersistenceLayer<S>>(
+    /// Processes tasks.
+    fn process<S: Sequencer, P: PersistenceLayer<S>>(
         receiver: &Receiver<Task>,
         kernel: &Kernel<S, P>,
     ) {
@@ -90,8 +102,8 @@ impl Overseer {
                         if deadline < now {
                             waker.wake();
                         } else {
-                            // Try `16` times, and give up inserting the `Waker`.
-                            for offset in 0..16 {
+                            // Try `4` times, and give up inserting the `Waker`.
+                            for offset in 0..4 {
                                 match waker_queue
                                     .insert(deadline + Duration::from_nanos(offset), waker)
                                 {
@@ -127,7 +139,8 @@ impl Overseer {
         access_controller: &AccessController<S>,
         monitored_object_ids: &mut BTreeSet<usize>,
     ) {
-        monitored_object_ids.retain(|object_id| access_controller.transfer_ownership(*object_id));
+        monitored_object_ids
+            .retain(|object_id| access_controller.transfer_ownership_sync(*object_id));
     }
 
     /// Wakes up every expired [`Waker`], and returns the time remaining until the first [`Waker`]
@@ -144,10 +157,10 @@ impl Overseer {
     }
 }
 
-impl Drop for Overseer {
+impl Drop for TaskProcessor {
     #[inline]
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.processor.take() {
             drop(worker.join());
         }
     }
@@ -162,7 +175,7 @@ mod test {
     use std::task::{Context, Poll};
     use std::time::Instant;
 
-    struct AfterNSecs<'d>(Instant, u64, &'d Overseer);
+    struct AfterNSecs<'d>(Instant, u64, &'d TaskProcessor);
 
     impl<'d> Future for AfterNSecs<'d> {
         type Output = ();
@@ -182,11 +195,11 @@ mod test {
     }
 
     #[tokio::test]
-    async fn overseer() {
+    async fn wake_up() {
         let database = Database::default();
         let now = Instant::now();
-        let after1sec = AfterNSecs(now, 1, database.overseer());
-        let after2secs = AfterNSecs(now, 2, database.overseer());
+        let after1sec = AfterNSecs(now, 1, database.task_processor());
+        let after2secs = AfterNSecs(now, 2, database.task_processor());
         after1sec.await;
         assert!(now.elapsed() > Duration::from_millis(128));
         after2secs.await;

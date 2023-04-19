@@ -270,7 +270,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 current = Some(record);
                 break;
             }
-            record.rollback(self.database.overseer());
+            record.rollback(self.database.task_processor());
             current = record.set_next(None, Relaxed);
         }
         let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
@@ -455,7 +455,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
-            record.commit(self.database.overseer());
+            record.commit(self.database.task_processor());
             current = record.set_next(None, Relaxed);
         }
     }
