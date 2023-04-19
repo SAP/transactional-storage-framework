@@ -85,20 +85,6 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
-    /// The database is being modified by the [`Journal`](super::Journal).
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
-    fn record<W: FnOnce(&mut [u8])>(
-        &self,
-        id: TransactionID,
-        journal_id: JournalID,
-        len: usize,
-        writer: W,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
-
     /// A [`Journal`](super::Journal) was submitted.
     ///
     /// # Errors
@@ -168,8 +154,28 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
 /// made.
 pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + Sized {
+    /// Records database changes to the buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the content of the log record could not be passed to the buffer.
+    fn record<W: FnOnce(&mut [u8])>(
+        &self,
+        id: TransactionID,
+        journal_id: JournalID,
+        len: usize,
+        writer: W,
+    ) -> Result<(), Error>;
+
     /// Flushes the content.
-    fn flush(&mut self) -> Result<AwaitIO<S, P>, Error>;
+    ///
+    /// This method is invoked when the associated journal is submitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the content of the log record could not be passed to the
+    /// persistence layer.
+    fn flush(&mut self, persistence_layer: &P) -> Result<(), Error>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -214,7 +220,7 @@ pub struct FileIO<S: Sequencer> {
 
 /// [`FileLogBuffer`] implements [`BufferredLogger`].
 #[derive(Debug, Default)]
-pub struct FileLogBuffer<S: Sequencer>(PhantomData<S>);
+pub struct FileLogBuffer<S: Sequencer, P: PersistenceLayer<S>>(PhantomData<(S, P)>);
 
 #[derive(Debug)]
 pub enum IOTask {
@@ -318,7 +324,7 @@ impl<S: Sequencer> Drop for FileIO<S> {
 }
 
 impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
-    type LogBuffer = FileLogBuffer<S>;
+    type LogBuffer = FileLogBuffer<S, FileIO<S>>;
 
     #[inline]
     fn recover(
@@ -370,23 +376,6 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         &self,
         _id: TransactionID,
         _xid: &[u8],
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
-    }
-
-    #[inline]
-    fn record<W: FnOnce(&mut [u8])>(
-        &self,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _len: usize,
-        _writer: W,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO {
@@ -464,9 +453,20 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 }
 
-impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S> {
+impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>> {
     #[inline]
-    fn flush(&mut self) -> Result<AwaitIO<S, FileIO<S>>, Error> {
-        Err(Error::NotFound)
+    fn record<W: FnOnce(&mut [u8])>(
+        &self,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        _len: usize,
+        _writer: W,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self, _persistence_layer: &FileIO<S>) -> Result<(), Error> {
+        Ok(())
     }
 }
