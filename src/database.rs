@@ -345,7 +345,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
 
     /// Returns a reference to its [`Sequencer`].
     pub(super) fn sequencer(&self) -> &S {
-        &self.kernel.sequencer()
+        self.kernel.sequencer()
     }
 
     /// Returns a reference to the [`PersistenceLayer`].

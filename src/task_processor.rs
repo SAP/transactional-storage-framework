@@ -53,12 +53,13 @@ pub enum Task {
 
     /// The [`TaskProcessor`] should monitor the database object.
     ///
-    /// [`TaskProcessor`] periodically checks the associated [`AccessController`] if the
-    /// corresponding access data can be cleaned up, or ownership of it can be transferred.
+    /// [`TaskProcessor`] periodically checks the associated
+    /// [`AccessController`](super::AccessController) if the corresponding access data can be
+    /// removed, or ownership of it can be transferred.
     MonitorObject(usize),
 
-    /// The [`TaskProcessor`] should check the [`AccessController`] entries corresponding to
-    /// monitored database objects.
+    /// The [`TaskProcessor`] should check the [`AccessController`](super::AccessController)
+    /// entries corresponding to monitored database objects.
     ///
     /// This task is sent to the [`TaskProcessor`] when a transaction is releasing some database
     /// resources.
@@ -118,7 +119,7 @@ impl TaskProcessor {
     /// Returns `false` if the [`Task`] could not be sent. It is usually not a problem since it
     /// means that the send buffer is full, and therefore the worker thread is guaranteed to run
     /// afterwards., However certain types of tasks that requires the [`TaskProcessor`] to take a
-    /// very specific action, e.g., [`Task::Monitor`], will need to be sent to the
+    /// very specific action, e.g., [`Task::MonitorObject`], will need to be sent to the
     /// [`TaskProcessor`] eventually by the caller.
     pub(super) fn send_task(&self, task: Task) -> bool {
         self.sender.try_send(task).is_ok()
