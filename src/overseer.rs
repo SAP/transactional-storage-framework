@@ -127,7 +127,8 @@ impl Overseer {
         access_controller: &AccessController<S>,
         monitored_object_ids: &mut BTreeSet<usize>,
     ) {
-        monitored_object_ids.retain(|object_id| access_controller.transfer_ownership(*object_id));
+        monitored_object_ids
+            .retain(|object_id| access_controller.transfer_ownership_sync(*object_id));
     }
 
     /// Wakes up every expired [`Waker`], and returns the time remaining until the first [`Waker`]

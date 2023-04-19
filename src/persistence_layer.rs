@@ -115,7 +115,8 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// A transaction is being rewound.
     ///
     /// Rewinding the transaction to `transaction_instant == 0` amounts to rolling back the entire
-    /// transaction.
+    /// transaction. This only generates a log record indicating that the transaction was rolled
+    /// back, and the corresponding unreachable database objects are cleaned up in the background.
     ///
     /// # Errors
     ///

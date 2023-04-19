@@ -727,10 +727,10 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// If the database object still need to be monitored, it returns `true`. It is a blocking and
     /// synchronous method invoked by [`Overseer`](super::overseer::Overseer).
-    pub(super) fn transfer_ownership(&self, object_id: usize) -> bool {
+    pub(super) fn transfer_ownership_sync(&self, object_id: usize) -> bool {
         self.table
             .update(&object_id, |_, object_state| {
-                object_state.cleanup_state();
+                object_state.prepare_ownership_transfer();
                 let wait_queue = if let ObjectState::Owned(ownership) = object_state {
                     match ownership {
                         Ownership::Created(_)
@@ -754,6 +754,38 @@ impl<S: Sequencer> AccessController<S> {
                 Self::post_process_object_state(object_state, wait_queue)
             })
             .map_or(false, |r| r)
+    }
+
+    /// Tries to remove the access control data corresponding to the database object.
+    #[allow(dead_code)]
+    pub(super) fn try_remove_access_data_sync<
+        C: FnOnce(&S::Instant) -> bool,
+        D: FnOnce(&S::Instant),
+    >(
+        &self,
+        object_id: usize,
+        condition: C,
+        deletion_notifier: D,
+    ) -> bool {
+        self.table.remove_if(&object_id, |o| {
+           o.prepare_ownership_transfer();
+           match o {
+            ObjectState::Owned(_) => false,
+            ObjectState::Created(instant) => {
+                condition(instant)
+            },
+            ObjectState::Deleted(instant) => {
+                if condition(instant) {
+                    // Deletion of the entry must happen after the deletion is known to the
+                    // database object.
+                    deletion_notifier(instant);
+                    true
+                } else {
+                    false
+                }
+            },
+        }
+        }).is_some()
     }
 
     /// Processes the supplied wait queue.
@@ -940,7 +972,7 @@ impl<S: Sequencer> AccessController<S> {
         new_owner: &ebr::Arc<JournalAnchor<S>>,
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
-        object_state.cleanup_state();
+        object_state.prepare_ownership_transfer();
         if let ObjectState::Owned(ownership) = object_state {
             let (owner, awaitable) = match ownership {
                 Ownership::Created(owner) => (owner, false),
@@ -997,7 +1029,7 @@ impl<S: Sequencer> AccessController<S> {
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
         loop {
-            object_state.cleanup_state();
+            object_state.prepare_ownership_transfer();
             match object_state {
                 ObjectState::Owned(ownership) => {
                     match ownership {
@@ -1074,7 +1106,7 @@ impl<S: Sequencer> AccessController<S> {
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
         loop {
-            object_state.cleanup_state();
+            object_state.prepare_ownership_transfer();
             match object_state {
                 ObjectState::Owned(ownership) => match ownership {
                     Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
@@ -1159,7 +1191,7 @@ impl<S: Sequencer> AccessController<S> {
         deadline: Option<Instant>,
     ) -> Result<Option<bool>, Error> {
         loop {
-            object_state.cleanup_state();
+            object_state.prepare_ownership_transfer();
             match object_state {
                 ObjectState::Owned(ownership) => match ownership {
                     Ownership::Created(_) | Ownership::Locked(_) | Ownership::Deleted(_) => {
@@ -1718,8 +1750,12 @@ impl<S: Sequencer> PartialOrd for Owner<S> {
 }
 
 impl<S: Sequencer> ObjectState<S> {
-    /// Cleans up the [`ObjectState`].
-    fn cleanup_state(&mut self) {
+    /// Prepares the [`ObjectState`] for ownership transfer.
+    ///
+    /// This rolls any promoted ownership back to the previous state if the owner was rolled back,
+    /// or replaces [`ObjectState::Owned`] with [`ObjectState::Created`] or
+    /// [`ObjectState::Deleted`] if the owner was committed.
+    fn prepare_ownership_transfer(&mut self) {
         if let ObjectState::Owned(ownership) = self {
             // Try to revoke previously promoted access privileges if the owner was rolled back.
             while let Ownership::LockedAwaitable(exclusive_awaitable)
@@ -1766,8 +1802,6 @@ impl<S: Sequencer> ObjectState<S> {
             }
 
             // Try to convert `Locked` into `Created` or `Deleted` if the owner was committed.
-            //
-            // TODO: return `false` if the whole entry can be removed.
             match ownership {
                 Ownership::Created(owner) => {
                     if let Some(commit_instant) = owner.eot_instant() {
