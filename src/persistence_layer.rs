@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -180,7 +180,11 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
-    fn flush(self: Box<Self>, persistence_layer: &P) -> Result<AwaitIO<S, P>, Error>;
+    fn flush(
+        self: Box<Self>,
+        persistence_layer: &P,
+        deadline: Option<Instant>,
+    ) -> Result<AwaitIO<S, P>, Error>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -216,10 +220,8 @@ pub struct FileIO<S: Sequencer> {
     /// The IO worker thread.
     worker: Option<JoinHandle<()>>,
 
-    /// [`FileLogBuffer`] link.
-    ///
-    /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
-    log_buffer_link: Arc<AtomicUsize>,
+    /// Shared data among the worker and database threads.
+    shared_data: Arc<FileIOSharedData>,
 
     /// The IO task sender.
     sender: SyncSender<IOTask>,
@@ -248,6 +250,18 @@ pub enum IOTask {
 
     /// The [`FileIO`] is shutting down.
     Shutdown,
+}
+
+/// [`FileIOSharedData`] is shared among the worker and database threads.
+#[derive(Debug, Default)]
+struct FileIOSharedData {
+    /// [`FileLogBuffer`] link.
+    ///
+    /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
+    log_buffer_link: AtomicUsize,
+
+    /// The log sequence number of the last flushed log buffer.
+    last_flushed_lsn: AtomicU64,
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
@@ -361,14 +375,14 @@ impl<S: Sequencer> FileIO<S> {
             .open(checkpoint_path) else {
             return Err("failed to open c.dat");
         };
-        let log_buffer_link = Arc::new(AtomicUsize::default());
-        let log_buffer_link_clone = log_buffer_link.clone();
+        let shared_data = Arc::new(FileIOSharedData::default());
+        let shared_data_clone = shared_data.clone();
         let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             worker: Some(thread::spawn(move || {
-                Self::process(log0, log1, checkpoint, receiver, &log_buffer_link_clone);
+                Self::process(log0, log1, checkpoint, receiver, &shared_data_clone);
             })),
-            log_buffer_link,
+            shared_data,
             sender,
             _phantom: PhantomData,
         })
@@ -381,22 +395,29 @@ impl<S: Sequencer> FileIO<S> {
         _log1: File,
         _checkpoint: File,
         receiver: Receiver<IOTask>,
-        log_buffer_link: &AtomicUsize,
+        shared_data: &FileIOSharedData,
     ) {
         // Insert the log buffer head to force the log sequence number ever increasing.
         let mut log_buffer_head = FileLogBuffer::default();
         let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
         let _: Result<usize, usize> =
-            log_buffer_link.compare_exchange(0, log_buffer_head_addr, Release, Relaxed);
+            shared_data
+                .log_buffer_link
+                .compare_exchange(0, log_buffer_head_addr, Release, Relaxed);
 
         while let Ok(task) = receiver.recv() {
             match task {
                 IOTask::Flush => {
-                    if let Some(mut log_buffer) =
-                        Self::take_log_buffer_link(log_buffer_link, &mut log_buffer_head)
-                    {
+                    if let Some(mut log_buffer) = Self::take_log_buffer_link(
+                        &shared_data.log_buffer_link,
+                        &mut log_buffer_head,
+                    ) {
                         loop {
                             // TODO: implement it.
+                            debug_assert!(
+                                shared_data.last_flushed_lsn.load(Relaxed) < log_buffer.lsn
+                            );
+                            shared_data.last_flushed_lsn.store(log_buffer.lsn, Release);
                             if let Some(next_log_buffer) =
                                 log_buffer.take_next_if_not(log_buffer_head_addr)
                             {
@@ -466,16 +487,23 @@ impl<S: Sequencer> FileIO<S> {
                 current_head = actual;
             } else {
                 // Safety: the pointer was provided by `Box::into_raw`.
-                let mut current_head = unsafe { Box::from_raw(current_head_ptr) };
-                while let Some(mut next_log_buffer) =
-                    current_head.take_next_if_not(log_buffer_head_addr)
-                {
+                let mut current_log_buffer = unsafe { Box::from_raw(current_head_ptr) };
+                let mut next_log_buffer_opt =
+                    current_log_buffer.take_next_if_not(log_buffer_head_addr);
+                while let Some(mut next_log_buffer) = next_log_buffer_opt.take() {
                     // Invert the direction of links to make it a FIFO queue.
-                    debug_assert_eq!(current_head.lsn, next_log_buffer.lsn + 1);
-                    next_log_buffer.next = Box::into_raw(current_head) as usize;
-                    current_head = next_log_buffer;
+                    debug_assert_eq!(current_log_buffer.lsn, next_log_buffer.lsn + 1);
+                    let next_after_next_log_buffer =
+                        next_log_buffer.take_next_if_not(log_buffer_head_addr);
+                    next_log_buffer.next = Box::into_raw(current_log_buffer) as usize;
+                    if let Some(next_after_next_log_buffer) = next_after_next_log_buffer {
+                        current_log_buffer = next_log_buffer;
+                        next_log_buffer_opt.replace(next_after_next_log_buffer);
+                    } else {
+                        return Some(next_log_buffer);
+                    }
                 }
-                return Some(current_head);
+                return Some(current_log_buffer);
             }
         }
         None
@@ -598,8 +626,14 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn check(&self, _lsn: u64, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
-        Some(Ok(S::Instant::default()))
+    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
+        // TODO: implement it.
+        if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
+            Some(Ok(S::Instant::default()))
+        } else {
+            waker.wake_by_ref();
+            None
+        }
     }
 }
 
@@ -636,12 +670,14 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     fn flush(
         self: Box<Self>,
         persistence_layer: &FileIO<S>,
+        deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
         let self_ptr = Box::into_raw(self);
-        let lsn = FileIO::<S>::push_log_buffer(&persistence_layer.log_buffer_link, self_ptr);
+        let lsn =
+            FileIO::<S>::push_log_buffer(&persistence_layer.shared_data.log_buffer_link, self_ptr);
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
-        Ok(AwaitIO::with_lsn(persistence_layer, lsn))
+        Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
     }
 }
 
@@ -650,6 +686,9 @@ mod test {
     use super::*;
     use crate::AtomicCounter;
     use std::fs::remove_dir_all;
+    use std::time::Duration;
+
+    const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
 
     #[test]
     fn open_close() {
@@ -660,16 +699,32 @@ mod test {
         assert!(remove_dir_all(path).is_ok());
     }
 
-    #[test]
-    fn log_buffer() {
+    #[tokio::test]
+    async fn log_buffer() {
         const DIR: &str = "file_io_log_buffer_test";
         let path = Path::new(DIR);
         let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
 
         let log_buffer_1 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
         let log_buffer_2 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
-        assert!(log_buffer_2.flush(&file_io).is_ok());
-        assert!(log_buffer_1.flush(&file_io).is_ok());
+        let log_buffer_3 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_4 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let (result_3, result_1, result_4, result_2) = match (
+            log_buffer_3.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_1.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_4.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_2.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+        ) {
+            (Ok(await_io_3), Ok(await_io_1), Ok(await_io_4), Ok(await_io_2)) => {
+                futures::join!(await_io_3, await_io_1, await_io_4, await_io_2)
+            }
+            _ => unreachable!(),
+        };
+
+        assert!(result_1.is_ok());
+        assert!(result_2.is_ok());
+        assert!(result_3.is_ok());
+        assert!(result_4.is_ok());
 
         drop(file_io);
         assert!(remove_dir_all(path).is_ok());
