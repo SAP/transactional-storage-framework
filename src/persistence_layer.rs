@@ -147,13 +147,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
-    /// Checks if the IO operation was completed.
+    /// Checks if the IO operation associated with the log sequence number was completed.
     ///
     /// If the IO operation is still in progress, the supplied [`Waker`] is kept in the
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check(&self, io_id: usize, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 }
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
@@ -180,7 +180,7 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
-    fn flush(self: Box<Self>, persistence_layer: &P) -> Result<(), Error>;
+    fn flush(self: Box<Self>, persistence_layer: &P) -> Result<AwaitIO<S, P>, Error>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -194,8 +194,8 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer by which the IO operation is performed.
     persistence_layer: &'p P,
 
-    /// The IO operation identifier.
-    io_id: usize,
+    /// The log sequence number to await.
+    lsn: u64,
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
@@ -251,6 +251,29 @@ pub enum IOTask {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
+    /// Creates an [`AwaitIO`] from a log sequence number.
+    #[inline]
+    pub fn with_lsn(persistence_layer: &'p P, lsn: u64) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer,
+            lsn,
+            deadline: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the deadline.
+    #[inline]
+    #[must_use]
+    pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer: self.persistence_layer,
+            lsn: self.lsn,
+            deadline,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Forgets the IO operation.
     #[inline]
     pub fn forget(self) {
@@ -263,7 +286,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(result) = self.persistence_layer.check(self.io_id, cx.waker()) {
+        if let Some(result) = self.persistence_layer.check(self.lsn, cx.waker()) {
             Poll::Ready(result)
         } else if self
             .deadline
@@ -500,12 +523,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _until: Option<<S as Sequencer>::Instant>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -516,12 +534,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -530,12 +543,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -545,12 +553,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _xid: &[u8],
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -561,12 +564,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: usize,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -576,12 +574,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: u32,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -591,12 +584,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _prepare_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -606,16 +594,11 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _commit_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
-    fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
+    fn check(&self, _lsn: u64, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
         Some(Ok(S::Instant::default()))
     }
 }
@@ -650,12 +633,15 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     }
 
     #[inline]
-    fn flush(self: Box<Self>, persistence_layer: &FileIO<S>) -> Result<(), Error> {
+    fn flush(
+        self: Box<Self>,
+        persistence_layer: &FileIO<S>,
+    ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
         let self_ptr = Box::into_raw(self);
         let lsn = FileIO::<S>::push_log_buffer(&persistence_layer.log_buffer_link, self_ptr);
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
-        Ok(())
+        Ok(AwaitIO::with_lsn(persistence_layer, lsn))
     }
 }
 
@@ -680,8 +666,8 @@ mod test {
         let path = Path::new(DIR);
         let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
 
-        let log_buffer_1 = Box::<FileLogBuffer::<AtomicCounter, FileIO<AtomicCounter>>>::default();
-        let log_buffer_2 = Box::<FileLogBuffer::<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_1 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_2 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
         assert!(log_buffer_2.flush(&file_io).is_ok());
         assert!(log_buffer_1.flush(&file_io).is_ok());
 
