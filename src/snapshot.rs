@@ -54,7 +54,7 @@ pub(super) struct TransactionSnapshot<'t> {
     id: TransactionID,
 
     /// The logical instant of the transaction.
-    instant: usize,
+    instant: u32,
 
     /// Limits the lifetime to that of the transaction.
     _phantom: PhantomData<&'t ()>,
@@ -198,7 +198,7 @@ impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S
 
 impl<'t> TransactionSnapshot<'t> {
     /// Creates a new [`TransactionSnapshot`].
-    pub(super) fn new(id: TransactionID, instant: usize) -> TransactionSnapshot<'t> {
+    pub(super) fn new(id: TransactionID, instant: u32) -> TransactionSnapshot<'t> {
         TransactionSnapshot {
             id,
             instant,

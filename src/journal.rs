@@ -6,6 +6,7 @@ use super::access_controller::ObjectState;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::task_processor::{Task, TaskProcessor};
 use super::transaction::Anchor as TransactionAnchor;
+use super::transaction::ID as TransactionID;
 use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
 use scc::ebr;
@@ -14,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
@@ -36,7 +37,7 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
 ///
 /// The identifier of a journal is only within the transaction, and the same identifier can be used
 /// after the journal was rolled back.
-pub type ID = usize;
+pub type ID = u64;
 
 /// [`Anchor`] is a piece of data that outlives its associated [`Journal`] allowing asynchronous
 /// operations.
@@ -46,13 +47,13 @@ pub(super) struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
 
     /// The time point when the [`Journal`] was created.
-    creation_instant: usize,
+    creation_instant: u32,
 
     /// The transaction instant when the [`Journal`] was submitted.
     ///
     /// This being `zero` represents a state where the changes made by the [`Journal`] cannot be
     /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
-    submit_instant: AtomicUsize,
+    submit_instant: AtomicU32,
 
     /// A flag indicating that the changes in the [`Journal`] are is being rolled back.
     rolled_back: AtomicBool,
@@ -180,7 +181,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn submit(self) -> usize {
+    pub fn submit(self) -> u32 {
         self.transaction.record(&self.anchor)
     }
 
@@ -243,12 +244,12 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 impl<S: Sequencer> Anchor<S> {
     /// The identifier of the corresponding journal is returned.
     pub(super) fn id(&self) -> ID {
-        self as *const Anchor<S> as usize
+        self as *const Anchor<S> as ID
     }
 
     /// The transaction identifier is returned.
-    pub(super) fn transaction_id(&self) -> usize {
-        self.transaction_anchor.as_ptr() as usize
+    pub(super) fn transaction_id(&self) -> TransactionID {
+        self.transaction_anchor.as_ptr() as TransactionID
     }
 
     /// Gets the end-of-transaction time instant.
@@ -286,7 +287,7 @@ impl<S: Sequencer> Anchor<S> {
         deadline: Option<Instant>,
     ) -> Result<bool, AwaitEOT<'d, S>> {
         if let Some(journal_snapshot) = snapshot.journal_snapshot() {
-            if JournalSnapshot::new(self as *const _ as usize) == *journal_snapshot {
+            if JournalSnapshot::new(self as *const _ as u64) == *journal_snapshot {
                 // It comes from the same transaction and journal.
                 return Ok(true);
             }
@@ -415,19 +416,16 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Reads its submit instant.
-    pub(super) fn submit_instant(&self) -> usize {
+    pub(super) fn submit_instant(&self) -> u32 {
         self.submit_instant.load(Acquire)
     }
 
     /// Creates a new [`Anchor`].
-    fn new(
-        transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
-        creation_instant: usize,
-    ) -> Anchor<S> {
+    fn new(transaction_anchor: ebr::Arc<TransactionAnchor<S>>, creation_instant: u32) -> Anchor<S> {
         Anchor {
             transaction_anchor,
             creation_instant,
-            submit_instant: AtomicUsize::new(UNFINISHED_TRANSACTION_INSTANT),
+            submit_instant: AtomicU32::new(UNFINISHED_TRANSACTION_INSTANT),
             rolled_back: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),

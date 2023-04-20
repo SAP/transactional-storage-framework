@@ -2320,7 +2320,7 @@ mod test {
 
     #[tokio::test]
     async fn access_promote_rewind() {
-        for num_shared_locks in 0..4 {
+        for num_shared_locks in 0_u32..4_u32 {
             for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
                 let database = Database::default();
                 let access_controller = database.access_controller();
