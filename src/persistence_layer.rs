@@ -5,7 +5,7 @@
 use super::utils;
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -286,15 +286,20 @@ impl<S: Sequencer> FileIO<S> {
     ///
     /// # Errors
     ///
-    /// Returns an error if memory allocation or spawning a thread failed, or database files could
-    /// not be opened.
+    /// Returns an error if memory allocation failed, spawning a thread failed, the specified
+    /// directory could not be created, or database files could not be opened.
     #[inline]
     pub fn with_path(path: &Path) -> Result<Self, &str> {
         const LOG0: &str = "0.log";
         const LOG1: &str = "1.log";
         const CHECKPOINT: &str = "c.dat";
 
+        if create_dir_all(path).is_err() {
+            return Err("the path does not exist");
+        }
+
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
+        path_buffer.push(path);
 
         path_buffer.push(Path::new(LOG0));
         let Some(log0_path) = path_buffer.to_str() else {
@@ -651,5 +656,36 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::AtomicCounter;
+    use std::fs::remove_dir_all;
+
+    #[test]
+    fn open_close() {
+        const DIR: &str = "file_io_open_close_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        drop(file_io);
+        assert!(remove_dir_all(path).is_ok());
+    }
+
+    #[test]
+    fn log_buffer() {
+        const DIR: &str = "file_io_log_buffer_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+
+        let log_buffer_1 = Box::<FileLogBuffer::<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_2 = Box::<FileLogBuffer::<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        assert!(log_buffer_2.flush(&file_io).is_ok());
+        assert!(log_buffer_1.flush(&file_io).is_ok());
+
+        drop(file_io);
+        assert!(remove_dir_all(path).is_ok());
     }
 }
