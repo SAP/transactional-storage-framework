@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::AtomicUsize;
@@ -278,6 +279,74 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 }
 
 impl<S: Sequencer> FileIO<S> {
+    /// Creates a default [`FileIO`].
+    ///
+    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
+    /// specified [`Path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if memory allocation or spawning a thread failed, or database files could
+    /// not be opened.
+    #[inline]
+    pub fn with_path(path: &Path) -> Result<Self, &str> {
+        const LOG0: &str = "0.log";
+        const LOG1: &str = "1.log";
+        const CHECKPOINT: &str = "c.dat";
+
+        let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
+
+        path_buffer.push(Path::new(LOG0));
+        let Some(log0_path) = path_buffer.to_str() else {
+            return Err("failed to parse the path string");
+        };
+        let Ok(log0) = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(log0_path) else {
+            return Err("failed to open 0.log");
+        };
+        path_buffer.pop();
+
+        path_buffer.push(Path::new(LOG1));
+        let Some(log1_path) = path_buffer.to_str() else {
+            return Err("failed to parse the path string");
+        };
+        let Ok(log1) = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(log1_path) else {
+            return Err("failed to open 1.log");
+        };
+        path_buffer.pop();
+
+        path_buffer.push(Path::new(CHECKPOINT));
+        let Some(checkpoint_path) = path_buffer.to_str() else {
+            return Err("failed to parse the path string");
+        };
+        let Ok(checkpoint) = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(checkpoint_path) else {
+            return Err("failed to open c.dat");
+        };
+        let log_buffer_link = Arc::new(AtomicUsize::default());
+        let log_buffer_link_clone = log_buffer_link.clone();
+        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
+        Ok(FileIO {
+            worker: Some(thread::spawn(move || {
+                Self::process(log0, log1, checkpoint, receiver, &log_buffer_link_clone);
+            })),
+            log_buffer_link,
+            sender,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Processes IO tasks.
     #[allow(clippy::needless_pass_by_value)]
     fn process(
         _log0: File,
@@ -289,35 +358,44 @@ impl<S: Sequencer> FileIO<S> {
         // Insert the log buffer head to force the log sequence number ever increasing.
         let mut log_buffer_head = FileLogBuffer::default();
         let log_buffer_head_ptr: *mut FileLogBuffer<S, Self> = addr_of_mut!(log_buffer_head);
+        Self::push_log_buffer(log_buffer_link, log_buffer_head_ptr);
+
+        while let Ok(task) = receiver.recv() {
+            if matches!(task, IOTask::Shutdown) {
+                break;
+            }
+        }
+    }
+
+    /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence
+    /// number of it.
+    fn push_log_buffer(
+        log_buffer_link: &AtomicUsize,
+        log_buffer_ptr: *mut FileLogBuffer<S, Self>,
+    ) -> u64 {
         let mut current_head = log_buffer_link.load(Acquire);
         loop {
             let current_head_ptr = current_head as *const FileLogBuffer<S, Self>;
 
-            // SAFETY: `log_buffer_link` only stores valid `FileLogBuffer` addresses.
-            unsafe {
-                // The log sequence number is determined by the previously buffered log.
-                log_buffer_head.lsn = if current_head_ptr.is_null() {
-                    0
+            // SAFETY: it assumes that the caller provided a valid pointer.
+            let lsn = unsafe {
+                (*log_buffer_ptr).lsn = if current_head_ptr.is_null() {
+                    1
                 } else {
                     (*current_head_ptr).lsn + 1
                 };
-            }
-            log_buffer_head.next = current_head;
+                (*log_buffer_ptr).next = current_head;
+                (*log_buffer_ptr).lsn
+            };
             if let Err(actual) = log_buffer_link.compare_exchange(
                 current_head,
-                log_buffer_head_ptr as usize,
+                log_buffer_ptr as usize,
                 AcqRel,
                 Acquire,
             ) {
                 current_head = actual;
             } else {
-                break;
-            }
-        }
-
-        while let Ok(task) = receiver.recv() {
-            if matches!(task, IOTask::Shutdown) {
-                break;
+                return lsn;
             }
         }
     }
@@ -334,36 +412,8 @@ impl<S: Sequencer> Default for FileIO<S> {
     /// Panics if `0.log`, `1.log`, or `c.dat` could not be opened.
     #[inline]
     fn default() -> Self {
-        let log0 = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("0.log")
-            .expect("0.log could not be opened");
-
-        let log1 = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("1.log")
-            .expect("1.log could not be opened");
-        let checkpoint = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("c.dat")
-            .expect("c.dat could not be opened");
-        let log_buffer_link = Arc::new(AtomicUsize::default());
-        let log_buffer_link_clone = log_buffer_link.clone();
-        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
-        FileIO {
-            worker: Some(thread::spawn(move || {
-                Self::process(log0, log1, checkpoint, receiver, &log_buffer_link_clone);
-            })),
-            log_buffer_link,
-            sender,
-            _phantom: PhantomData,
-        }
+        let path = Path::new("");
+        Self::with_path(path).expect("failed")
     }
 }
 
@@ -527,31 +577,8 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     #[inline]
     fn flush(self: Box<Self>, persistence_layer: &FileIO<S>) -> Result<(), Error> {
         let self_ptr = Box::into_raw(self);
-        let mut current_head = persistence_layer.log_buffer_link.load(Acquire);
-        loop {
-            let current_head_ptr = current_head as *const Self;
-
-            // SAFETY: `self` was just unboxed.
-            unsafe {
-                // The log sequence number is determined by the previously buffered log.
-                (*self_ptr).lsn = if current_head_ptr.is_null() {
-                    0
-                } else {
-                    (*current_head_ptr).lsn + 1
-                };
-                (*self_ptr).next = current_head;
-            }
-            if let Err(actual) = persistence_layer.log_buffer_link.compare_exchange(
-                current_head,
-                self_ptr as usize,
-                AcqRel,
-                Acquire,
-            ) {
-                current_head = actual;
-            } else {
-                break;
-            }
-        }
+        let lsn = FileIO::<S>::push_log_buffer(&persistence_layer.log_buffer_link, self_ptr);
+        debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
         Ok(())
     }
