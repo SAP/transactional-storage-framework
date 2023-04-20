@@ -5,14 +5,14 @@
 use super::utils;
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -147,13 +147,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
-    /// Checks if the IO operation was completed.
+    /// Checks if the IO operation associated with the log sequence number was completed.
     ///
     /// If the IO operation is still in progress, the supplied [`Waker`] is kept in the
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check(&self, io_id: usize, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 }
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
@@ -180,7 +180,11 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
-    fn flush(self: Box<Self>, persistence_layer: &P) -> Result<(), Error>;
+    fn flush(
+        self: Box<Self>,
+        persistence_layer: &P,
+        deadline: Option<Instant>,
+    ) -> Result<AwaitIO<S, P>, Error>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -194,8 +198,8 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer by which the IO operation is performed.
     persistence_layer: &'p P,
 
-    /// The IO operation identifier.
-    io_id: usize,
+    /// The log sequence number to await.
+    lsn: u64,
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
@@ -216,10 +220,8 @@ pub struct FileIO<S: Sequencer> {
     /// The IO worker thread.
     worker: Option<JoinHandle<()>>,
 
-    /// [`FileLogBuffer`] link.
-    ///
-    /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
-    log_buffer_link: Arc<AtomicUsize>,
+    /// Shared data among the worker and database threads.
+    shared_data: Arc<FileIOSharedData>,
 
     /// The IO task sender.
     sender: SyncSender<IOTask>,
@@ -250,7 +252,42 @@ pub enum IOTask {
     Shutdown,
 }
 
+/// [`FileIOSharedData`] is shared among the worker and database threads.
+#[derive(Debug, Default)]
+struct FileIOSharedData {
+    /// [`FileLogBuffer`] link.
+    ///
+    /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
+    log_buffer_link: AtomicUsize,
+
+    /// The log sequence number of the last flushed log buffer.
+    last_flushed_lsn: AtomicU64,
+}
+
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
+    /// Creates an [`AwaitIO`] from a log sequence number.
+    #[inline]
+    pub fn with_lsn(persistence_layer: &'p P, lsn: u64) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer,
+            lsn,
+            deadline: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the deadline.
+    #[inline]
+    #[must_use]
+    pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer: self.persistence_layer,
+            lsn: self.lsn,
+            deadline,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Forgets the IO operation.
     #[inline]
     pub fn forget(self) {
@@ -263,7 +300,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(result) = self.persistence_layer.check(self.io_id, cx.waker()) {
+        if let Some(result) = self.persistence_layer.check(self.lsn, cx.waker()) {
             Poll::Ready(result)
         } else if self
             .deadline
@@ -286,15 +323,20 @@ impl<S: Sequencer> FileIO<S> {
     ///
     /// # Errors
     ///
-    /// Returns an error if memory allocation or spawning a thread failed, or database files could
-    /// not be opened.
+    /// Returns an error if memory allocation failed, spawning a thread failed, the specified
+    /// directory could not be created, or database files could not be opened.
     #[inline]
     pub fn with_path(path: &Path) -> Result<Self, &str> {
         const LOG0: &str = "0.log";
         const LOG1: &str = "1.log";
         const CHECKPOINT: &str = "c.dat";
 
+        if create_dir_all(path).is_err() {
+            return Err("the path does not exist");
+        }
+
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
+        path_buffer.push(path);
 
         path_buffer.push(Path::new(LOG0));
         let Some(log0_path) = path_buffer.to_str() else {
@@ -333,14 +375,14 @@ impl<S: Sequencer> FileIO<S> {
             .open(checkpoint_path) else {
             return Err("failed to open c.dat");
         };
-        let log_buffer_link = Arc::new(AtomicUsize::default());
-        let log_buffer_link_clone = log_buffer_link.clone();
+        let shared_data = Arc::new(FileIOSharedData::default());
+        let shared_data_clone = shared_data.clone();
         let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             worker: Some(thread::spawn(move || {
-                Self::process(log0, log1, checkpoint, receiver, &log_buffer_link_clone);
+                Self::process(log0, log1, checkpoint, receiver, &shared_data_clone);
             })),
-            log_buffer_link,
+            shared_data,
             sender,
             _phantom: PhantomData,
         })
@@ -353,22 +395,29 @@ impl<S: Sequencer> FileIO<S> {
         _log1: File,
         _checkpoint: File,
         receiver: Receiver<IOTask>,
-        log_buffer_link: &AtomicUsize,
+        shared_data: &FileIOSharedData,
     ) {
         // Insert the log buffer head to force the log sequence number ever increasing.
         let mut log_buffer_head = FileLogBuffer::default();
         let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
         let _: Result<usize, usize> =
-            log_buffer_link.compare_exchange(0, log_buffer_head_addr, Release, Relaxed);
+            shared_data
+                .log_buffer_link
+                .compare_exchange(0, log_buffer_head_addr, Release, Relaxed);
 
         while let Ok(task) = receiver.recv() {
             match task {
                 IOTask::Flush => {
-                    if let Some(mut log_buffer) =
-                        Self::take_log_buffer_link(log_buffer_link, &mut log_buffer_head)
-                    {
+                    if let Some(mut log_buffer) = Self::take_log_buffer_link(
+                        &shared_data.log_buffer_link,
+                        &mut log_buffer_head,
+                    ) {
                         loop {
                             // TODO: implement it.
+                            debug_assert!(
+                                shared_data.last_flushed_lsn.load(Relaxed) < log_buffer.lsn
+                            );
+                            shared_data.last_flushed_lsn.store(log_buffer.lsn, Release);
                             if let Some(next_log_buffer) =
                                 log_buffer.take_next_if_not(log_buffer_head_addr)
                             {
@@ -438,16 +487,23 @@ impl<S: Sequencer> FileIO<S> {
                 current_head = actual;
             } else {
                 // Safety: the pointer was provided by `Box::into_raw`.
-                let mut current_head = unsafe { Box::from_raw(current_head_ptr) };
-                while let Some(mut next_log_buffer) =
-                    current_head.take_next_if_not(log_buffer_head_addr)
-                {
+                let mut current_log_buffer = unsafe { Box::from_raw(current_head_ptr) };
+                let mut next_log_buffer_opt =
+                    current_log_buffer.take_next_if_not(log_buffer_head_addr);
+                while let Some(mut next_log_buffer) = next_log_buffer_opt.take() {
                     // Invert the direction of links to make it a FIFO queue.
-                    debug_assert_eq!(current_head.lsn, next_log_buffer.lsn + 1);
-                    next_log_buffer.next = Box::into_raw(current_head) as usize;
-                    current_head = next_log_buffer;
+                    debug_assert_eq!(current_log_buffer.lsn, next_log_buffer.lsn + 1);
+                    let next_after_next_log_buffer =
+                        next_log_buffer.take_next_if_not(log_buffer_head_addr);
+                    next_log_buffer.next = Box::into_raw(current_log_buffer) as usize;
+                    if let Some(next_after_next_log_buffer) = next_after_next_log_buffer {
+                        current_log_buffer = next_log_buffer;
+                        next_log_buffer_opt.replace(next_after_next_log_buffer);
+                    } else {
+                        return Some(next_log_buffer);
+                    }
                 }
-                return Some(current_head);
+                return Some(current_log_buffer);
             }
         }
         None
@@ -495,12 +551,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _until: Option<<S as Sequencer>::Instant>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -511,12 +562,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -525,12 +571,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -540,12 +581,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _xid: &[u8],
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -556,12 +592,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: usize,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -571,12 +602,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: u32,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -586,12 +612,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _prepare_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -601,17 +622,18 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _commit_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO {
-            persistence_layer: self,
-            io_id: 0,
-            deadline,
-            _phantom: PhantomData,
-        })
+        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
     #[inline]
-    fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
-        Some(Ok(S::Instant::default()))
+    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
+        // TODO: implement it.
+        if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
+            Some(Ok(S::Instant::default()))
+        } else {
+            waker.wake_by_ref();
+            None
+        }
     }
 }
 
@@ -645,11 +667,66 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     }
 
     #[inline]
-    fn flush(self: Box<Self>, persistence_layer: &FileIO<S>) -> Result<(), Error> {
+    fn flush(
+        self: Box<Self>,
+        persistence_layer: &FileIO<S>,
+        deadline: Option<Instant>,
+    ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
         let self_ptr = Box::into_raw(self);
-        let lsn = FileIO::<S>::push_log_buffer(&persistence_layer.log_buffer_link, self_ptr);
+        let lsn =
+            FileIO::<S>::push_log_buffer(&persistence_layer.shared_data.log_buffer_link, self_ptr);
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
-        Ok(())
+        Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::AtomicCounter;
+    use std::fs::remove_dir_all;
+    use std::time::Duration;
+
+    const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn open_close() {
+        const DIR: &str = "file_io_open_close_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        drop(file_io);
+        assert!(remove_dir_all(path).is_ok());
+    }
+
+    #[tokio::test]
+    async fn log_buffer() {
+        const DIR: &str = "file_io_log_buffer_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+
+        let log_buffer_1 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_2 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_3 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_4 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let (result_3, result_1, result_4, result_2) = match (
+            log_buffer_3.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_1.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_4.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_2.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+        ) {
+            (Ok(await_io_3), Ok(await_io_1), Ok(await_io_4), Ok(await_io_2)) => {
+                futures::join!(await_io_3, await_io_1, await_io_4, await_io_2)
+            }
+            _ => unreachable!(),
+        };
+
+        assert!(result_1.is_ok());
+        assert!(result_2.is_ok());
+        assert!(result_3.is_ok());
+        assert!(result_4.is_ok());
+
+        drop(file_io);
+        assert!(remove_dir_all(path).is_ok());
     }
 }
