@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{AcqRel, Acquire};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -357,12 +357,30 @@ impl<S: Sequencer> FileIO<S> {
     ) {
         // Insert the log buffer head to force the log sequence number ever increasing.
         let mut log_buffer_head = FileLogBuffer::default();
-        let log_buffer_head_ptr: *mut FileLogBuffer<S, Self> = addr_of_mut!(log_buffer_head);
-        Self::push_log_buffer(log_buffer_link, log_buffer_head_ptr);
+        let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
+        let _: Result<usize, usize> =
+            log_buffer_link.compare_exchange(0, log_buffer_head_addr, Release, Relaxed);
 
         while let Ok(task) = receiver.recv() {
-            if matches!(task, IOTask::Shutdown) {
-                break;
+            match task {
+                IOTask::Flush => {
+                    if let Some(mut log_buffer) =
+                        Self::take_log_buffer_link(log_buffer_link, &mut log_buffer_head)
+                    {
+                        loop {
+                            // TODO: implement it.
+                            if let Some(next_log_buffer) =
+                                log_buffer.take_next_if_not(log_buffer_head_addr)
+                            {
+                                log_buffer = next_log_buffer;
+                            } else {
+                                drop(log_buffer);
+                                break;
+                            }
+                        }
+                    }
+                }
+                IOTask::Shutdown => break,
             }
         }
     }
@@ -398,6 +416,41 @@ impl<S: Sequencer> FileIO<S> {
                 return lsn;
             }
         }
+    }
+
+    /// Takes the specified [`FileLogBuffer`] linked list.
+    fn take_log_buffer_link(
+        log_buffer_link: &AtomicUsize,
+        log_buffer_head: &mut FileLogBuffer<S, Self>,
+    ) -> Option<Box<FileLogBuffer<S, Self>>> {
+        let mut current_head = log_buffer_link.load(Acquire);
+        let log_buffer_head_addr = addr_of_mut!(*log_buffer_head) as usize;
+        while current_head != 0 && current_head != log_buffer_head_addr {
+            let current_head_ptr = current_head as *mut FileLogBuffer<S, Self>;
+            // Safety: `current_head_ptr` not being zero was checked.
+            log_buffer_head.lsn = unsafe { (*current_head_ptr).lsn };
+            if let Err(actual) = log_buffer_link.compare_exchange(
+                current_head,
+                log_buffer_head_addr,
+                AcqRel,
+                Acquire,
+            ) {
+                current_head = actual;
+            } else {
+                // Safety: the pointer was provided by `Box::into_raw`.
+                let mut current_head = unsafe { Box::from_raw(current_head_ptr) };
+                while let Some(mut next_log_buffer) =
+                    current_head.take_next_if_not(log_buffer_head_addr)
+                {
+                    // Invert the direction of links to make it a FIFO queue.
+                    debug_assert_eq!(current_head.lsn, next_log_buffer.lsn + 1);
+                    next_log_buffer.next = Box::into_raw(current_head) as usize;
+                    current_head = next_log_buffer;
+                }
+                return Some(current_head);
+            }
+        }
+        None
     }
 }
 
@@ -559,6 +612,23 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn check(&self, _io_id: usize, _waker: &Waker) -> Option<Result<S::Instant, Error>> {
         Some(Ok(S::Instant::default()))
+    }
+}
+
+impl<S: Sequencer, P: PersistenceLayer<S>> FileLogBuffer<S, P> {
+    /// Takes the next [`FileLogBuffer`] if the address if not `nil` or `0`.
+    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer<S, P>>> {
+        if self.next == 0 {
+            return None;
+        } else if self.next == nil {
+            self.next = 0;
+            return None;
+        }
+        let log_buffer_ptr = self.next as *mut FileLogBuffer<S, P>;
+        // Safety: the pointer was provided by `Box::into_raw`.
+        let log_buffer = unsafe { Box::from_raw(log_buffer_ptr) };
+        self.next = 0;
+        Some(log_buffer)
     }
 }
 
