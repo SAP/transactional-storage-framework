@@ -9,7 +9,11 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::ptr::addr_of_mut;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -175,7 +179,7 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
-    fn flush(&mut self, persistence_layer: &P) -> Result<(), Error>;
+    fn flush(self: Box<Self>, persistence_layer: &P) -> Result<(), Error>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -211,6 +215,11 @@ pub struct FileIO<S: Sequencer> {
     /// The IO worker thread.
     worker: Option<JoinHandle<()>>,
 
+    /// [`FileLogBuffer`] link.
+    ///
+    /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
+    log_buffer_link: Arc<AtomicUsize>,
+
     /// The IO task sender.
     sender: SyncSender<IOTask>,
 
@@ -220,10 +229,22 @@ pub struct FileIO<S: Sequencer> {
 
 /// [`FileLogBuffer`] implements [`BufferredLogger`].
 #[derive(Debug, Default)]
-pub struct FileLogBuffer<S: Sequencer, P: PersistenceLayer<S>>(PhantomData<(S, P)>);
+pub struct FileLogBuffer<S: Sequencer, P: PersistenceLayer<S>> {
+    /// The log sequence number.
+    lsn: u64,
+
+    /// The address of the next [`FileLogBuffer`].
+    next: usize,
+
+    /// Phantom.
+    _phantom: PhantomData<(S, P)>,
+}
 
 #[derive(Debug)]
 pub enum IOTask {
+    /// The [`FileIO`] needs to flush log buffers.
+    Flush,
+
     /// The [`FileIO`] is shutting down.
     Shutdown,
 }
@@ -258,7 +279,42 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
 impl<S: Sequencer> FileIO<S> {
     #[allow(clippy::needless_pass_by_value)]
-    fn process(_log0: File, _log1: File, _checkpoint: File, receiver: Receiver<IOTask>) {
+    fn process(
+        _log0: File,
+        _log1: File,
+        _checkpoint: File,
+        receiver: Receiver<IOTask>,
+        log_buffer_link: &AtomicUsize,
+    ) {
+        // Insert the log buffer head to force the log sequence number ever increasing.
+        let mut log_buffer_head = FileLogBuffer::default();
+        let log_buffer_head_ptr: *mut FileLogBuffer<S, Self> = addr_of_mut!(log_buffer_head);
+        let mut current_head = log_buffer_link.load(Acquire);
+        loop {
+            let current_head_ptr = current_head as *const FileLogBuffer<S, Self>;
+
+            // SAFETY: `log_buffer_link` only stores valid `FileLogBuffer` addresses.
+            unsafe {
+                // The log sequence number is determined by the previously buffered log.
+                log_buffer_head.lsn = if current_head_ptr.is_null() {
+                    0
+                } else {
+                    (*current_head_ptr).lsn + 1
+                };
+            }
+            log_buffer_head.next = current_head;
+            if let Err(actual) = log_buffer_link.compare_exchange(
+                current_head,
+                log_buffer_head_ptr as usize,
+                AcqRel,
+                Acquire,
+            ) {
+                current_head = actual;
+            } else {
+                break;
+            }
+        }
+
         while let Ok(task) = receiver.recv() {
             if matches!(task, IOTask::Shutdown) {
                 break;
@@ -297,11 +353,14 @@ impl<S: Sequencer> Default for FileIO<S> {
             .write(true)
             .open("c.dat")
             .expect("c.dat could not be opened");
+        let log_buffer_link = Arc::new(AtomicUsize::default());
+        let log_buffer_link_clone = log_buffer_link.clone();
         let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         FileIO {
             worker: Some(thread::spawn(move || {
-                Self::process(log0, log1, checkpoint, receiver);
+                Self::process(log0, log1, checkpoint, receiver, &log_buffer_link_clone);
             })),
+            log_buffer_link,
             sender,
             _phantom: PhantomData,
         }
@@ -466,7 +525,34 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     }
 
     #[inline]
-    fn flush(&mut self, _persistence_layer: &FileIO<S>) -> Result<(), Error> {
+    fn flush(self: Box<Self>, persistence_layer: &FileIO<S>) -> Result<(), Error> {
+        let self_ptr = Box::into_raw(self);
+        let mut current_head = persistence_layer.log_buffer_link.load(Acquire);
+        loop {
+            let current_head_ptr = current_head as *const Self;
+
+            // SAFETY: `self` was just unboxed.
+            unsafe {
+                // The log sequence number is determined by the previously buffered log.
+                (*self_ptr).lsn = if current_head_ptr.is_null() {
+                    0
+                } else {
+                    (*current_head_ptr).lsn + 1
+                };
+                (*self_ptr).next = current_head;
+            }
+            if let Err(actual) = persistence_layer.log_buffer_link.compare_exchange(
+                current_head,
+                self_ptr as usize,
+                AcqRel,
+                Acquire,
+            ) {
+                current_head = actual;
+            } else {
+                break;
+            }
+        }
+        drop(persistence_layer.sender.try_send(IOTask::Flush));
         Ok(())
     }
 }

@@ -796,36 +796,68 @@ impl<S: Sequencer> AccessController<S> {
         condition: &C,
         deletion_notifier: &mut D,
     ) -> bool {
-        let mut retained = false;
-        self.table.remove_if(&object_id, |o| {
-            o.prepare_ownership_transfer();
-            match o {
-                ObjectState::Owned(_) => {
-                    retained = true;
-                    false
-                }
-                ObjectState::Created(instant) => {
-                    if condition(instant) {
-                        true
-                    } else {
-                        retained = true;
+        let mut found = false;
+        let removed = self
+            .table
+            .remove_if(&object_id, |o| {
+                found = true;
+                o.prepare_ownership_transfer();
+                match o {
+                    ObjectState::Owned(Ownership::Created(owner)) => {
+                        if let Some(eot_instant) = owner.eot_instant() {
+                            if eot_instant == S::Instant::default() {
+                                // The transaction or journal was rolled back, implying that the
+                                // database object has never been created.
+                                deletion_notifier(&eot_instant);
+                                return true;
+                            } else if condition(&eot_instant) {
+                                // The database object is globally visible.
+                                return true;
+                            }
+                            // The time point is still needed.
+                            *o = ObjectState::Created(eot_instant);
+                        }
                         false
                     }
-                }
-                ObjectState::Deleted(instant) => {
-                    if condition(instant) {
-                        // Deletion of the access control data must happen after the deletion
-                        // is known to the database object.
-                        deletion_notifier(instant);
-                        true
-                    } else {
-                        retained = true;
+                    ObjectState::Owned(Ownership::Protected(owner) | Ownership::Locked(owner)) => {
+                        // Locks are immediately released when the owner is ended.
+                        owner.is_terminated()
+                    }
+                    ObjectState::Owned(Ownership::Deleted(owner)) => {
+                        if let Some(eot_instant) = owner.eot_instant() {
+                            if eot_instant == S::Instant::default() {
+                                // The transaction or journal was rolled back, implying that the
+                                // database object has never been deleted.
+                                return true;
+                            } else if condition(&eot_instant) {
+                                // The database object is globally invisible.
+                                deletion_notifier(&eot_instant);
+                                return true;
+                            }
+                            // The time point is still needed.
+                            *o = ObjectState::Deleted(eot_instant);
+                        }
                         false
                     }
+                    ObjectState::Owned(_) => {
+                        // The database object is locked.
+                        false
+                    }
+                    ObjectState::Created(instant) => condition(instant),
+                    ObjectState::Deleted(instant) => {
+                        if condition(instant) {
+                            // Deletion of the access control data must happen after the deletion
+                            // is known to the database object.
+                            deletion_notifier(instant);
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 }
-            }
-        });
-        !retained
+            })
+            .is_some();
+        !found || removed
     }
 
     /// Processes the supplied wait queue.
@@ -2735,6 +2767,67 @@ mod test {
                         "{access_action:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle() {
+        for commit in [false, true] {
+            for access_action in [
+                AccessAction::Create,
+                AccessAction::Share,
+                AccessAction::Lock,
+                AccessAction::Delete,
+            ] {
+                let database = Database::default();
+                let access_controller = database.access_controller();
+                let mut deleted = 0;
+                let condition = |i: &u64| *i <= database.sequencer().min(Relaxed);
+                let mut deletion_notifier = |i: &u64| deleted = *i;
+                let transaction = database.transaction();
+                let mut journal = transaction.journal();
+                assert_eq!(
+                    take_access_action(access_action, access_controller, &mut journal, None).await,
+                    Ok(true)
+                );
+                assert_eq!(journal.submit(), 1);
+                assert!(!access_controller.try_remove_access_data_sync(
+                    0,
+                    &condition,
+                    &mut deletion_notifier
+                ));
+
+                let snapshot = database.snapshot();
+
+                if commit {
+                    assert!(transaction.commit().await.is_ok());
+                } else {
+                    transaction.rollback();
+                }
+
+                assert_eq!(
+                    access_controller.try_remove_access_data_sync(
+                        0,
+                        &condition,
+                        &mut deletion_notifier
+                    ),
+                    !commit
+                        || (access_action == AccessAction::Share
+                            || access_action == AccessAction::Lock)
+                );
+
+                drop(snapshot);
+
+                assert!(access_controller.try_remove_access_data_sync(
+                    0,
+                    &condition,
+                    &mut deletion_notifier
+                ));
+                assert_eq!(
+                    deleted == 2,
+                    commit && access_action == AccessAction::Delete
+                );
             }
         }
     }
