@@ -114,7 +114,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn rewind(
         &self,
         id: TransactionID,
-        transaction_instant: usize,
+        transaction_instant: u32,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
@@ -465,7 +465,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     fn rewind(
         &self,
         _id: TransactionID,
-        _transaction_instant: usize,
+        _transaction_instant: u32,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO {

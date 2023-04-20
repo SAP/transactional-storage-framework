@@ -47,7 +47,7 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
 ///
 /// The identifier of a transaction is only valid during the lifetime of the transaction. The same
 /// identifier can be used by an unrelated transaction afterwards.
-pub type ID = usize;
+pub type ID = u64;
 
 /// Possible [`Transaction`] states.
 #[derive(Clone, Copy, Eq, Debug, Ord, PartialEq, PartialOrd)]
@@ -82,7 +82,7 @@ pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 /// `0` as a transaction logical time point value represents an unfinished job.
-pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
+pub const UNFINISHED_TRANSACTION_INSTANT: u32 = 0;
 
 /// `usize::MAX` as a transaction logical time point is regarded as an unreachable instant for
 /// transactions, thus disallowing readers to see changes corresponding to the time point.
@@ -90,7 +90,7 @@ pub const UNFINISHED_TRANSACTION_INSTANT: usize = 0;
 /// [`Transaction`] cannot generated a clock value that is equal to or greater than
 /// [`UNREACHABLE_TRANSACTION_INSTANT`], and changes made at [`UNREACHABLE_TRANSACTION_INSTANT`]
 /// can never be visible to any other jobs in the same transaction.
-pub const UNREACHABLE_TRANSACTION_INSTANT: usize = usize::MAX;
+pub const UNREACHABLE_TRANSACTION_INSTANT: u32 = u32::MAX;
 
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
 #[derive(Debug)]
@@ -222,7 +222,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// assert_eq!(instant, 1);
     /// ```
     #[inline]
-    pub fn now(&self) -> usize {
+    pub fn now(&self) -> u32 {
         self.journal_strand
             .load(Acquire, &ebr::Barrier::new())
             .as_ref()
@@ -263,7 +263,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// assert_eq!(transaction.rewind(1), Ok(1));
     /// ```
     #[inline]
-    pub fn rewind(&mut self, instant: usize) -> Result<usize, Error> {
+    pub fn rewind(&mut self, instant: u32) -> Result<u32, Error> {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             if record.submit_instant() <= instant {
@@ -405,7 +405,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     }
 
     /// Takes [`Anchor`].
-    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> usize {
+    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> u32 {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
@@ -424,7 +424,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     }
 
     /// Returns the memory address of its [`Anchor`].
-    pub(super) fn transaction_snapshot(&self, instant: usize) -> TransactionSnapshot {
+    pub(super) fn transaction_snapshot(&self, instant: u32) -> TransactionSnapshot {
         debug_assert!(instant <= self.now());
         TransactionSnapshot::new(self.id(), instant)
     }
@@ -619,11 +619,11 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn rewind() {
-        let num_tasks = 16;
-        let barrier = Arc::new(Barrier::new(num_tasks));
+        let num_tasks = 16_u32;
+        let barrier = Arc::new(Barrier::new(num_tasks as usize));
         let database = Arc::new(Database::default());
         let mut transaction = Arc::new(prolong_transaction(database.transaction()));
-        let mut task_handles = Vec::with_capacity(num_tasks);
+        let mut task_handles = Vec::with_capacity(num_tasks as usize);
         for _ in 0..num_tasks {
             let barrier_clone = barrier.clone();
             let transaction_clone = transaction.clone();
