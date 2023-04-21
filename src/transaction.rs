@@ -8,6 +8,7 @@ use super::{AwaitIO, Database, Error, Journal, PersistenceLayer, Sequencer, Snap
 use scc::ebr;
 use scc::Bag;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::AtomicUsize;
@@ -81,16 +82,13 @@ pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
     commit_log_io: Option<(AwaitIO<'d, S, P>, S::Instant)>,
 }
 
-/// `0` as a transaction logical time point value represents an unfinished job.
-pub const UNFINISHED_TRANSACTION_INSTANT: u32 = 0;
-
-/// `usize::MAX` as a transaction logical time point is regarded as an unreachable instant for
-/// transactions, thus disallowing readers to see changes corresponding to the time point.
+/// `u32::MAX - 1` is the last clock value that a transaction clock can reach.
 ///
-/// [`Transaction`] cannot generated a clock value that is equal to or greater than
-/// [`UNREACHABLE_TRANSACTION_INSTANT`], and changes made at [`UNREACHABLE_TRANSACTION_INSTANT`]
-/// can never be visible to any other jobs in the same transaction.
-pub const UNREACHABLE_TRANSACTION_INSTANT: u32 = u32::MAX;
+/// [`Transaction`] cannot generate a clock value that is greater than [`MAX_TRANSACTION_INSTANT`],
+/// and changes made after the instant can never be visible to any other jobs in the same
+/// transaction.
+#[allow(clippy::undocumented_unsafe_blocks)]
+pub const MAX_TRANSACTION_INSTANT: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX - 1) };
 
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
 #[derive(Debug)]
@@ -157,9 +155,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
     /// Captures the current state of the [`Transaction`] as a [`Snapshot`].
     ///
-    /// If the number of submitted [`Journal`] instances is equal to or greater than
-    /// `usize::MAX`, recent changes in the transaction will not be visible to the [`Snapshot`]
-    /// since they cannot be expressed as a `usize` value.
+    /// If the number of submitted [`Journal`] instances is equal to or greater than `u32::MAX`,
+    /// recent changes in the transaction will not be visible to the [`Snapshot`] since they
+    /// cannot be expressed as a `u32` value.
     ///
     /// # Examples
     ///
@@ -203,41 +201,40 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// Gets the current local clock value of the [`Transaction`].
     ///
     /// The returned value amounts to the number of submitted [`Journal`] instances in the
-    /// [`Transaction`] if the number is less than `usize::MAX`. This implies that, if more than
-    /// `usize::MAX` [`Journal`] instances have been submitted to the transaction, recent changes
+    /// [`Transaction`] if the number is less than `u32::MAX`. This implies that, if more than
+    /// `u32::MAX` [`Journal`] instances have been submitted to the transaction, recent changes
     /// will never be visible to any other jobs in the transaction, since this method cannot return
-    /// any value that is equal to or greater than `usize::MAX`.
+    /// any value that is equal to or greater than `u32::MAX`.
+    ///
+    /// `None` is returned if no journals have been submitted to the transaction.
     ///
     /// # Examples
     ///
     /// ```
     /// use sap_tsf::{Database, Journal, Transaction};
+    /// use std::num::NonZeroU32;
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let journal = transaction.journal();
     /// let instant = journal.submit();
     ///
-    /// assert_eq!(transaction.now(), 1);
-    /// assert_eq!(instant, Ok(1));
+    /// assert_eq!(transaction.now(), NonZeroU32::new(1));
+    /// assert_eq!(instant.ok(), NonZeroU32::new(1));
     /// ```
     #[inline]
-    pub fn now(&self) -> u32 {
+    pub fn now(&self) -> Option<NonZeroU32> {
         self.journal_strand
             .load(Acquire, &ebr::Barrier::new())
             .as_ref()
-            .map_or(UNFINISHED_TRANSACTION_INSTANT, |j| {
-                let submit_instant = j.submit_instant().min(UNREACHABLE_TRANSACTION_INSTANT - 1);
-                debug_assert_ne!(submit_instant, UNFINISHED_TRANSACTION_INSTANT);
-                submit_instant
-            })
+            .and_then(|j| j.submit_instant().map(|i| i.min(MAX_TRANSACTION_INSTANT)))
     }
 
     /// Rewinds the [`Transaction`] to the given point of time.
     ///
     /// All the changes made after the specified instant are rolled back and returns the updated
     /// clock value. It requires a mutable reference to the [`Transaction`], thus ensuring
-    /// exclusivity.
+    /// exclusivity. `instant` being `None` means that the transaction will be fully rolled back.
     ///
     /// # Errors
     ///
@@ -247,23 +244,24 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Transaction};
+    /// use std::num::NonZeroU32;
     ///
     /// let database = Database::default();
     /// let mut transaction = database.transaction();
-    /// assert_eq!(transaction.rewind(1), Ok(0));
+    /// assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(None));
     ///
     /// for _ in 0..3 {
     ///     let journal = transaction.journal();
     ///     journal.submit();
     /// }
     ///
-    /// assert_eq!(transaction.now(), 3);
-    /// assert_eq!(transaction.rewind(4), Ok(3));
-    /// assert_eq!(transaction.rewind(3), Ok(3));
-    /// assert_eq!(transaction.rewind(1), Ok(1));
+    /// assert_eq!(transaction.now(), NonZeroU32::new(3));
+    /// assert_eq!(transaction.rewind(NonZeroU32::new(4)), Ok(NonZeroU32::new(3)));
+    /// assert_eq!(transaction.rewind(NonZeroU32::new(3)), Ok(NonZeroU32::new(3)));
+    /// assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(NonZeroU32::new(1)));
     /// ```
     #[inline]
-    pub fn rewind(&mut self, instant: u32) -> Result<u32, Error> {
+    pub fn rewind(&mut self, instant: Option<NonZeroU32>) -> Result<Option<NonZeroU32>, Error> {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             if record.submit_instant() <= instant {
@@ -271,9 +269,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 break;
             }
             record.rollback(self.database.task_processor());
-            current = record.set_next(None, Relaxed);
+            current = record.set_next(None, Relaxed).0;
         }
-        let new_instant = current.as_ref().map_or(0, |r| r.submit_instant());
+        let new_instant = current.as_ref().and_then(|r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
         let io_completion =
@@ -405,11 +403,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     }
 
     /// Takes [`Anchor`].
-    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> u32 {
+    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> NonZeroU32 {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
-            record.set_next(current.get_arc(), Relaxed);
+            let submit_instant = record.set_next(current.get_arc(), Relaxed).1;
             match self.journal_strand.compare_exchange(
                 current,
                 (Some(record.clone()), ebr::Tag::None),
@@ -417,14 +415,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 Relaxed,
                 &barrier,
             ) {
-                Ok(_) => return record.submit_instant(),
+                Ok(_) => return submit_instant,
                 Err((_, actual)) => current = actual,
             }
         }
     }
 
     /// Returns the memory address of its [`Anchor`].
-    pub(super) fn transaction_snapshot(&self, instant: u32) -> TransactionSnapshot {
+    pub(super) fn transaction_snapshot(&self, instant: Option<NonZeroU32>) -> TransactionSnapshot {
         debug_assert!(instant <= self.now());
         TransactionSnapshot::new(self.id(), instant)
     }
@@ -456,7 +454,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
             record.commit(self.database.task_processor());
-            current = record.set_next(None, Relaxed);
+            current = record.set_next(None, Relaxed).0;
         }
     }
 
@@ -469,8 +467,8 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.anchor.state.store(State::RollingBack.into(), Release);
         self.anchor.wake_up();
 
-        let result = self.rewind(0).unwrap();
-        debug_assert_eq!(result, 0);
+        let result = self.rewind(None);
+        debug_assert_eq!(result, Ok(None));
 
         self.anchor.state.store(State::RolledBack.into(), Release);
     }
@@ -630,9 +628,9 @@ mod test {
             task_handles.push(tokio::spawn(async move {
                 barrier_clone.wait().await;
                 for i in 0..num_tasks {
-                    assert!(transaction_clone.now() >= i);
+                    assert!(transaction_clone.now().map_or(i == 0, |l| l.get() >= i));
                     let journal = transaction_clone.journal();
-                    assert!(journal.submit().unwrap() > i);
+                    assert!(journal.submit().ok() > NonZeroU32::new(i));
                 }
             }));
         }
@@ -640,21 +638,21 @@ mod test {
             assert!(r.is_ok());
         }
 
-        let num_submitted_journals = transaction.now();
+        let num_submitted_journals = transaction.now().map_or(0, |i| i.get());
         for i in 0..num_submitted_journals {
             assert_eq!(
                 Arc::get_mut(&mut transaction)
                     .unwrap()
-                    .rewind(num_submitted_journals - i - 1),
-                Ok(num_submitted_journals - i - 1)
+                    .rewind(NonZeroU32::new(num_submitted_journals - i - 1)),
+                Ok(NonZeroU32::new(num_submitted_journals - i - 1))
             );
             assert_eq!(
                 Arc::get_mut(&mut transaction)
                     .unwrap()
-                    .rewind(UNREACHABLE_TRANSACTION_INSTANT),
-                Ok(num_submitted_journals - i - 1)
+                    .rewind(Some(MAX_TRANSACTION_INSTANT)),
+                Ok(NonZeroU32::new(num_submitted_journals - i - 1))
             );
         }
-        assert_eq!(transaction.now(), UNFINISHED_TRANSACTION_INSTANT);
+        assert!(transaction.now().is_none());
     }
 }

@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
@@ -102,7 +103,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn rewind(
         &self,
         id: TransactionID,
-        transaction_instant: u32,
+        transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
@@ -170,7 +171,7 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     fn flush(
         self: Box<Self>,
         persistence_layer: &P,
-        submit_instant: Option<u32>,
+        submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, P>, Error>;
 }
@@ -576,7 +577,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     fn rewind(
         &self,
         _id: TransactionID,
-        _transaction_instant: u32,
+        _transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
@@ -647,7 +648,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     fn flush(
         self: Box<Self>,
         persistence_layer: &FileIO<S>,
-        _submit_instant: Option<u32>,
+        _submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
         let self_ptr = Box::into_raw(self);

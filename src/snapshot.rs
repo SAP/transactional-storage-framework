@@ -7,6 +7,7 @@ use super::task_processor::TaskProcessor;
 use super::{Database, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use std::cmp;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::ptr;
 use std::sync::atomic::Ordering::Acquire;
 
@@ -54,7 +55,7 @@ pub(super) struct TransactionSnapshot<'t> {
     id: TransactionID,
 
     /// The logical instant of the transaction.
-    instant: u32,
+    instant: Option<NonZeroU32>,
 
     /// Limits the lifetime to that of the transaction.
     _phantom: PhantomData<&'t ()>,
@@ -198,7 +199,7 @@ impl<'d, 't, 'j, S: Sequencer> PartialOrd<S::Instant> for Snapshot<'d, 't, 'j, S
 
 impl<'t> TransactionSnapshot<'t> {
     /// Creates a new [`TransactionSnapshot`].
-    pub(super) fn new(id: TransactionID, instant: u32) -> TransactionSnapshot<'t> {
+    pub(super) fn new(id: TransactionID, instant: Option<NonZeroU32>) -> TransactionSnapshot<'t> {
         TransactionSnapshot {
             id,
             instant,
