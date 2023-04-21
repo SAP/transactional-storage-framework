@@ -130,39 +130,7 @@ impl TaskProcessor {
         receiver: &Receiver<Task>,
         thread_local_data: &mut ThreadLocalData<S, P>,
     ) {
-        loop {
-            if let Ok(task) = receiver.recv_timeout(thread_local_data.wait_duration) {
-                match task {
-                    Task::Shutdown => break,
-                    Task::WakeUp(deadline, mut waker) => {
-                        let now = Instant::now();
-                        if deadline < now {
-                            waker.wake();
-                        } else {
-                            // Try `4` times, and give up inserting the `Waker`.
-                            for offset in 0..4 {
-                                match thread_local_data
-                                    .waker_queue
-                                    .insert(deadline + Duration::from_nanos(offset), waker)
-                                {
-                                    Some(other_waker) => waker = other_waker,
-                                    None => break,
-                                }
-                            }
-                        }
-                    }
-                    Task::MonitorContainer(name) => {
-                        thread_local_data.monitored_containers.insert(name);
-                    }
-                    Task::MonitorObject(object_id) => {
-                        thread_local_data.monitored_object_ids.insert(object_id);
-                    }
-                    Task::ScanAccessController => {
-                        // Do nothing.
-                    }
-                }
-            }
-
+        while Self::receive_task(receiver, thread_local_data, false) {
             // The monitored database objects and deadlines have to be always checked on every
             // iteration as sending `ScanAccessController` tasks to `Overseer` may fail when the
             // send buffer is full.
@@ -189,6 +157,7 @@ impl TaskProcessor {
                         }
                         if operation_count == CONTEXT_SWITCH_THRESHOLD {
                             // Process time critical tasks periodically.
+                            Self::receive_task(receiver, thread_local_data, true);
                             Self::process_time_critical_tasks(thread_local_data);
                             operation_count = 0;
                         } else {
@@ -199,8 +168,57 @@ impl TaskProcessor {
                 }
                 false
             });
-            thread_local_data.monitored_containers = monitored_containers;
+            thread_local_data
+                .monitored_containers
+                .append(&mut monitored_containers);
         }
+    }
+
+    /// Tries to receive a task.
+    ///
+    /// Returns `false` if the sender is shutting down.
+    fn receive_task<S: Sequencer, P: PersistenceLayer<S>>(
+        receiver: &Receiver<Task>,
+        thread_local_data: &mut ThreadLocalData<S, P>,
+        try_receive: bool,
+    ) -> bool {
+        let receive_result = if try_receive {
+            receiver.try_recv().ok()
+        } else {
+            receiver.recv_timeout(thread_local_data.wait_duration).ok()
+        };
+        if let Some(task) = receive_result {
+            match task {
+                Task::Shutdown => return false,
+                Task::WakeUp(deadline, mut waker) => {
+                    let now = Instant::now();
+                    if deadline < now {
+                        waker.wake();
+                    } else {
+                        // Try `4` times, and give up inserting the `Waker`.
+                        for offset in 0..4 {
+                            match thread_local_data
+                                .waker_queue
+                                .insert(deadline + Duration::from_nanos(offset), waker)
+                            {
+                                Some(other_waker) => waker = other_waker,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                Task::MonitorContainer(name) => {
+                    thread_local_data.monitored_containers.insert(name);
+                }
+                Task::MonitorObject(object_id) => {
+                    thread_local_data.monitored_object_ids.insert(object_id);
+                }
+                Task::ScanAccessController => {
+                    // Do nothing.
+                }
+            }
+        }
+        true
     }
 
     /// Performs time critical tasks.

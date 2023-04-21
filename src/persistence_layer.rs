@@ -4,6 +4,7 @@
 
 use super::utils;
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
@@ -15,7 +16,7 @@ use std::ptr::addr_of_mut;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -210,6 +211,8 @@ pub struct FileIO<S: Sequencer> {
     worker: Option<JoinHandle<()>>,
 
     /// Shared data among the worker and database threads.
+    ///
+    /// TODO: need sharding of `FileIOSharedData`.
     shared_data: Arc<FileIOSharedData>,
 
     /// The IO task sender.
@@ -251,6 +254,9 @@ struct FileIOSharedData {
 
     /// The log sequence number of the last flushed log buffer.
     last_flushed_lsn: AtomicU64,
+
+    /// Log sequence number and [`Waker`] map.
+    waker_map: Mutex<BTreeMap<u64, Waker>>,
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
@@ -307,7 +313,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 impl<S: Sequencer> FileIO<S> {
     /// Creates a default [`FileIO`].
     ///
-    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
+    /// The default log and checkpoint files are set to `0.log`, `1.log`, `0.dat`, `1.dat` in the
     /// specified [`Path`].
     ///
     /// # Errors
@@ -316,60 +322,30 @@ impl<S: Sequencer> FileIO<S> {
     /// directory could not be created, or database files could not be opened.
     #[inline]
     pub fn with_path(path: &Path) -> Result<Self, &str> {
-        const LOG0: &str = "0.log";
-        const LOG1: &str = "1.log";
-        const CHECKPOINT: &str = "c.dat";
-
         if create_dir_all(path).is_err() {
-            return Err("the path does not exist");
+            return Err("the path could not be created");
         }
 
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
         path_buffer.push(path);
 
-        path_buffer.push(Path::new(LOG0));
-        let Some(log0_path) = path_buffer.to_str() else {
-            return Err("failed to parse the path string");
-        };
-        let Ok(log0) = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(log0_path) else {
-            return Err("failed to open 0.log");
-        };
-        path_buffer.pop();
-
-        path_buffer.push(Path::new(LOG1));
-        let Some(log1_path) = path_buffer.to_str() else {
-            return Err("failed to parse the path string");
-        };
-        let Ok(log1) = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(log1_path) else {
-            return Err("failed to open 1.log");
-        };
-        path_buffer.pop();
-
-        path_buffer.push(Path::new(CHECKPOINT));
-        let Some(checkpoint_path) = path_buffer.to_str() else {
-            return Err("failed to parse the path string");
-        };
-        let Ok(checkpoint) = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(checkpoint_path) else {
-            return Err("failed to open c.dat");
-        };
+        let mut log0 = Self::open_file(&mut path_buffer, "0.log")?;
+        let mut log1 = Self::open_file(&mut path_buffer, "1.log")?;
+        let mut data0 = Self::open_file(&mut path_buffer, "0.dat")?;
+        let mut data1 = Self::open_file(&mut path_buffer, "1.dat")?;
         let shared_data = Arc::new(FileIOSharedData::default());
         let shared_data_clone = shared_data.clone();
-        let (sender, receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
+        let (sender, mut receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             worker: Some(thread::spawn(move || {
-                Self::process(log0, log1, checkpoint, receiver, &shared_data_clone);
+                Self::process(
+                    &mut log0,
+                    &mut log1,
+                    &mut data0,
+                    &mut data1,
+                    &mut receiver,
+                    &shared_data_clone,
+                );
             })),
             shared_data,
             sender,
@@ -377,13 +353,30 @@ impl<S: Sequencer> FileIO<S> {
         })
     }
 
+    /// Opens the specified file.
+    fn open_file<'f>(path_buffer: &mut PathBuf, file_name: &'f str) -> Result<File, &'f str> {
+        path_buffer.push(Path::new(file_name));
+        let Some(file_path) = path_buffer.to_str() else {
+            return Err(file_name);
+        };
+        let Ok(file) = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(file_path) else {
+                return Err(file_name);
+            };
+        path_buffer.pop();
+        Ok(file)
+    }
+
     /// Processes IO tasks.
-    #[allow(clippy::needless_pass_by_value)]
     fn process(
-        _log0: File,
-        _log1: File,
-        _checkpoint: File,
-        receiver: Receiver<IOTask>,
+        _log0: &mut File,
+        _log1: &mut File,
+        _data0: &mut File,
+        _data1: &mut File,
+        receiver: &mut Receiver<IOTask>,
         shared_data: &FileIOSharedData,
     ) {
         // Insert the log buffer head to force the log sequence number ever increasing.
@@ -396,29 +389,29 @@ impl<S: Sequencer> FileIO<S> {
 
         while let Ok(task) = receiver.recv() {
             match task {
-                IOTask::Flush => {
-                    if let Some(mut log_buffer) = Self::take_log_buffer_link(
-                        &shared_data.log_buffer_link,
-                        &mut log_buffer_head,
-                    ) {
-                        loop {
-                            // TODO: implement it.
-                            debug_assert!(
-                                shared_data.last_flushed_lsn.load(Relaxed) < log_buffer.lsn
-                            );
-                            shared_data.last_flushed_lsn.store(log_buffer.lsn, Release);
-                            if let Some(next_log_buffer) =
-                                log_buffer.take_next_if_not(log_buffer_head_addr)
-                            {
-                                log_buffer = next_log_buffer;
-                            } else {
-                                drop(log_buffer);
-                                break;
-                            }
+                IOTask::Flush => (),
+                IOTask::Shutdown => break,
+            }
+            if let Some(mut log_buffer) =
+                Self::take_log_buffer_link(&shared_data.log_buffer_link, &mut log_buffer_head)
+            {
+                loop {
+                    // TODO: implement it.
+                    debug_assert!(shared_data.last_flushed_lsn.load(Relaxed) < log_buffer.lsn);
+                    shared_data.last_flushed_lsn.store(log_buffer.lsn, Release);
+                    if let Ok(mut waker_map) = shared_data.waker_map.lock() {
+                        if let Some(waker) = waker_map.remove(&log_buffer.lsn) {
+                            waker.wake();
                         }
                     }
+                    if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr)
+                    {
+                        log_buffer = next_log_buffer;
+                    } else {
+                        drop(log_buffer);
+                        break;
+                    }
                 }
-                IOTask::Shutdown => break,
             }
         }
     }
@@ -605,9 +598,17 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
 
     #[inline]
     fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
-        // TODO: implement it.
         if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
             Some(Ok(S::Instant::default()))
+        } else if let Ok(mut waker_map) = self.shared_data.waker_map.try_lock() {
+            // Push the `Waker` into the bag, and check the value again.
+            waker_map.insert(lsn, waker.clone());
+            if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
+                waker_map.remove(&lsn);
+                Some(Ok(S::Instant::default()))
+            } else {
+                None
+            }
         } else {
             waker.wake_by_ref();
             None
