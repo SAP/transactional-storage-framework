@@ -219,7 +219,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// let instant = journal.submit();
     ///
     /// assert_eq!(transaction.now(), 1);
-    /// assert_eq!(instant, 1);
+    /// assert_eq!(instant, Ok(1));
     /// ```
     #[inline]
     pub fn now(&self) -> u32 {
@@ -632,7 +632,7 @@ mod test {
                 for i in 0..num_tasks {
                     assert!(transaction_clone.now() >= i);
                     let journal = transaction_clone.journal();
-                    assert!(journal.submit() > i);
+                    assert!(journal.submit().unwrap() > i);
                 }
             }));
         }

@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::persistence_layer::BufferredLogger;
+
 use super::access_controller::ObjectState;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::task_processor::{Task, TaskProcessor};
@@ -27,7 +29,7 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     transaction: &'t Transaction<'d, S, P>,
 
     /// Own log buffer.
-    _log_buffer: Option<Box<P::LogBuffer>>,
+    log_buffer: Option<Box<P::LogBuffer>>,
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
@@ -169,6 +171,10 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ///
     /// It returns the updated transaction clock value.
     ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the persistence layer failed to process the log records.
+    ///
     /// # Examples
     ///
     /// ```
@@ -177,12 +183,19 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let journal = transaction.journal();
-    /// assert_eq!(journal.submit(), 1);
+    /// assert_eq!(journal.submit(), Ok(1));
     /// ```
     #[inline]
-    #[must_use]
-    pub fn submit(self) -> u32 {
-        self.transaction.record(&self.anchor)
+    pub fn submit(mut self) -> Result<u32, Error> {
+        let submit_instant = self.transaction.record(&self.anchor);
+        if let Some(log_buffer) = self.log_buffer.take() {
+            log_buffer.flush(
+                self.transaction.database().persistence_layer(),
+                Some(submit_instant),
+                None,
+            )?;
+        }
+        Ok(submit_instant)
     }
 
     /// Captures the current state of the [`Journal`] as a [`Snapshot`].
@@ -220,7 +233,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ) -> Journal<'d, 't, S, P> {
         Journal {
             transaction,
-            _log_buffer: None,
+            log_buffer: None,
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.now())),
         }
     }
@@ -550,12 +563,12 @@ mod tests {
         let storage = Database::default();
         let transaction = storage.transaction();
         let journal_1 = transaction.journal();
-        assert_eq!(journal_1.submit(), 1);
+        assert_eq!(journal_1.submit(), Ok(1));
         let journal_2 = transaction.journal();
-        assert_eq!(journal_2.submit(), 2);
+        assert_eq!(journal_2.submit(), Ok(2));
         let journal_3 = transaction.journal();
         let journal_4 = transaction.journal();
-        assert_eq!(journal_4.submit(), 3);
-        assert_eq!(journal_3.submit(), 4);
+        assert_eq!(journal_4.submit(), Ok(3));
+        assert_eq!(journal_3.submit(), Ok(4));
     }
 }
