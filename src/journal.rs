@@ -2,16 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::persistence_layer::BufferredLogger;
+
 use super::access_controller::ObjectState;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::task_processor::{Task, TaskProcessor};
 use super::transaction::Anchor as TransactionAnchor;
 use super::transaction::ID as TransactionID;
-use super::transaction::{UNFINISHED_TRANSACTION_INSTANT, UNREACHABLE_TRANSACTION_INSTANT};
 use super::{Error, PersistenceLayer, Sequencer, Snapshot, Transaction};
 use scc::ebr;
 use scc::hash_map::OccupiedEntry;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -27,7 +29,7 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     transaction: &'t Transaction<'d, S, P>,
 
     /// Own log buffer.
-    _log_buffer: Option<Box<P::LogBuffer>>,
+    log_buffer: Option<Box<P::LogBuffer>>,
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
@@ -47,7 +49,7 @@ pub(super) struct Anchor<S: Sequencer> {
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
 
     /// The time point when the [`Journal`] was created.
-    creation_instant: u32,
+    creation_instant: Option<NonZeroU32>,
 
     /// The transaction instant when the [`Journal`] was submitted.
     ///
@@ -169,20 +171,32 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ///
     /// It returns the updated transaction clock value.
     ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the persistence layer failed to process the log records.
+    ///
     /// # Examples
     ///
     /// ```
     /// use sap_tsf::{Database, Transaction};
+    /// use std::num::NonZeroU32;
     ///
     /// let database = Database::default();
     /// let transaction = database.transaction();
     /// let journal = transaction.journal();
-    /// assert_eq!(journal.submit(), 1);
+    /// assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
     /// ```
     #[inline]
-    #[must_use]
-    pub fn submit(self) -> u32 {
-        self.transaction.record(&self.anchor)
+    pub fn submit(mut self) -> Result<NonZeroU32, Error> {
+        let submit_instant = self.transaction.record(&self.anchor);
+        if let Some(log_buffer) = self.log_buffer.take() {
+            log_buffer.flush(
+                self.transaction.database().persistence_layer(),
+                Some(submit_instant),
+                None,
+            )?;
+        }
+        Ok(submit_instant)
     }
 
     /// Captures the current state of the [`Journal`] as a [`Snapshot`].
@@ -220,7 +234,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ) -> Journal<'d, 't, S, P> {
         Journal {
             transaction,
-            _log_buffer: None,
+            log_buffer: None,
             anchor: ebr::Arc::new(Anchor::new(transaction_anchor, transaction.now())),
         }
     }
@@ -234,7 +248,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
 impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P> {
     #[inline]
     fn drop(&mut self) {
-        if self.anchor.submit_instant() == UNFINISHED_TRANSACTION_INSTANT {
+        if self.anchor.submit_instant().is_none() {
             self.anchor
                 .rollback(self.transaction.database().task_processor());
         }
@@ -295,7 +309,7 @@ impl<S: Sequencer> Anchor<S> {
 
         if let Some(transaction_snapshot) = snapshot.transaction_snapshot() {
             let submit_instant = self.submit_instant();
-            if submit_instant != UNFINISHED_TRANSACTION_INSTANT
+            if submit_instant.is_some()
                 && TransactionSnapshot::new(self.transaction_id(), submit_instant)
                     <= *transaction_snapshot
             {
@@ -351,9 +365,7 @@ impl<S: Sequencer> Anchor<S> {
         } else if self.transaction_id() == anchor.transaction_id() {
             // They are from the same transaction.
             let submit_instant = self.submit_instant();
-            if submit_instant != UNFINISHED_TRANSACTION_INSTANT
-                && submit_instant <= anchor.creation_instant
-            {
+            if submit_instant.map_or(false, |i| anchor.creation_instant.map_or(false, |a| i <= a)) {
                 // The requester is a newer journal in the transaction, or the same with the owner.
                 Relationship::Linearizable
             } else if self.is_rolled_back() {
@@ -394,14 +406,17 @@ impl<S: Sequencer> Anchor<S> {
         &self,
         next: Option<ebr::Arc<Anchor<S>>>,
         order: Ordering,
-    ) -> Option<ebr::Arc<Anchor<S>>> {
-        let new_submit_instant = next
-            .as_ref()
-            .map_or(UNFINISHED_TRANSACTION_INSTANT + 1, |a| {
-                a.submit_instant().min(UNREACHABLE_TRANSACTION_INSTANT - 1) + 1
-            });
-        self.submit_instant.store(new_submit_instant, order);
-        self.next.swap((next, ebr::Tag::None), order).0
+    ) -> (Option<ebr::Arc<Anchor<S>>>, NonZeroU32) {
+        let new_submit_instant = next.as_ref().and_then(|a| a.submit_instant()).map_or(
+            // Safety: `1` is definitely non-zero.
+            unsafe { NonZeroU32::new_unchecked(1) },
+            |i| i.saturating_add(1),
+        );
+        self.submit_instant.store(new_submit_instant.into(), order);
+        (
+            self.next.swap((next, ebr::Tag::None), order).0,
+            new_submit_instant,
+        )
     }
 
     /// Wakes up any waiting transactions.
@@ -416,16 +431,19 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Reads its submit instant.
-    pub(super) fn submit_instant(&self) -> u32 {
-        self.submit_instant.load(Acquire)
+    pub(super) fn submit_instant(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.submit_instant.load(Acquire))
     }
 
     /// Creates a new [`Anchor`].
-    fn new(transaction_anchor: ebr::Arc<TransactionAnchor<S>>, creation_instant: u32) -> Anchor<S> {
+    fn new(
+        transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
+        creation_instant: Option<NonZeroU32>,
+    ) -> Anchor<S> {
         Anchor {
             transaction_anchor,
             creation_instant,
-            submit_instant: AtomicU32::new(UNFINISHED_TRANSACTION_INSTANT),
+            submit_instant: AtomicU32::new(0),
             rolled_back: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),
@@ -544,18 +562,19 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
 #[cfg(test)]
 mod tests {
     use crate::Database;
+    use std::num::NonZeroU32;
 
     #[test]
     fn journal() {
         let storage = Database::default();
         let transaction = storage.transaction();
         let journal_1 = transaction.journal();
-        assert_eq!(journal_1.submit(), 1);
+        assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
         let journal_2 = transaction.journal();
-        assert_eq!(journal_2.submit(), 2);
+        assert_eq!(journal_2.submit().ok(), NonZeroU32::new(2));
         let journal_3 = transaction.journal();
         let journal_4 = transaction.journal();
-        assert_eq!(journal_4.submit(), 3);
-        assert_eq!(journal_3.submit(), 4);
+        assert_eq!(journal_4.submit().ok(), NonZeroU32::new(3));
+        assert_eq!(journal_3.submit().ok(), NonZeroU32::new(4));
     }
 }

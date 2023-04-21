@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::addr_of_mut;
@@ -90,19 +91,6 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
-    /// A [`Journal`](super::Journal) was submitted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
-    fn submit(
-        &self,
-        id: TransactionID,
-        journal_id: JournalID,
-        transaction_instant: usize,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
-
     /// A transaction is being rewound.
     ///
     /// Rewinding the transaction to `transaction_instant == 0` amounts to rolling back the entire
@@ -115,7 +103,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn rewind(
         &self,
         id: TransactionID,
-        transaction_instant: u32,
+        transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
 
@@ -183,6 +171,7 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     fn flush(
         self: Box<Self>,
         persistence_layer: &P,
+        submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, P>, Error>;
 }
@@ -585,21 +574,10 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn submit(
-        &self,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _transaction_instant: usize,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
-    }
-
-    #[inline]
     fn rewind(
         &self,
         _id: TransactionID,
-        _transaction_instant: u32,
+        _transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
@@ -670,6 +648,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>>
     fn flush(
         self: Box<Self>,
         persistence_layer: &FileIO<S>,
+        _submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
         let self_ptr = Box::into_raw(self);
@@ -710,10 +689,10 @@ mod test {
         let log_buffer_3 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
         let log_buffer_4 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
         let (result_3, result_1, result_4, result_2) = match (
-            log_buffer_3.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_1.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_4.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_2.flush(&file_io, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_1.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_4.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            log_buffer_2.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
         ) {
             (Ok(await_io_3), Ok(await_io_1), Ok(await_io_4), Ok(await_io_2)) => {
                 futures::join!(await_io_3, await_io_1, await_io_4, await_io_2)

@@ -70,6 +70,7 @@ let database = Database::default();
 
 ```rust
 use sap_tsf::Database;
+use std::num::NonZeroU32;
 
 let database = Database::default();
 
@@ -83,8 +84,8 @@ let journal_2 = transaction.journal();
 let journal_3 = transaction.journal();
 
 // A `Journal` can be submitted individually, and each submitted `Journal` is sequenced.
-assert_eq!(journal_1.submit(), 1);
-assert_eq!(journal_3.submit(), 2);
+assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
+assert_eq!(journal_3.submit().ok(), NonZeroU32::new(2));
 
 // Drop a `Journal` if database modification carried out by the `Journal` needs to be rolled back.
 drop(journal_2);
@@ -102,6 +103,7 @@ transaction.rewind(1);
 ```rust
 
 use sap_tsf::{Database, ToObjectID};
+use std::num::NonZeroU32;
 
 // `O` represents a database object type.
 struct O(usize);
@@ -139,7 +141,7 @@ async {
     // The transaction will own database object to prevent any other transactions from gaining
     // write access to it.
     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
-    assert_eq!(journal_succ.submit(), 1);
+    assert_eq!(journal_succ.submit().ok(), NonZeroU32::new(1));
 
     let transaction_fail = database.transaction();
     let mut journal_fail = transaction_fail.journal();
@@ -151,7 +153,7 @@ async {
 
     // The transaction will delete the database object.
     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
-    assert_eq!(journal_delete.submit(), 2);
+    assert_eq!(journal_delete.submit().ok(), NonZeroU32::new(2));
 
     // The transaction deletes the database object by writing its commit instant value onto
     // the access data associated with the database object.

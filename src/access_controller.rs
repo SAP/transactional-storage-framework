@@ -37,6 +37,7 @@ use std::time::Instant;
 ///
 /// ```
 /// use sap_tsf::{Database, ToObjectID};
+/// use std::num::NonZeroU32;
 ///
 /// // `O` represents a database object type.
 /// struct O(usize);
@@ -72,7 +73,7 @@ use std::time::Instant;
 ///     // The transaction will own the database object to prevent any other transactions from
 ///     // gaining write access to it.
 ///     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
-///     assert_eq!(journal_succ.submit(), 1);
+///     assert_eq!(journal_succ.submit().ok(), NonZeroU32::new(1));
 ///
 ///     let transaction_fail = database.transaction();
 ///     let mut journal_fail = transaction_fail.journal();
@@ -84,7 +85,7 @@ use std::time::Instant;
 //
 ///     // The transaction will delete the database object.
 ///     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
-///     assert_eq!(journal_delete.submit(), 2);
+///     assert_eq!(journal_delete.submit().ok(), NonZeroU32::new(2));
 ///
 ///     // The transaction deletes the database object by writing its commit instant value onto
 ///     // the access data associated with the database object.
@@ -2193,6 +2194,7 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 mod test {
     use super::*;
     use crate::{AtomicCounter, Database};
+    use std::num::NonZeroU32;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
     use std::sync::Arc;
@@ -2268,7 +2270,7 @@ mod test {
                     .await,
                 Ok(access_action == AccessAction::Create),
             );
-            assert_eq!(journal.submit(), 1);
+            assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
             let transaction_snapshot = transaction.snapshot();
             assert_eq!(
                 access_controller
@@ -2338,7 +2340,7 @@ mod test {
                         .await,
                         Ok(i == 0)
                     );
-                    assert_eq!(journal.submit(), i + 1);
+                    assert_eq!(journal.submit().ok(), NonZeroU32::new(i + 1));
                 }
                 if num_shared_locks != 0 {
                     assert_eq!(
@@ -2355,7 +2357,7 @@ mod test {
                             .await,
                         Ok(true)
                     );
-                    assert_eq!(journal.submit(), num_shared_locks + 1);
+                    assert_eq!(journal.submit().ok(), NonZeroU32::new(num_shared_locks + 1));
                     let mut journal = transaction.journal();
                     assert_eq!(
                         take_access_action(promotion_action, access_controller, &mut journal, None)
@@ -2389,7 +2391,10 @@ mod test {
                             Ok(false)
                         );
                     }
-                    assert_eq!(transaction.rewind(num_shared_locks), Ok(num_shared_locks));
+                    assert_eq!(
+                        transaction.rewind(NonZeroU32::new(num_shared_locks)),
+                        Ok(NonZeroU32::new(num_shared_locks))
+                    );
                 }
             }
         }
@@ -2415,7 +2420,7 @@ mod test {
                             .await,
                             Ok(i == 0)
                         );
-                        assert_eq!(journal.submit(), i + 1);
+                        assert_eq!(journal.submit().ok(), NonZeroU32::new(i + 1));
                     }
                     let blocker_transaction = database.transaction();
                     let mut blocker_journal = blocker_transaction.journal();
@@ -2461,7 +2466,7 @@ mod test {
                             .await,
                             Ok(i == 0)
                         );
-                        assert_eq!(journal.submit(), i + 1);
+                        assert_eq!(journal.submit().ok(), NonZeroU32::new(i + 1));
                     }
                     let waiting_transaction = database.transaction();
                     let mut waiting_journal = waiting_transaction.journal();
@@ -2484,7 +2489,10 @@ mod test {
                                 .await,
                                 Ok(true)
                             );
-                            assert_eq!(journal.submit(), num_shared_locks + 1);
+                            assert_eq!(
+                                journal.submit().ok(),
+                                NonZeroU32::new(num_shared_locks + 1)
+                            );
                             assert!(transaction.commit().await.is_ok());
                         }
                     );
@@ -2535,7 +2543,7 @@ mod test {
                         if transaction_action == TransactionAction::Rewind {
                             drop(journal);
                         } else {
-                            assert_eq!(journal.submit(), 1);
+                            assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                         }
                         let transaction_action_runner = async {
                             if transaction_action == TransactionAction::Commit {
@@ -2621,7 +2629,7 @@ mod test {
                         .await,
                         Ok(true)
                     );
-                    assert_eq!(journal.submit(), 1);
+                    assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                     let prepared = transaction.prepare().await.unwrap();
                     let action_runner = async {
                         let transaction_outer = database.transaction();
@@ -2688,7 +2696,7 @@ mod test {
                     take_access_action(access_action, access_controller, &mut journal, None).await,
                     Ok(true)
                 );
-                assert_eq!(journal.submit(), 1);
+                assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                 let prepared = transaction.prepare().await.unwrap();
                 let snapshot = database.snapshot();
                 assert_eq!(
@@ -2791,7 +2799,7 @@ mod test {
                     take_access_action(access_action, access_controller, &mut journal, None).await,
                     Ok(true)
                 );
-                assert_eq!(journal.submit(), 1);
+                assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                 assert!(!access_controller.try_remove_access_data_sync(
                     0,
                     &condition,
@@ -2856,7 +2864,7 @@ mod test {
                             .await,
                         Ok(true)
                     );
-                    assert_eq!(journal.submit(), 1);
+                    assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                     let data_current = data_clone.load(Relaxed);
                     data_clone.store(data_current + 1, Relaxed);
                     if i % 2 == 0 {
@@ -2874,7 +2882,7 @@ mod test {
                             .await,
                         Ok(true)
                     );
-                    assert_eq!(journal.submit(), 1);
+                    assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                     assert!(data_clone.load(Relaxed) >= data_current);
                     if i % 2 == 1 {
                         assert!(transaction.commit().await.is_ok());
@@ -2919,7 +2927,7 @@ mod test {
                         assert_eq!(error, Error::SerializationFailure);
                     }
                 }
-                assert_eq!(journal.submit(), 1);
+                assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                 assert!(transaction.commit().await.is_ok());
 
                 assert_ne!(data_clone.load(Relaxed), usize::MAX);
@@ -2933,7 +2941,7 @@ mod test {
                         .await,
                     Ok(true)
                 );
-                assert_eq!(journal.submit(), 1);
+                assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
 
                 let current = data_clone.load(Relaxed);
                 data_clone.store(current + 1, Relaxed);
@@ -2948,7 +2956,7 @@ mod test {
                 {
                     Ok(result) => {
                         assert!(result);
-                        assert_eq!(journal.submit(), 1);
+                        assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                         let current = data_clone.load(Relaxed);
                         if current == num_tasks {
                             data_clone.store(num_tasks * 2, Relaxed);
@@ -2959,7 +2967,7 @@ mod test {
                     }
                     Err(error) => {
                         assert_eq!(error, Error::SerializationFailure);
-                        assert_eq!(journal.submit(), 1);
+                        assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
                         transaction.rollback();
                     }
                 }
