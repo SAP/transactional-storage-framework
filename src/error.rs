@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-/// [`Error`] defines all the error codes used by the database system.
+/// [`Error`] defines all the error codes used by the database storage system.
+///
+/// This only defines error codes used in the framework, and individual component implementations
+/// may define separate error codes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     /// The operation conflicts with others.
