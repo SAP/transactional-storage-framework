@@ -111,12 +111,13 @@ impl Hasher for IntHasher {
     }
 }
 
+/// [`ArrayOrU64`] is a `u64` integer that can also be used as an array of `u8`.
 #[derive(Clone, Copy)]
 union ArrayOrU64 {
     /// Array.
     array: [u8; 8],
 
-    /// U64.
+    /// Integer.
     integer: u64,
 }
 
