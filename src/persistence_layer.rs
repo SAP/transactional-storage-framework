@@ -643,6 +643,8 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
         let reserved = if self.is_empty() {
             let header_len = size_of::<TransactionID>() + size_of::<JournalID>();
             self.reserve(header_len + len);
+
+            // Write the header.
             id.to_le_bytes()
                 .iter()
                 .for_each(|i| self.push(MaybeUninit::new(*i)));
@@ -651,7 +653,6 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
                 .iter()
                 .for_each(|i| self.push(MaybeUninit::new(*i)));
 
-            // Safety: initialization is unnecessary.
             self.resize_with(header_len + len, MaybeUninit::uninit);
             &mut self[header_len..]
         } else {
