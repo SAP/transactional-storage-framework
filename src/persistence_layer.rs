@@ -9,6 +9,7 @@ use std::fmt::Debug;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::mem::{size_of, MaybeUninit};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -153,8 +154,8 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     /// # Errors
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the buffer.
-    fn record<W: FnOnce(&mut [u8])>(
-        &self,
+    fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
+        &mut self,
         id: TransactionID,
         journal_id: JournalID,
         len: usize,
@@ -170,7 +171,7 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
     fn flush(
-        self: Box<Self>,
+        self,
         persistence_layer: &P,
         submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
@@ -224,15 +225,15 @@ pub struct FileIO<S: Sequencer> {
 
 /// [`FileLogBuffer`] implements [`BufferredLogger`].
 #[derive(Debug, Default)]
-pub struct FileLogBuffer<S: Sequencer, P: PersistenceLayer<S>> {
+pub struct FileLogBuffer {
+    /// Log buffer content.
+    content: Vec<MaybeUninit<u8>>,
+
     /// The log sequence number.
     lsn: u64,
 
     /// The address of the next [`FileLogBuffer`].
     next: usize,
-
-    /// Phantom.
-    _phantom: PhantomData<(S, P)>,
 }
 
 #[derive(Debug)]
@@ -418,13 +419,10 @@ impl<S: Sequencer> FileIO<S> {
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence
     /// number of it.
-    fn push_log_buffer(
-        log_buffer_link: &AtomicUsize,
-        log_buffer_ptr: *mut FileLogBuffer<S, Self>,
-    ) -> u64 {
+    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) -> u64 {
         let mut current_head = log_buffer_link.load(Acquire);
         loop {
-            let current_head_ptr = current_head as *const FileLogBuffer<S, Self>;
+            let current_head_ptr = current_head as *const FileLogBuffer;
 
             // SAFETY: it assumes that the caller provided a valid pointer.
             let lsn = unsafe {
@@ -452,12 +450,12 @@ impl<S: Sequencer> FileIO<S> {
     /// Takes the specified [`FileLogBuffer`] linked list.
     fn take_log_buffer_link(
         log_buffer_link: &AtomicUsize,
-        log_buffer_head: &mut FileLogBuffer<S, Self>,
-    ) -> Option<Box<FileLogBuffer<S, Self>>> {
+        log_buffer_head: &mut FileLogBuffer,
+    ) -> Option<Box<FileLogBuffer>> {
         let mut current_head = log_buffer_link.load(Acquire);
         let log_buffer_head_addr = addr_of_mut!(*log_buffer_head) as usize;
         while current_head != 0 && current_head != log_buffer_head_addr {
-            let current_head_ptr = current_head as *mut FileLogBuffer<S, Self>;
+            let current_head_ptr = current_head as *mut FileLogBuffer;
             // Safety: `current_head_ptr` not being zero was checked.
             log_buffer_head.lsn = unsafe { (*current_head_ptr).lsn };
             if let Err(actual) = log_buffer_link.compare_exchange(
@@ -524,7 +522,7 @@ impl<S: Sequencer> Drop for FileIO<S> {
 }
 
 impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
-    type LogBuffer = FileLogBuffer<S, FileIO<S>>;
+    type LogBuffer = Vec<MaybeUninit<u8>>;
 
     #[inline]
     fn recover(
@@ -616,16 +614,16 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 }
 
-impl<S: Sequencer, P: PersistenceLayer<S>> FileLogBuffer<S, P> {
+impl FileLogBuffer {
     /// Takes the next [`FileLogBuffer`] if the address if not `nil` or `0`.
-    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer<S, P>>> {
+    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer>> {
         if self.next == 0 {
             return None;
         } else if self.next == nil {
             self.next = 0;
             return None;
         }
-        let log_buffer_ptr = self.next as *mut FileLogBuffer<S, P>;
+        let log_buffer_ptr = self.next as *mut FileLogBuffer;
         // Safety: the pointer was provided by `Box::into_raw`.
         let log_buffer = unsafe { Box::from_raw(log_buffer_ptr) };
         self.next = 0;
@@ -633,28 +631,53 @@ impl<S: Sequencer, P: PersistenceLayer<S>> FileLogBuffer<S, P> {
     }
 }
 
-impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S, FileIO<S>> {
+impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
     #[inline]
-    fn record<W: FnOnce(&mut [u8])>(
-        &self,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _len: usize,
-        _writer: W,
+    fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
+        &mut self,
+        id: TransactionID,
+        journal_id: JournalID,
+        len: usize,
+        writer: W,
     ) -> Result<(), Error> {
+        let reserved = if self.is_empty() {
+            let header_len = size_of::<TransactionID>() + size_of::<JournalID>();
+            self.reserve(header_len + len);
+            id.to_le_bytes()
+                .iter()
+                .for_each(|i| self.push(MaybeUninit::new(*i)));
+            journal_id
+                .to_le_bytes()
+                .iter()
+                .for_each(|i| self.push(MaybeUninit::new(*i)));
+
+            // Safety: initialization is unnecessary.
+            self.resize_with(header_len + len, MaybeUninit::uninit);
+            &mut self[header_len..]
+        } else {
+            let prev_len = self.len();
+            self.resize_with(len, MaybeUninit::uninit);
+            &mut self[prev_len..]
+        };
+        debug_assert_eq!(reserved.len(), len);
+        writer(reserved);
         Ok(())
     }
 
     #[inline]
     fn flush(
-        self: Box<Self>,
+        self,
         persistence_layer: &FileIO<S>,
         _submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
-        let self_ptr = Box::into_raw(self);
-        let lsn =
-            FileIO::<S>::push_log_buffer(&persistence_layer.shared_data.log_buffer_link, self_ptr);
+        let mut file_log_buffer = Box::<FileLogBuffer>::default();
+        file_log_buffer.content = self;
+        let file_log_buffer_ptr = Box::into_raw(file_log_buffer);
+        let lsn = FileIO::<S>::push_log_buffer(
+            &persistence_layer.shared_data.log_buffer_link,
+            file_log_buffer_ptr,
+        );
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
         Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
@@ -685,10 +708,10 @@ mod test {
         let path = Path::new(DIR);
         let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
 
-        let log_buffer_1 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
-        let log_buffer_2 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
-        let log_buffer_3 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
-        let log_buffer_4 = Box::<FileLogBuffer<AtomicCounter, FileIO<AtomicCounter>>>::default();
+        let log_buffer_1 = Vec::<MaybeUninit<u8>>::new();
+        let log_buffer_2 = Vec::<MaybeUninit<u8>>::new();
+        let log_buffer_3 = Vec::<MaybeUninit<u8>>::new();
+        let log_buffer_4 = Vec::<MaybeUninit<u8>>::new();
         let (result_3, result_1, result_4, result_2) = match (
             log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
             log_buffer_1.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
