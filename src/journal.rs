@@ -29,7 +29,7 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     transaction: &'t Transaction<'d, S, P>,
 
     /// Own log buffer.
-    log_buffer: Option<Box<P::LogBuffer>>,
+    log_buffer: Option<P::LogBuffer>,
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
