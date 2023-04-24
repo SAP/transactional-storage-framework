@@ -567,22 +567,6 @@ impl<S: Sequencer> FileIO<S> {
     }
 }
 
-impl<S: Sequencer> Default for FileIO<S> {
-    /// Creates a default [`FileIO`].
-    ///
-    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
-    /// current working directory.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `0.log`, `1.log`, or `c.dat` could not be opened.
-    #[inline]
-    fn default() -> Self {
-        let path = Path::new("");
-        Self::with_path(path).expect("failed")
-    }
-}
-
 impl<S: Sequencer> Drop for FileIO<S> {
     #[inline]
     fn drop(&mut self) {
@@ -785,6 +769,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
         Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
     }
 
+    // TODO: generalize it, e.g., `trait Log`.
     #[inline]
     fn as_u8_slice(&self) -> &[u8] {
         let maybe_uninit_slice = self.as_slice();
