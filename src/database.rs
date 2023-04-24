@@ -8,6 +8,7 @@ use super::{
     Sequencer, Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
+use std::path::Path;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,10 +59,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::{AtomicCounter, Database, FileIO};
+    /// use std::path::Path;
     ///
     /// async {
     ///     let database: Database<AtomicCounter> = Database::with_persistence_layer(
-    ///         FileIO::default(), None, None).await.unwrap();
+    ///         FileIO::with_path(Path::new("empty")).unwrap(), None, None).await.unwrap();
     /// };
     /// ```
     #[inline]
@@ -128,9 +130,12 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
+    /// async {
+    ///     let database = Database::with_path(Path::new("transaction")).await.unwrap();
+    ///     let transaction = database.transaction();
+    /// };
     /// ```
     #[inline]
     #[must_use]
@@ -144,10 +149,12 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let snapshot = database.snapshot();
+    /// async {
+    ///     let database = Database::with_path(Path::new("snapshot")).await.unwrap();
+    ///     let snapshot = database.snapshot();
+    /// };
     /// ```
     #[inline]
     #[must_use]
@@ -161,9 +168,12 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
+    /// async {
+    ///     let database = Database::with_path(Path::new("access_controller")).await.unwrap();
+    ///     let access_controller = database.access_controller();
+    /// };
     /// ```
     #[inline]
     #[must_use]
@@ -181,13 +191,14 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Metadata};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let name = "hello".to_string();
-    /// let metadata = Metadata::default();
-    /// let transaction = database.transaction();
-    /// let mut journal = transaction.journal();
     /// async {
+    ///     let database = Database::with_path(Path::new("create_container")).await.unwrap();
+    ///     let name = "hello".to_string();
+    ///     let metadata = Metadata::default();
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
     ///     let result = database.create_container(name, metadata, &mut journal, None).await;
     ///     assert!(result.is_ok());
     /// };
@@ -223,14 +234,15 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Metadata};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let name = "hello";
-    /// let metadata = Metadata::default();
-    /// let new_name = "hi".to_string();
-    /// let transaction = database.transaction();
-    /// let mut journal = transaction.journal();
     /// async {
+    ///     let database = Database::with_path(Path::new("rename_container")).await.unwrap();
+    ///     let name = "hello";
+    ///     let metadata = Metadata::default();
+    ///     let new_name = "hi".to_string();
+    ///     let transaction = database.transaction();
+    ///     let mut journal = transaction.journal();
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
     ///     assert!(create_result.is_ok());
@@ -270,12 +282,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Metadata};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let name = "hello";
-    /// let metadata = Metadata::default();
     /// async {
+    ///     let database = Database::with_path(Path::new("get_container")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let name = "hello";
+    ///     let metadata = Metadata::default();
     ///     let mut journal = transaction.journal();
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
@@ -310,12 +323,13 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Metadata};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let name = "hello";
-    /// let metadata = Metadata::default();
     /// async {
+    ///     let database = Database::with_path(Path::new("drop_container")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let name = "hello";
+    ///     let metadata = Metadata::default();
     ///     let mut journal = transaction.journal();
     ///     let create_result =
     ///         database.create_container(name.to_string(), metadata, &mut journal, None).await;
@@ -359,33 +373,31 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     }
 }
 
-impl Default for Database<AtomicCounter, FileIO<AtomicCounter>> {
-    /// Creates an empty default [`Database`] instance.
+impl Database<AtomicCounter, FileIO<AtomicCounter>> {
+    /// Creates a new [`Database`] instance from the files in the specified path.
     ///
-    /// The type of the [`Sequencer`] is [`AtomicCounter`], and that of the persistence layer is
-    /// [`FileIO`] which uses `log.fdb`, `log_shadow.fdb`, and `checkpoint.fdb` files in the
-    /// current working directory.
+    /// The type of the sequencer is [`AtomicCounter`] and that of the persistence layer is
+    /// [`FileIO`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the persistence layer failed to recover the database, memory allocation
+    /// failed.
     ///
     /// # Examples
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
+    /// async {
+    ///     let database = Database::with_path(Path::new("empty")).await.unwrap();
+    /// };
     /// ```
     #[inline]
-    fn default() -> Self {
-        let kernel = Arc::new(Kernel {
-            sequencer: AtomicCounter::default(),
-            container_map: HashIndex::default(),
-            access_controller: AccessController::default(),
-            persistence_layer: FileIO::default(),
-        });
-        let task_processor = TaskProcessor::spawn(kernel.clone());
-        Database {
-            kernel,
-            task_processor,
-        }
+    pub async fn with_path(path: &Path) -> Result<Self, Error> {
+        let file_io = FileIO::<AtomicCounter>::with_path(path)?;
+        Self::with_persistence_layer(file_io, None, None).await
     }
 }
 
@@ -420,9 +432,8 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
 
 #[cfg(test)]
 mod test {
-    use crate::sequencer::AtomicCounter;
-    use crate::{Database, FileIO, Metadata};
-    use std::path::Path;
+    use super::*;
+    use crate::{Database, Metadata};
     use std::sync::Arc;
     use tokio::fs::remove_dir_all;
 
@@ -430,13 +441,7 @@ mod test {
     async fn basic() {
         const DIR: &str = "database_basic_test";
         let path = Path::new(DIR);
-
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database: Arc<Database<AtomicCounter>> = Arc::new(
-            Database::with_persistence_layer(file_io, None, None)
-                .await
-                .unwrap(),
-        );
+        let database = Arc::new(Database::with_path(path).await.unwrap());
         let transaction = database.transaction();
         let snapshot = transaction.snapshot();
         let mut journal = transaction.journal();
@@ -454,7 +459,6 @@ mod test {
         drop(snapshot);
         drop(transaction);
         drop(database);
-
         assert!(remove_dir_all(path).await.is_ok());
     }
 }

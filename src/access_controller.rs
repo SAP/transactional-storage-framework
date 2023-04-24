@@ -38,6 +38,7 @@ use std::time::Instant;
 /// ```
 /// use sap_tsf::{Database, ToObjectID};
 /// use std::num::NonZeroU32;
+/// use std::path::Path;
 ///
 /// // `O` represents a database object type.
 /// struct O(usize);
@@ -49,10 +50,11 @@ use std::time::Instant;
 ///    }
 /// }
 ///
-/// let database = Database::default();
-/// let access_controller = database.access_controller();
-///
 /// async {
+///     let database = Database::with_path(Path::new("example")).await.unwrap();
+///
+///     let access_controller = database.access_controller();
+///
 ///     let transaction = database.transaction();
 ///     let mut journal = transaction.journal();
 ///
@@ -244,6 +246,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// ```
     /// use sap_tsf::{Database, ToObjectID};
+    /// use std::path::Path;
     ///
     /// struct O(usize);
     ///
@@ -253,9 +256,10 @@ impl<S: Sequencer> AccessController<S> {
     ///    }
     /// }
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
+    ///
     /// async {
+    ///     let database = Database::with_path(Path::new("read")).await.unwrap();
+    ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
@@ -378,6 +382,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// ```
     /// use sap_tsf::{Database, ToObjectID};
+    /// use std::path::Path;
     ///
     /// struct O(usize);
     ///
@@ -387,9 +392,9 @@ impl<S: Sequencer> AccessController<S> {
     ///    }
     /// }
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
     /// async {
+    ///     let database = Database::with_path(Path::new("create")).await.unwrap();
+    ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
@@ -447,6 +452,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// ```
     /// use sap_tsf::{Database, ToObjectID};
+    /// use std::path::Path;
     ///
     /// struct O(usize);
     ///
@@ -456,9 +462,9 @@ impl<S: Sequencer> AccessController<S> {
     ///    }
     /// }
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
     /// async {
+    ///     let database = Database::with_path(Path::new("share")).await.unwrap();
+    ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
@@ -554,6 +560,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// ```
     /// use sap_tsf::{Database, ToObjectID};
+    /// use std::path::Path;
     ///
     /// struct O(usize);
     ///
@@ -563,9 +570,9 @@ impl<S: Sequencer> AccessController<S> {
     ///    }
     /// }
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
     /// async {
+    ///     let database = Database::with_path(Path::new("lock")).await.unwrap();
+    ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
@@ -662,6 +669,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// ```
     /// use sap_tsf::{Database, ToObjectID};
+    /// use std::path::Path;
     ///
     /// struct O(usize);
     ///
@@ -671,9 +679,9 @@ impl<S: Sequencer> AccessController<S> {
     ///    }
     /// }
     ///
-    /// let database = Database::default();
-    /// let access_controller = database.access_controller();
     /// async {
+    ///     let database = Database::with_path(Path::new("delete")).await.unwrap();
+    ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
     ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
@@ -2193,7 +2201,7 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, Database, FileIO};
+    use crate::{AtomicCounter, Database};
     use std::num::NonZeroU32;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
@@ -2247,10 +2255,7 @@ mod test {
     async fn read_snapshot() {
         const DIR: &str = "access_controller_read_snapshot_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Database::with_persistence_layer(file_io, None, None)
-            .await
-            .unwrap();
+        let database = Database::with_path(path).await.unwrap();
         let access_controller = database.access_controller();
         let mut snapshot = None;
         for access_action in [
@@ -2334,10 +2339,7 @@ mod test {
             for promotion in [AccessAction::Lock, AccessAction::Delete] {
                 const DIR: &str = "access_controller_promote_rewind_test";
                 let path = Path::new(DIR);
-                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                let database = Database::with_persistence_layer(file_io, None, None)
-                    .await
-                    .unwrap();
+                let database = Database::with_path(path).await.unwrap();
                 let access_controller = database.access_controller();
                 let mut transaction = database.transaction();
                 let mut journal = transaction.journal();
@@ -2418,10 +2420,7 @@ mod test {
                 for promotion in [AccessAction::Lock, AccessAction::Delete] {
                     const DIR: &str = "access_controller_promote_wait_test";
                     let path = Path::new(DIR);
-                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                    let database = Database::with_persistence_layer(file_io, None, None)
-                        .await
-                        .unwrap();
+                    let database = Database::with_path(path).await.unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     for i in 0..num_shared_locks {
@@ -2470,10 +2469,7 @@ mod test {
                 for promotion in [AccessAction::Lock, AccessAction::Delete] {
                     const DIR: &str = "access_controller_promote_commit_test";
                     let path = Path::new(DIR);
-                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                    let database = Database::with_persistence_layer(file_io, None, None)
-                        .await
-                        .unwrap();
+                    let database = Database::with_path(path).await.unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     for i in 0..num_shared_locks {
@@ -2551,10 +2547,7 @@ mod test {
                     ] {
                         const DIR: &str = "access_controller_tx_access_test";
                         let path = Path::new(DIR);
-                        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                        let database = Database::with_persistence_layer(file_io, None, None)
-                            .await
-                            .unwrap();
+                        let database = Database::with_path(path).await.unwrap();
                         let access_controller = database.access_controller();
                         let transaction = database.transaction();
                         let mut journal = transaction.journal();
@@ -2641,10 +2634,7 @@ mod test {
                 ] {
                     const DIR: &str = "access_controller_action_wait_test";
                     let path = Path::new(DIR);
-                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                    let database = Database::with_persistence_layer(file_io, None, None)
-                        .await
-                        .unwrap();
+                    let database = Database::with_path(path).await.unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     let mut journal = transaction.journal();
@@ -2715,10 +2705,7 @@ mod test {
             ] {
                 const DIR: &str = "access_controller_action_timeout_test";
                 let path = Path::new(DIR);
-                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                let database = Database::with_persistence_layer(file_io, None, None)
-                    .await
-                    .unwrap();
+                let database = Database::with_path(path).await.unwrap();
                 let access_controller = database.access_controller();
                 let transaction = database.transaction();
                 let mut journal = transaction.journal();
@@ -2806,10 +2793,7 @@ mod test {
             ] {
                 const DIR: &str = "access_controller_object_lifecycle_test";
                 let path = Path::new(DIR);
-                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-                let database = Database::with_persistence_layer(file_io, None, None)
-                    .await
-                    .unwrap();
+                let database = Database::with_path(path).await.unwrap();
                 let access_controller = database.access_controller();
                 let mut deleted = 0;
                 let condition = |i: &u64| *i <= database.sequencer().min(Relaxed);
@@ -2866,12 +2850,7 @@ mod test {
     async fn parallel_mutex() {
         const DIR: &str = "access_controller_parallel_mutex_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Arc::new(
-            Database::with_persistence_layer(file_io, None, None)
-                .await
-                .unwrap(),
-        );
+        let database = Arc::new(Database::with_path(path).await.unwrap());
         let num_tasks = 16;
         let num_operations = 256;
         let barrier = Arc::new(Barrier::new(num_tasks));
@@ -2932,12 +2911,7 @@ mod test {
     async fn parallel_create_delete() {
         const DIR: &str = "access_controller_parallel_create_delete_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Arc::new(
-            Database::with_persistence_layer(file_io, None, None)
-                .await
-                .unwrap(),
-        );
+        let database = Arc::new(Database::with_path(path).await.unwrap());
         let num_tasks = 16;
         let barrier = Arc::new(Barrier::new(num_tasks));
         let data = Arc::new(AtomicUsize::new(usize::MAX));

@@ -71,29 +71,32 @@ let database = Database::default();
 ```rust
 use sap_tsf::Database;
 use std::num::NonZeroU32;
+use std::path::Path;
 
-let database = Database::default();
+async {
+    let database = Database::with_path(Path::new("example")).await.unwrap();
 
-let mut transaction = database.transaction();
+    let mut transaction = database.transaction();
 
-// `Journal` is analogous to a sub-transaction.
-let journal_1 = transaction.journal();
+    // `Journal` is analogous to a sub-transaction.
+    let journal_1 = transaction.journal();
 
-// A `Journal` cannot be shared among tasks, but multiple `Journal` instances can be created.
-let journal_2 = transaction.journal();
-let journal_3 = transaction.journal();
+    // A `Journal` cannot be shared among tasks, but multiple `Journal` instances can be created.
+    let journal_2 = transaction.journal();
+    let journal_3 = transaction.journal();
 
-// A `Journal` can be submitted individually, and each submitted `Journal` is sequenced.
-assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
-assert_eq!(journal_3.submit().ok(), NonZeroU32::new(2));
+    // A `Journal` can be submitted individually, and each submitted `Journal` is sequenced.
+    assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
+    assert_eq!(journal_3.submit().ok(), NonZeroU32::new(2));
 
-// Drop a `Journal` if database modification carried out by the `Journal` needs to be rolled back.
-drop(journal_2);
+    // Drop a `Journal` if database modification carried out by the `Journal` needs to be rolled back.
+    drop(journal_2);
 
-// It is possible to roll back the transaction to a certain point.
-//
-// Rewinding the transaction to `1` rolls back `journal_3`.
-transaction.rewind(1);
+    // It is possible to roll back the transaction to a certain point.
+    //
+    // Rewinding the transaction to `1` rolls back `journal_3`.
+    transaction.rewind(1);
+};
 ```
 
 ### AccessController
@@ -104,6 +107,7 @@ transaction.rewind(1);
 
 use sap_tsf::{Database, ToObjectID};
 use std::num::NonZeroU32;
+use std::path::Path;
 
 // `O` represents a database object type.
 struct O(usize);
@@ -116,10 +120,10 @@ impl ToObjectID for O {
     }
 }
 
-let database = Database::default();
-let access_controller = database.access_controller();
-
 async {
+    let database = Database::with_path(Path::new("example")).await.unwrap();
+    let access_controller = database.access_controller();
+
     let transaction = database.transaction();
     let mut journal = transaction.journal();
 
@@ -170,14 +174,16 @@ async {
 
 ```rust
 use sap_tsf::Database;
+use std::path::Path;
 
-let database = Database::default();
-
-let name = "hello".to_string();
-let metadata = Metadata::default();
-let transaction = database.transaction();
-let mut journal = transaction.start();
-let container_handle = database.create_container(name, metadata, &mut journal, None).await;
+async {
+    let database = Database::with_path(Path::new("example")).await.unwrap();
+    let name = "hello".to_string();
+    let metadata = Metadata::default();
+    let transaction = database.transaction();
+    let mut journal = transaction.start();
+    let container_handle = database.create_container(name, metadata, &mut journal, None).await;
+};
 ```
 
 ### PersistenceLayer

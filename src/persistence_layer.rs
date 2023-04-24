@@ -385,9 +385,9 @@ impl<S: Sequencer> FileIO<S> {
     /// Returns an error if memory allocation failed, spawning a thread failed, the specified
     /// directory could not be created, or database files could not be opened.
     #[inline]
-    pub fn with_path(path: &Path) -> Result<Self, &str> {
+    pub fn with_path(path: &Path) -> Result<Self, Error> {
         if create_dir_all(path).is_err() {
-            return Err("the path could not be created");
+            return Err(Error::Generic("the path could not be created"));
         }
 
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
@@ -419,17 +419,17 @@ impl<S: Sequencer> FileIO<S> {
     }
 
     /// Opens the specified file.
-    fn open_file<'f>(path_buffer: &mut PathBuf, file_name: &'f str) -> Result<File, &'f str> {
+    fn open_file(path_buffer: &mut PathBuf, file_name: &'static str) -> Result<File, Error> {
         path_buffer.push(Path::new(file_name));
         let Some(file_path) = path_buffer.to_str() else {
-            return Err(file_name);
+            return Err(Error::Generic(file_name));
         };
         let Ok(file) = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .append(true)
                 .open(file_path) else {
-                return Err(file_name);
+                return Err(Error::Generic(file_name));
             };
         path_buffer.pop();
         Ok(file)
@@ -564,22 +564,6 @@ impl<S: Sequencer> FileIO<S> {
             }
         }
         None
-    }
-}
-
-impl<S: Sequencer> Default for FileIO<S> {
-    /// Creates a default [`FileIO`].
-    ///
-    /// The default log and checkpoint files are set to `0.log`, `1.log`, and `c.dat` in the
-    /// current working directory.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `0.log`, `1.log`, or `c.dat` could not be opened.
-    #[inline]
-    fn default() -> Self {
-        let path = Path::new("");
-        Self::with_path(path).expect("failed")
     }
 }
 
@@ -785,6 +769,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
         Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
     }
 
+    // TODO: generalize it, e.g., `trait Log`.
     #[inline]
     fn as_u8_slice(&self) -> &[u8] {
         let maybe_uninit_slice = self.as_slice();
