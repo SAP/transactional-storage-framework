@@ -561,13 +561,19 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Database;
-    use std::num::NonZeroU32;
+    use crate::{AtomicCounter, Database, FileIO};
+    use std::{num::NonZeroU32, path::Path};
+    use tokio::fs::remove_dir_all;
 
-    #[test]
-    fn journal() {
-        let storage = Database::default();
-        let transaction = storage.transaction();
+    #[tokio::test]
+    async fn basic() {
+        const DIR: &str = "journal_basic_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Database::with_persistence_layer(file_io, None, None)
+            .await
+            .unwrap();
+        let transaction = database.transaction();
         let journal_1 = transaction.journal();
         assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
         let journal_2 = transaction.journal();
@@ -576,5 +582,7 @@ mod tests {
         let journal_4 = transaction.journal();
         assert_eq!(journal_4.submit().ok(), NonZeroU32::new(3));
         assert_eq!(journal_3.submit().ok(), NonZeroU32::new(4));
+
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }

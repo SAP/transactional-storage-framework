@@ -2193,12 +2193,14 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, Database};
+    use crate::{AtomicCounter, Database, FileIO};
     use std::num::NonZeroU32;
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::fs::remove_dir_all;
     use tokio::sync::Barrier;
 
     static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
@@ -2243,7 +2245,12 @@ mod test {
 
     #[tokio::test]
     async fn read_snapshot() {
-        let database = Database::default();
+        const DIR: &str = "access_controller_read_snapshot_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Database::with_persistence_layer(file_io, None, None)
+            .await
+            .unwrap();
         let access_controller = database.access_controller();
         let mut snapshot = None;
         for access_action in [
@@ -2318,13 +2325,19 @@ mod test {
                 .await,
             Ok(true),
         );
+        assert!(remove_dir_all(path).await.is_ok());
     }
 
     #[tokio::test]
     async fn access_promote_rewind() {
         for num_shared_locks in 0_u32..4_u32 {
-            for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
-                let database = Database::default();
+            for promotion in [AccessAction::Lock, AccessAction::Delete] {
+                const DIR: &str = "access_controller_promote_rewind_test";
+                let path = Path::new(DIR);
+                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                let database = Database::with_persistence_layer(file_io, None, None)
+                    .await
+                    .unwrap();
                 let access_controller = database.access_controller();
                 let mut transaction = database.transaction();
                 let mut journal = transaction.journal();
@@ -2344,8 +2357,7 @@ mod test {
                 }
                 if num_shared_locks != 0 {
                     assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
+                        take_access_action(promotion, access_controller, &mut journal, None).await,
                         Err(Error::SerializationFailure),
                     );
                 }
@@ -2353,19 +2365,17 @@ mod test {
                 for _ in 0..2 {
                     let mut journal = transaction.journal();
                     assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
+                        take_access_action(promotion, access_controller, &mut journal, None).await,
                         Ok(true)
                     );
                     assert_eq!(journal.submit().ok(), NonZeroU32::new(num_shared_locks + 1));
                     let mut journal = transaction.journal();
                     assert_eq!(
-                        take_access_action(promotion_action, access_controller, &mut journal, None)
-                            .await,
+                        take_access_action(promotion, access_controller, &mut journal, None).await,
                         Ok(false)
                     );
                     drop(journal);
-                    if promotion_action == AccessAction::Lock {
+                    if promotion == AccessAction::Lock {
                         for _ in 0..2 {
                             let mut journal = transaction.journal();
                             assert_eq!(
@@ -2396,6 +2406,7 @@ mod test {
                         Ok(NonZeroU32::new(num_shared_locks))
                     );
                 }
+                assert!(remove_dir_all(path).await.is_ok());
             }
         }
     }
@@ -2403,9 +2414,14 @@ mod test {
     #[tokio::test]
     async fn access_promote_wait() {
         for num_shared_locks in 1..3 {
-            for block_action in [AccessAction::Lock, AccessAction::Delete] {
-                for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
-                    let database = Database::default();
+            for block in [AccessAction::Lock, AccessAction::Delete] {
+                for promotion in [AccessAction::Lock, AccessAction::Delete] {
+                    const DIR: &str = "access_controller_promote_wait_test";
+                    let path = Path::new(DIR);
+                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                    let database = Database::with_persistence_layer(file_io, None, None)
+                        .await
+                        .unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     for i in 0..num_shared_locks {
@@ -2427,13 +2443,13 @@ mod test {
                     let mut journal = transaction.journal();
                     let (blocker_result, result) = futures::join!(
                         take_access_action(
-                            block_action,
+                            block,
                             access_controller,
                             &mut blocker_journal,
                             Some(Instant::now() + TIMEOUT_EXPECTED)
                         ),
                         take_access_action(
-                            promotion_action,
+                            promotion,
                             access_controller,
                             &mut journal,
                             Some(Instant::now() + TIMEOUT_UNEXPECTED)
@@ -2441,6 +2457,7 @@ mod test {
                     );
                     assert_eq!(result, Ok(true));
                     assert_eq!(blocker_result, Err(Error::Timeout));
+                    assert!(remove_dir_all(path).await.is_ok());
                 }
             }
         }
@@ -2450,8 +2467,13 @@ mod test {
     async fn access_promote_commit() {
         for num_shared_locks in 1..3 {
             for waiting_action in [AccessAction::Lock, AccessAction::Delete] {
-                for promotion_action in [AccessAction::Lock, AccessAction::Delete] {
-                    let database = Database::default();
+                for promotion in [AccessAction::Lock, AccessAction::Delete] {
+                    const DIR: &str = "access_controller_promote_commit_test";
+                    let path = Path::new(DIR);
+                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                    let database = Database::with_persistence_layer(file_io, None, None)
+                        .await
+                        .unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     for i in 0..num_shared_locks {
@@ -2481,7 +2503,7 @@ mod test {
                             let mut journal = transaction.journal();
                             assert_eq!(
                                 take_access_action(
-                                    promotion_action,
+                                    promotion,
                                     access_controller,
                                     &mut journal,
                                     Some(Instant::now() + TIMEOUT_UNEXPECTED),
@@ -2496,11 +2518,12 @@ mod test {
                             assert!(transaction.commit().await.is_ok());
                         }
                     );
-                    if promotion_action == AccessAction::Delete {
+                    if promotion == AccessAction::Delete {
                         assert_eq!(waiting_result, Err(Error::SerializationFailure));
                     } else {
                         assert_eq!(waiting_result, Ok(true));
                     }
+                    assert!(remove_dir_all(path).await.is_ok());
                 }
             }
         }
@@ -2509,7 +2532,7 @@ mod test {
     #[tokio::test]
     async fn access_tx_access() {
         for serial_execution in [false, true] {
-            for access_action in [
+            for access in [
                 AccessAction::Create,
                 AccessAction::Share,
                 AccessAction::Lock,
@@ -2520,24 +2543,23 @@ mod test {
                     TransactionAction::Rewind,
                     TransactionAction::Rollback,
                 ] {
-                    for post_access_action in [
+                    for post_access in [
                         AccessAction::Create,
                         AccessAction::Share,
                         AccessAction::Lock,
                         AccessAction::Delete,
                     ] {
-                        let database = Database::default();
+                        const DIR: &str = "access_controller_tx_access_test";
+                        let path = Path::new(DIR);
+                        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                        let database = Database::with_persistence_layer(file_io, None, None)
+                            .await
+                            .unwrap();
                         let access_controller = database.access_controller();
                         let transaction = database.transaction();
                         let mut journal = transaction.journal();
                         assert_eq!(
-                            take_access_action(
-                                access_action,
-                                access_controller,
-                                &mut journal,
-                                None
-                            )
-                            .await,
+                            take_access_action(access, access_controller, &mut journal, None).await,
                             Ok(true)
                         );
                         if transaction_action == TransactionAction::Rewind {
@@ -2556,7 +2578,7 @@ mod test {
                             let transaction = database.transaction();
                             let mut journal = transaction.journal();
                             take_access_action(
-                                post_access_action,
+                                post_access,
                                 access_controller,
                                 &mut journal,
                                 Some(Instant::now() + TIMEOUT_UNEXPECTED),
@@ -2571,24 +2593,26 @@ mod test {
                             futures::join!(transaction_action_runner, post_action_runner).1
                         };
 
-                        if ((access_action != AccessAction::Create
+                        if ((access != AccessAction::Create
                             || transaction_action == TransactionAction::Commit)
-                            && post_access_action == AccessAction::Create)
-                            || (access_action == AccessAction::Delete
+                            && post_access == AccessAction::Create)
+                            || (access == AccessAction::Delete
                                 && transaction_action == TransactionAction::Commit)
                         {
                             assert_eq!(
                                 result,
                                 Err(Error::SerializationFailure),
-                                "{access_action:?} {transaction_action:?} {post_access_action:?}"
+                                "{access:?} {transaction_action:?} {post_access:?}"
                             );
                         } else {
                             assert_eq!(
                                 result,
                                 Ok(true),
-                                "{access_action:?} {transaction_action:?} {post_access_action:?}"
+                                "{access:?} {transaction_action:?} {post_access:?}"
                             );
                         }
+
+                        assert!(remove_dir_all(path).await.is_ok());
                     }
                 }
             }
@@ -2597,36 +2621,35 @@ mod test {
 
     #[tokio::test]
     async fn action_wait() {
-        for pre_access_action in [
+        for pre_access in [
             AccessAction::Create,
             AccessAction::Share,
             AccessAction::Lock,
             AccessAction::Delete,
         ] {
-            for access_action in [
+            for access in [
                 AccessAction::Create,
                 AccessAction::Share,
                 AccessAction::Lock,
                 AccessAction::Delete,
             ] {
-                for post_access_action in [
+                for post_access in [
                     AccessAction::Create,
                     AccessAction::Share,
                     AccessAction::Lock,
                     AccessAction::Delete,
                 ] {
-                    let database = Database::default();
+                    const DIR: &str = "access_controller_action_wait_test";
+                    let path = Path::new(DIR);
+                    let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                    let database = Database::with_persistence_layer(file_io, None, None)
+                        .await
+                        .unwrap();
                     let access_controller = database.access_controller();
                     let transaction = database.transaction();
                     let mut journal = transaction.journal();
                     assert_eq!(
-                        take_access_action(
-                            pre_access_action,
-                            access_controller,
-                            &mut journal,
-                            None
-                        )
-                        .await,
+                        take_access_action(pre_access, access_controller, &mut journal, None).await,
                         Ok(true)
                     );
                     assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
@@ -2635,7 +2658,7 @@ mod test {
                         let transaction_outer = database.transaction();
                         let mut journal_outer = transaction_outer.journal();
                         take_access_action(
-                            access_action,
+                            access,
                             access_controller,
                             &mut journal_outer,
                             Some(Instant::now() + TIMEOUT_UNEXPECTED),
@@ -2646,7 +2669,7 @@ mod test {
                         let transaction_inner = database.transaction();
                         let mut journal_inner = transaction_inner.journal();
                         take_access_action(
-                            post_access_action,
+                            post_access,
                             access_controller,
                             &mut journal_inner,
                             Some(Instant::now() + TIMEOUT_UNEXPECTED),
@@ -2658,7 +2681,7 @@ mod test {
                         action_runner,
                         post_action_runner
                     );
-                    match (pre_access_action, access_action, post_access_action) {
+                    match (pre_access, access, post_access) {
                         (_, AccessAction::Create, _) => {
                             assert_eq!(result, Err(Error::SerializationFailure));
                         }
@@ -2674,6 +2697,8 @@ mod test {
                             assert_eq!(result_post, Err(Error::SerializationFailure));
                         }
                     };
+
+                    assert!(remove_dir_all(path).await.is_ok());
                 }
             }
         }
@@ -2682,18 +2707,23 @@ mod test {
     #[tokio::test]
     async fn action_timeout() {
         for commit in [false, true] {
-            for access_action in [
+            for access in [
                 AccessAction::Create,
                 AccessAction::Share,
                 AccessAction::Lock,
                 AccessAction::Delete,
             ] {
-                let database = Database::default();
+                const DIR: &str = "access_controller_action_timeout_test";
+                let path = Path::new(DIR);
+                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                let database = Database::with_persistence_layer(file_io, None, None)
+                    .await
+                    .unwrap();
                 let access_controller = database.access_controller();
                 let transaction = database.transaction();
                 let mut journal = transaction.journal();
                 assert_eq!(
-                    take_access_action(access_action, access_controller, &mut journal, None).await,
+                    take_access_action(access, access_controller, &mut journal, None).await,
                     Ok(true)
                 );
                 assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
@@ -2703,9 +2733,9 @@ mod test {
                     access_controller
                         .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED),)
                         .await,
-                    Ok(access_action != AccessAction::Create),
+                    Ok(access != AccessAction::Create),
                 );
-                for post_access_action in [
+                for post_access in [
                     AccessAction::Create,
                     AccessAction::Share,
                     AccessAction::Lock,
@@ -2714,30 +2744,23 @@ mod test {
                     let transaction = database.transaction();
                     let mut journal = transaction.journal();
                     let result = take_access_action(
-                        post_access_action,
+                        post_access,
                         access_controller,
                         &mut journal,
                         Some(Instant::now() + TIMEOUT_EXPECTED),
                     )
                     .await;
-                    if access_action == AccessAction::Share
-                        && post_access_action == AccessAction::Share
-                    {
+                    if access == AccessAction::Share && post_access == AccessAction::Share {
                         assert_eq!(result, Ok(true));
-                    } else if access_action != AccessAction::Create
-                        && post_access_action == AccessAction::Create
+                    } else if access != AccessAction::Create && post_access == AccessAction::Create
                     {
                         assert_eq!(
                             result,
                             Err(Error::SerializationFailure),
-                            "{access_action:?} {post_access_action:?}"
+                            "{access:?} {post_access:?}"
                         );
                     } else {
-                        assert_eq!(
-                            result,
-                            Err(Error::Timeout),
-                            "{access_action:?} {post_access_action:?}"
-                        );
+                        assert_eq!(result, Err(Error::Timeout), "{access:?} {post_access:?}");
                     }
                     drop(journal);
                     assert!(transaction.commit().await.is_ok());
@@ -2746,10 +2769,10 @@ mod test {
                 let result = access_controller
                     .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                     .await;
-                if access_action == AccessAction::Create || access_action == AccessAction::Delete {
-                    assert_eq!(result, Err(Error::Timeout), "{access_action:?}");
+                if access == AccessAction::Create || access == AccessAction::Delete {
+                    assert_eq!(result, Err(Error::Timeout), "{access:?}");
                 } else {
-                    assert_eq!(result, Ok(true), "{access_action:?}");
+                    assert_eq!(result, Ok(true), "{access:?}");
                 }
 
                 if commit {
@@ -2758,29 +2781,22 @@ mod test {
                     let result = access_controller
                         .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                         .await;
-                    assert_eq!(
-                        result,
-                        Ok(access_action != AccessAction::Delete),
-                        "{access_action:?}"
-                    );
+                    assert_eq!(result, Ok(access != AccessAction::Delete), "{access:?}");
                 } else {
                     drop(prepared);
                     let snapshot = database.snapshot();
                     let result = access_controller
                         .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                         .await;
-                    assert_eq!(
-                        result,
-                        Ok(access_action != AccessAction::Create),
-                        "{access_action:?}"
-                    );
+                    assert_eq!(result, Ok(access != AccessAction::Create), "{access:?}");
                 }
+                assert!(remove_dir_all(path).await.is_ok());
             }
         }
     }
 
     #[tokio::test]
-    async fn lifecycle() {
+    async fn object_lifecycle() {
         for commit in [false, true] {
             for access_action in [
                 AccessAction::Create,
@@ -2788,7 +2804,12 @@ mod test {
                 AccessAction::Lock,
                 AccessAction::Delete,
             ] {
-                let database = Database::default();
+                const DIR: &str = "access_controller_object_lifecycle_test";
+                let path = Path::new(DIR);
+                let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+                let database = Database::with_persistence_layer(file_io, None, None)
+                    .await
+                    .unwrap();
                 let access_controller = database.access_controller();
                 let mut deleted = 0;
                 let condition = |i: &u64| *i <= database.sequencer().min(Relaxed);
@@ -2836,16 +2857,24 @@ mod test {
                     deleted == 2,
                     commit && access_action == AccessAction::Delete
                 );
+                assert!(remove_dir_all(path).await.is_ok());
             }
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn parallel_mutex() {
+        const DIR: &str = "access_controller_parallel_mutex_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Arc::new(
+            Database::with_persistence_layer(file_io, None, None)
+                .await
+                .unwrap(),
+        );
         let num_tasks = 16;
         let num_operations = 256;
         let barrier = Arc::new(Barrier::new(num_tasks));
-        let database = Arc::new(Database::default());
         let data = Arc::new(AtomicUsize::default());
         let mut task_handles = Vec::with_capacity(num_tasks);
         for _ in 0..num_tasks {
@@ -2896,13 +2925,21 @@ mod test {
             assert!(r.is_ok());
         }
         assert_eq!(data.load(Relaxed), num_operations * num_tasks);
+        assert!(remove_dir_all(path).await.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn parallel_create_delete() {
+        const DIR: &str = "access_controller_parallel_create_delete_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Arc::new(
+            Database::with_persistence_layer(file_io, None, None)
+                .await
+                .unwrap(),
+        );
         let num_tasks = 16;
         let barrier = Arc::new(Barrier::new(num_tasks));
-        let database = Arc::new(Database::default());
         let data = Arc::new(AtomicUsize::new(usize::MAX));
         let mut task_handles = Vec::with_capacity(num_tasks);
         for _ in 0..num_tasks {
@@ -2977,5 +3014,7 @@ mod test {
             assert!(r.is_ok());
         }
         assert_eq!(data.load(Relaxed), num_tasks * 2);
+        drop(database);
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }

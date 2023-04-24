@@ -169,7 +169,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// let snapshot = transaction.snapshot();
     /// ```
     #[inline]
-    pub fn snapshot(&self) -> Snapshot<S> {
+    pub fn snapshot<'t>(&'t self) -> Snapshot<'d, 't, '_, S> {
         Snapshot::from_transaction(self.database, self.transaction_snapshot(self.now()))
     }
 
@@ -597,8 +597,9 @@ impl<S: Sequencer> Anchor<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::Barrier;
+    use crate::{AtomicCounter, FileIO};
+    use std::{path::Path, sync::Arc};
+    use tokio::{fs::remove_dir_all, sync::Barrier};
 
     /// Helper that prolongs the lifetime of a [`Transaction`] to send it to a spawned task.
     fn prolong_transaction<S: Sequencer, P: PersistenceLayer<S>>(
@@ -609,17 +610,29 @@ mod test {
     }
 
     #[tokio::test]
-    async fn transaction() {
-        let database = Database::default();
+    async fn basic() {
+        const DIR: &str = "transaction_basic_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Database::with_persistence_layer(file_io, None, None)
+            .await
+            .unwrap();
         let transaction = database.transaction();
         assert!(transaction.commit().await.is_ok());
+        drop(database);
+        assert!(remove_dir_all(path).await.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn rewind() {
+        const DIR: &str = "transaction_rewind_test";
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Database::with_persistence_layer(file_io, None, None)
+            .await
+            .unwrap();
         let num_tasks = 16_u32;
         let barrier = Arc::new(Barrier::new(num_tasks as usize));
-        let database = Arc::new(Database::default());
         let mut transaction = Arc::new(prolong_transaction(database.transaction()));
         let mut task_handles = Vec::with_capacity(num_tasks as usize);
         for _ in 0..num_tasks {
@@ -638,7 +651,7 @@ mod test {
             assert!(r.is_ok());
         }
 
-        let num_submitted_journals = transaction.now().map_or(0, |i| i.get());
+        let num_submitted_journals = transaction.now().map_or(0, NonZeroU32::get);
         for i in 0..num_submitted_journals {
             assert_eq!(
                 Arc::get_mut(&mut transaction)
@@ -654,5 +667,7 @@ mod test {
             );
         }
         assert!(transaction.now().is_none());
+        drop(database);
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }
