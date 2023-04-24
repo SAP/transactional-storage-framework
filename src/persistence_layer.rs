@@ -8,12 +8,13 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::Future;
+use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::mem::{size_of, MaybeUninit};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::ptr::addr_of_mut;
+use std::ptr::{addr_of, addr_of_mut};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -47,12 +48,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// # Errors
     ///
     /// Returns an [`Error`] if the database could not be recovered.
-    fn recover(
-        &self,
-        database: &mut Database<S, Self>,
+    fn recover<'d, 'p>(
+        &'p self,
+        database: &'d mut Database<S, Self>,
         until: Option<S::Instant>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> Result<AwaitRecovery<'d, 'p, S, Self>, Error>;
 
     /// Backs up the complete database.
     ///
@@ -143,7 +144,16 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+
+    /// Reads a log record during recovery.
+    ///
+    /// Returns `None` if there are no more log records to read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if reading data from files failed.
+    fn read_log_record(&self, waker: &Waker) -> Result<Option<Box<[u8]>>, Error>;
 }
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
@@ -176,6 +186,9 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
         submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, P>, Error>;
+
+    /// Expresses itself as a `u8` slice.
+    fn as_u8_slice(&self) -> &[u8];
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
@@ -199,6 +212,25 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     _phantom: PhantomData<S>,
 }
 
+/// [`AwaitRecovery`] is returned by a [`PersistenceLayer`] after triggering a database recovery.
+///
+/// Dropping an [`AwaitRecovery`] without awaiting it is allowed if a timeout value is specified.
+#[derive(Debug)]
+pub struct AwaitRecovery<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> {
+    /// The database to recover.
+    #[allow(dead_code)]
+    database: &'d mut Database<S, P>,
+
+    /// The persistence layer from which the data is read.
+    persistence_layer: &'p P,
+
+    /// The logical instant associated with the recovered database snapshot.
+    recovered: S::Instant,
+
+    /// The deadline of the IO operation.
+    deadline: Option<Instant>,
+}
+
 /// [`File`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
 /// [`File`] spawns a thread for blocking IO operation.
@@ -217,7 +249,7 @@ pub struct FileIO<S: Sequencer> {
     shared_data: Arc<FileIOSharedData>,
 
     /// The IO task sender.
-    sender: SyncSender<IOTask>,
+    sender: SyncSender<IOTask<S>>,
 
     /// This pacifies `Clippy` complaining the lack of usage of `S`.
     _phantom: PhantomData<S>,
@@ -237,9 +269,12 @@ pub struct FileLogBuffer {
 }
 
 #[derive(Debug)]
-pub enum IOTask {
+pub enum IOTask<S: Sequencer> {
     /// The [`FileIO`] needs to flush log buffers.
     Flush,
+
+    /// The [`FileIO`] needs to recover the database.
+    Recover(Option<S::Instant>),
 
     /// The [`FileIO`] is shutting down.
     Shutdown,
@@ -296,7 +331,10 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(result) = self.persistence_layer.check(self.lsn, cx.waker()) {
+        if let Some(result) = self
+            .persistence_layer
+            .check_io_completion(self.lsn, cx.waker())
+        {
             Poll::Ready(result)
         } else if self
             .deadline
@@ -307,6 +345,31 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
         } else {
             // It assumes that the persistence layer will wake up the executor when ready.
             Poll::Pending
+        }
+    }
+}
+
+impl<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'d, 'p, S, P> {
+    type Output = Result<S::Instant, Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.persistence_layer.read_log_record(cx.waker()) {
+            Ok(Some(_log_record)) => {
+                // TODO: implement it.
+                if self
+                    .deadline
+                    .as_ref()
+                    .map_or(false, |d| *d < Instant::now())
+                {
+                    Poll::Ready(Err(Error::Timeout))
+                } else {
+                    // It assumes that the persistence layer will wake up the executor when ready.
+                    Poll::Pending
+                }
+            }
+            Ok(None) => Poll::Ready(Ok(self.recovered)),
+            Err(error) => Poll::Ready(Err(error)),
         }
     }
 }
@@ -336,7 +399,8 @@ impl<S: Sequencer> FileIO<S> {
         let mut data1 = Self::open_file(&mut path_buffer, "1.dat")?;
         let shared_data = Arc::new(FileIOSharedData::default());
         let shared_data_clone = shared_data.clone();
-        let (sender, mut receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
+        let (sender, mut receiver) =
+            mpsc::sync_channel::<IOTask<S>>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             worker: Some(thread::spawn(move || {
                 Self::process(
@@ -363,7 +427,7 @@ impl<S: Sequencer> FileIO<S> {
         let Ok(file) = OpenOptions::new()
                 .create(true)
                 .read(true)
-                .write(true)
+                .append(true)
                 .open(file_path) else {
                 return Err(file_name);
             };
@@ -373,13 +437,16 @@ impl<S: Sequencer> FileIO<S> {
 
     /// Processes IO tasks.
     fn process(
-        _log0: &mut File,
+        log0: &mut File,
         _log1: &mut File,
         _data0: &mut File,
         _data1: &mut File,
-        receiver: &mut Receiver<IOTask>,
+        receiver: &mut Receiver<IOTask<S>>,
         shared_data: &FileIOSharedData,
     ) {
+        let mut log_writer = BufWriter::new(log0);
+        let mut last_flushed_lsn = 0;
+
         // Insert the log buffer head to force the log sequence number ever increasing.
         let mut log_buffer_head = FileLogBuffer::default();
         let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
@@ -391,26 +458,36 @@ impl<S: Sequencer> FileIO<S> {
         while let Ok(task) = receiver.recv() {
             match task {
                 IOTask::Flush => (),
+                IOTask::Recover(_until) => (),
                 IOTask::Shutdown => break,
             }
             if let Some(mut log_buffer) =
                 Self::take_log_buffer_link(&shared_data.log_buffer_link, &mut log_buffer_head)
             {
+                let first_lsn = last_flushed_lsn;
                 loop {
-                    // TODO: implement it.
-                    debug_assert!(shared_data.last_flushed_lsn.load(Relaxed) < log_buffer.lsn);
-                    shared_data.last_flushed_lsn.store(log_buffer.lsn, Release);
-                    if let Ok(mut waker_map) = shared_data.waker_map.lock() {
-                        if let Some(waker) = waker_map.remove(&log_buffer.lsn) {
-                            waker.wake();
-                        }
-                    }
+                    log_writer
+                        .write_all(BufferredLogger::<S, Self>::as_u8_slice(&log_buffer.content))
+                        .expect("write failed");
+                    debug_assert!(last_flushed_lsn < log_buffer.lsn);
+                    last_flushed_lsn = log_buffer.lsn;
                     if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr)
                     {
                         log_buffer = next_log_buffer;
                     } else {
                         drop(log_buffer);
                         break;
+                    }
+                }
+                log_writer.flush().expect("flush failed");
+                shared_data
+                    .last_flushed_lsn
+                    .store(last_flushed_lsn, Release);
+                if let Ok(mut waker_map) = shared_data.waker_map.lock() {
+                    for lsn in first_lsn + 1..=last_flushed_lsn {
+                        if let Some(waker) = waker_map.remove(&lsn) {
+                            waker.wake();
+                        }
                     }
                 }
             }
@@ -525,13 +602,22 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     type LogBuffer = Vec<MaybeUninit<u8>>;
 
     #[inline]
-    fn recover(
-        &self,
-        _database: &mut Database<S, Self>,
-        _until: Option<<S as Sequencer>::Instant>,
+    fn recover<'d, 'p>(
+        &'p self,
+        database: &'d mut Database<S, Self>,
+        until: Option<<S as Sequencer>::Instant>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+    ) -> Result<AwaitRecovery<'d, 'p, S, Self>, Error> {
+        if self.sender.try_send(IOTask::Recover(until)).is_err() {
+            // `Recover` must be the first request.
+            return Err(Error::UnexpectedState);
+        }
+        Ok(AwaitRecovery {
+            database,
+            persistence_layer: self,
+            recovered: S::Instant::default(),
+            deadline,
+        })
     }
 
     #[inline]
@@ -587,15 +673,30 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn commit(
         &self,
-        _id: TransactionID,
-        _commit_instant: <S as Sequencer>::Instant,
+        id: TransactionID,
+        commit_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        let mut log_buffer = Vec::<MaybeUninit<u8>>::new();
+        BufferredLogger::<S, Self>::record(&mut log_buffer, id, 0, size_of::<S::Instant>(), |w| {
+            let bytes: *const u8 = addr_of!(commit_instant).cast::<u8>();
+            for i in 0..size_of::<S::Instant>() {
+                // Safety: the length of the data is checked.
+                unsafe {
+                    *w.get_unchecked_mut(i).as_mut_ptr() = *bytes.add(i);
+                }
+            }
+        })?;
+        log_buffer.flush(self, None, deadline)
     }
 
     #[inline]
-    fn check(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
+    fn read_log_record(&self, _waker: &Waker) -> Result<Option<Box<[u8]>>, Error> {
+        Ok(None)
+    }
+
+    #[inline]
+    fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
         if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
             Some(Ok(S::Instant::default()))
         } else if let Ok(mut waker_map) = self.shared_data.waker_map.try_lock() {
@@ -683,24 +784,31 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
         drop(persistence_layer.sender.try_send(IOTask::Flush));
         Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
     }
+
+    #[inline]
+    fn as_u8_slice(&self) -> &[u8] {
+        let maybe_uninit_slice = self.as_slice();
+        // Safety: casting to `u8` is safe.
+        unsafe { &*(maybe_uninit_slice as *const [MaybeUninit<u8>] as *const [u8]) }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::AtomicCounter;
-    use std::fs::remove_dir_all;
     use std::time::Duration;
+    use tokio::fs::remove_dir_all;
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
 
-    #[test]
-    fn open_close() {
+    #[tokio::test]
+    async fn open_close() {
         const DIR: &str = "file_io_open_close_test";
         let path = Path::new(DIR);
         let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
         drop(file_io);
-        assert!(remove_dir_all(path).is_ok());
+        assert!(remove_dir_all(path).await.is_ok());
     }
 
     #[tokio::test]
@@ -731,6 +839,6 @@ mod test {
         assert!(result_4.is_ok());
 
         drop(file_io);
-        assert!(remove_dir_all(path).is_ok());
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }

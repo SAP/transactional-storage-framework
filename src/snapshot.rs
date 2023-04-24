@@ -230,15 +230,31 @@ impl<'j> JournalSnapshot<'j> {
 
 #[cfg(test)]
 mod test {
-    use crate::Database;
+    use std::path::Path;
+
+    use tokio::fs::remove_dir_all;
+
+    use crate::{AtomicCounter, Database, FileIO};
 
     #[tokio::test]
     async fn combine() {
-        let database = Database::default();
+        const DIR: &str = "snapshot_combine_test";
+        const DIR_OTHER: &str = "snapshot_combine_test_other";
+
+        let path = Path::new(DIR);
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database = Database::with_persistence_layer(file_io, None, None)
+            .await
+            .unwrap();
+
+        let path_other = Path::new(DIR_OTHER);
+        let file_io_other = FileIO::<AtomicCounter>::with_path(path_other).unwrap();
+        let database_other = Database::with_persistence_layer(file_io_other, None, None)
+            .await
+            .unwrap();
 
         assert!(database.transaction().commit().await.is_ok());
 
-        let database_other = Database::default();
         let database_snapshot = database.snapshot();
         assert_eq!(
             database_snapshot.database_snapshot(),
@@ -273,6 +289,7 @@ mod test {
         );
         assert!(combined_snapshot.transaction_snapshot().is_some());
         assert!(combined_snapshot.journal_snapshot().is_some());
+        drop(combined_snapshot);
 
         let transaction_snapshot = transaction.snapshot();
         let journal_snapshot = journal.snapshot();
@@ -280,5 +297,15 @@ mod test {
         assert_eq!(combined_snapshot.database_snapshot(), 0);
         assert!(combined_snapshot.transaction_snapshot().is_some());
         assert!(combined_snapshot.journal_snapshot().is_some());
+
+        drop(combined_snapshot);
+        drop(journal);
+        drop(transaction);
+        drop(database);
+        drop(transaction_other);
+        drop(database_other);
+
+        assert!(remove_dir_all(path).await.is_ok());
+        assert!(remove_dir_all(path_other).await.is_ok());
     }
 }

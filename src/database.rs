@@ -421,12 +421,22 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
 #[cfg(test)]
 mod test {
     use crate::sequencer::AtomicCounter;
-    use crate::{Database, Metadata};
+    use crate::{Database, FileIO, Metadata};
+    use std::path::Path;
     use std::sync::Arc;
+    use tokio::fs::remove_dir_all;
 
     #[tokio::test]
-    async fn database() {
-        let database: Arc<Database<AtomicCounter>> = Arc::new(Database::default());
+    async fn basic() {
+        const DIR: &str = "database_basic_test";
+        let path = Path::new(DIR);
+
+        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let database: Arc<Database<AtomicCounter>> = Arc::new(
+            Database::with_persistence_layer(file_io, None, None)
+                .await
+                .unwrap(),
+        );
         let transaction = database.transaction();
         let snapshot = transaction.snapshot();
         let mut journal = transaction.journal();
@@ -443,5 +453,8 @@ mod test {
         drop(journal);
         drop(snapshot);
         drop(transaction);
+        drop(database);
+
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }
