@@ -122,11 +122,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Transaction};
+    /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// assert_ne!(transaction.id(), 0);
+    /// async {
+    ///     let database = Database::with_path(Path::new("id")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     assert_ne!(transaction.id(), 0);
+    /// };
     /// ```
     #[inline]
     pub fn id(&self) -> ID {
@@ -141,12 +144,15 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Transaction};
+    /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let journal = transaction.journal();
-    /// journal.submit();
+    /// async {
+    ///     let database = Database::with_path(Path::new("journal")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let journal = transaction.journal();
+    ///     journal.submit();
+    /// };
     /// ```
     #[inline]
     pub fn journal<'t>(&'t self) -> Journal<'d, 't, S, P> {
@@ -162,11 +168,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Transaction};
+    /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let snapshot = transaction.snapshot();
+    /// async {
+    ///     let database = Database::with_path(Path::new("snapshot")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let snapshot = transaction.snapshot();
+    /// };
     /// ```
     #[inline]
     pub fn snapshot<'t>(&'t self) -> Snapshot<'d, 't, '_, S> {
@@ -211,16 +220,18 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Journal, Transaction};
+    /// use sap_tsf::Database;
     /// use std::num::NonZeroU32;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let journal = transaction.journal();
-    /// let instant = journal.submit();
-    ///
-    /// assert_eq!(transaction.now(), NonZeroU32::new(1));
-    /// assert_eq!(instant.ok(), NonZeroU32::new(1));
+    /// async {
+    ///     let database = Database::with_path(Path::new("now")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let journal = transaction.journal();
+    ///     let instant = journal.submit();
+    ///     assert_eq!(transaction.now(), NonZeroU32::new(1));
+    ///     assert_eq!(instant.ok(), NonZeroU32::new(1));
+    /// };
     /// ```
     #[inline]
     pub fn now(&self) -> Option<NonZeroU32> {
@@ -243,22 +254,23 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Transaction};
+    /// use sap_tsf::Database;
     /// use std::num::NonZeroU32;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let mut transaction = database.transaction();
-    /// assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(None));
-    ///
-    /// for _ in 0..3 {
-    ///     let journal = transaction.journal();
-    ///     journal.submit();
-    /// }
-    ///
-    /// assert_eq!(transaction.now(), NonZeroU32::new(3));
-    /// assert_eq!(transaction.rewind(NonZeroU32::new(4)), Ok(NonZeroU32::new(3)));
-    /// assert_eq!(transaction.rewind(NonZeroU32::new(3)), Ok(NonZeroU32::new(3)));
-    /// assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(NonZeroU32::new(1)));
+    /// async {
+    ///     let database = Database::with_path(Path::new("rewind")).await.unwrap();
+    ///     let mut transaction = database.transaction();
+    ///     assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(None));
+    ///     for _ in 0..3 {
+    ///         let journal = transaction.journal();
+    ///         journal.submit();
+    ///     }
+    ///     assert_eq!(transaction.now(), NonZeroU32::new(3));
+    ///     assert_eq!(transaction.rewind(NonZeroU32::new(4)), Ok(NonZeroU32::new(3)));
+    ///     assert_eq!(transaction.rewind(NonZeroU32::new(3)), Ok(NonZeroU32::new(3)));
+    ///     assert_eq!(transaction.rewind(NonZeroU32::new(1)), Ok(NonZeroU32::new(1)));
+    /// };
     /// ```
     #[inline]
     pub fn rewind(&mut self, instant: Option<NonZeroU32>) -> Result<Option<NonZeroU32>, Error> {
@@ -297,14 +309,15 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, Transaction};
+    /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let mut transaction = database.transaction();
     /// async {
+    ///     let database = Database::with_path(Path::new("prepare")).await.unwrap();
+    ///     let transaction = database.transaction();
     ///     if let Ok(indoubt_transaction) = transaction.prepare().await {
     ///         assert!(indoubt_transaction.await.is_ok());
-    ///     }
+    ///     };
     /// };
     /// ```
     #[inline]
@@ -347,10 +360,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Transaction};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let mut transaction = database.transaction();
     /// async {
+    ///     let database = Database::with_path(Path::new("commit")).await.unwrap();
+    ///     let mut transaction = database.transaction();
     ///     assert!(transaction.commit().await.is_ok());
     /// };
     /// ```
@@ -371,10 +385,13 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Transaction};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let mut transaction = database.transaction();
-    /// transaction.rollback();
+    /// async {
+    ///     let database = Database::with_path(Path::new("commit")).await.unwrap();
+    ///     let mut transaction = database.transaction();
+    ///     transaction.rollback();
+    /// };
     /// ```
     #[inline]
     pub fn rollback(mut self) {
@@ -597,7 +614,6 @@ impl<S: Sequencer> Anchor<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{AtomicCounter, FileIO};
     use std::{path::Path, sync::Arc};
     use tokio::{fs::remove_dir_all, sync::Barrier};
 
@@ -613,10 +629,7 @@ mod test {
     async fn basic() {
         const DIR: &str = "transaction_basic_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Database::with_persistence_layer(file_io, None, None)
-            .await
-            .unwrap();
+        let database = Database::with_path(path).await.unwrap();
         let transaction = database.transaction();
         assert!(transaction.commit().await.is_ok());
         drop(database);
@@ -627,10 +640,7 @@ mod test {
     async fn rewind() {
         const DIR: &str = "transaction_rewind_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Database::with_persistence_layer(file_io, None, None)
-            .await
-            .unwrap();
+        let database = Database::with_path(path).await.unwrap();
         let num_tasks = 16_u32;
         let barrier = Arc::new(Barrier::new(num_tasks as usize));
         let mut transaction = Arc::new(prolong_transaction(database.transaction()));

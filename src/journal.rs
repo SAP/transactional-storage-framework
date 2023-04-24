@@ -151,12 +151,15 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ///
     /// ```
     /// use sap_tsf::{Database, Transaction};
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let journal_1 = transaction.journal();
-    /// let journal_2 = transaction.journal();
-    /// assert_ne!(journal_1.id(), journal_2.id());
+    /// async {
+    ///     let database = Database::with_path(Path::new("id")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let journal_1 = transaction.journal();
+    ///     let journal_2 = transaction.journal();
+    ///     assert_ne!(journal_1.id(), journal_2.id());
+    /// };
     /// ```
     #[inline]
     #[must_use]
@@ -180,11 +183,14 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     /// ```
     /// use sap_tsf::{Database, Transaction};
     /// use std::num::NonZeroU32;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let journal = transaction.journal();
-    /// assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
+    /// async {
+    ///     let database = Database::with_path(Path::new("submit")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let journal = transaction.journal();
+    ///     assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
+    /// };
     /// ```
     #[inline]
     pub fn submit(mut self) -> Result<NonZeroU32, Error> {
@@ -205,11 +211,14 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let journal = transaction.journal();
-    /// let snapshot = journal.snapshot();
+    /// async {
+    ///     let database = Database::with_path(Path::new("submit")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let journal = transaction.journal();
+    ///     let snapshot = journal.snapshot();
+    /// };
     /// ```
     #[inline]
     #[must_use]
@@ -561,7 +570,7 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AtomicCounter, Database, FileIO};
+    use crate::Database;
     use std::{num::NonZeroU32, path::Path};
     use tokio::fs::remove_dir_all;
 
@@ -569,10 +578,7 @@ mod tests {
     async fn basic() {
         const DIR: &str = "journal_basic_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Database::with_persistence_layer(file_io, None, None)
-            .await
-            .unwrap();
+        let database = Database::with_path(path).await.unwrap();
         let transaction = database.transaction();
         let journal_1 = transaction.journal();
         assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
@@ -582,7 +588,6 @@ mod tests {
         let journal_4 = transaction.journal();
         assert_eq!(journal_4.submit().ok(), NonZeroU32::new(3));
         assert_eq!(journal_3.submit().ok(), NonZeroU32::new(4));
-
         assert!(remove_dir_all(path).await.is_ok());
     }
 }

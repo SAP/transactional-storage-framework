@@ -14,6 +14,9 @@ pub enum Error {
     /// The operation causes a deadlock.
     Deadlock,
 
+    /// Generic errors with a message string attached to it.
+    Generic(&'static str),
+
     /// The desired resource could not be found in the database.
     NotFound,
 

@@ -4,8 +4,10 @@
 
 use criterion::async_executor::FuturesExecutor;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use sap_tsf::{AtomicCounter, Database, FileIO, ToObjectID};
+use sap_tsf::{Database, ToObjectID};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 struct O(usize);
 impl ToObjectID for O {
@@ -14,27 +16,35 @@ impl ToObjectID for O {
     }
 }
 
-async fn create_check(size: usize, database: Arc<Database<AtomicCounter, FileIO<AtomicCounter>>>) {
+async fn create_check(size: usize, iters: u64) -> Duration {
+    let database = Arc::new(
+        Database::with_path(Path::new("bench_access_controller_create"))
+            .await
+            .unwrap(),
+    );
     let access_controller = database.access_controller();
     let transaction = database.transaction();
     let mut journal = transaction.journal();
-    for o in 0..size {
-        assert!(access_controller
-            .create(&O(o), &mut journal, None)
-            .await
-            .is_ok());
+    let start = Instant::now();
+    for _ in 0..iters {
+        for o in 0..size {
+            assert!(access_controller
+                .create(&O(o), &mut journal, None)
+                .await
+                .is_ok());
+        }
     }
+    start.elapsed()
 }
 
 fn create(c: &mut Criterion) {
-    let database = Arc::new(Database::default());
-    let size: usize = 1024;
+    let size: usize = 64;
     c.bench_with_input(
         BenchmarkId::new("AccessController: create", size),
         &size,
         |b, &s| {
             b.to_async(FuturesExecutor)
-                .iter(|| create_check(s, database.clone()));
+                .iter_custom(|iters| create_check(s, iters));
         },
     );
 }

@@ -260,9 +260,11 @@ mod test {
     use super::*;
     use crate::Database;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Instant;
+    use tokio::fs::remove_dir_all;
 
     struct AfterNSecs<'d>(Instant, u64, &'d TaskProcessor);
 
@@ -285,7 +287,9 @@ mod test {
 
     #[tokio::test]
     async fn wake_up() {
-        let database = Database::default();
+        const DIR: &str = "task_processor_wake_up_test";
+        let path = Path::new(DIR);
+        let database = Database::with_path(path).await.unwrap();
         let now = Instant::now();
         let after1sec = AfterNSecs(now, 1, database.task_processor());
         let after2secs = AfterNSecs(now, 2, database.task_processor());
@@ -293,5 +297,6 @@ mod test {
         assert!(now.elapsed() > Duration::from_millis(128));
         after2secs.await;
         assert!(now.elapsed() > Duration::from_millis(256));
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }

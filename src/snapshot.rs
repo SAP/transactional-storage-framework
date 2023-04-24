@@ -85,15 +85,18 @@ impl<'d, 't, 'j, S: Sequencer> Snapshot<'d, 't, 'j, S> {
     ///
     /// ```
     /// use sap_tsf::Database;
+    /// use std::path::Path;
     ///
-    /// let database = Database::default();
-    /// let transaction = database.transaction();
-    /// let database_snapshot = database.snapshot();
-    /// let transaction_snapshot = transaction.snapshot();
-    /// let journal = transaction.journal();
-    /// let journal_snapshot = journal.snapshot();
-    /// let combined_snapshot =
-    ///     journal_snapshot.combine(transaction_snapshot).combine(database_snapshot);
+    /// async {
+    ///     let database = Database::with_path(Path::new("combine")).await.unwrap();
+    ///     let transaction = database.transaction();
+    ///     let database_snapshot = database.snapshot();
+    ///     let transaction_snapshot = transaction.snapshot();
+    ///     let journal = transaction.journal();
+    ///     let journal_snapshot = journal.snapshot();
+    ///     let combined_snapshot =
+    ///         journal_snapshot.combine(transaction_snapshot).combine(database_snapshot);
+    /// };
     /// ````
     #[inline]
     #[must_use]
@@ -234,7 +237,7 @@ mod test {
 
     use tokio::fs::remove_dir_all;
 
-    use crate::{AtomicCounter, Database, FileIO};
+    use crate::Database;
 
     #[tokio::test]
     async fn combine() {
@@ -242,16 +245,10 @@ mod test {
         const DIR_OTHER: &str = "snapshot_combine_test_other";
 
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
-        let database = Database::with_persistence_layer(file_io, None, None)
-            .await
-            .unwrap();
+        let database = Database::with_path(path).await.unwrap();
 
         let path_other = Path::new(DIR_OTHER);
-        let file_io_other = FileIO::<AtomicCounter>::with_path(path_other).unwrap();
-        let database_other = Database::with_persistence_layer(file_io_other, None, None)
-            .await
-            .unwrap();
+        let database_other = Database::with_path(path_other).await.unwrap();
 
         assert!(database.transaction().commit().await.is_ok());
 
@@ -289,6 +286,8 @@ mod test {
         );
         assert!(combined_snapshot.transaction_snapshot().is_some());
         assert!(combined_snapshot.journal_snapshot().is_some());
+
+        // TODO: check why it is not dropped here.
         drop(combined_snapshot);
 
         let transaction_snapshot = transaction.snapshot();
