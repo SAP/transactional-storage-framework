@@ -7,10 +7,12 @@ pub use file_io::FileIO;
 
 use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
-use std::task::Waker;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 /// The [`PersistenceLayer`] trait defines the interface between [`Database`](super::Database) and
@@ -219,4 +221,83 @@ pub struct AwaitRecovery<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> {
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
+}
+
+impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
+    /// Creates an [`AwaitIO`] from a log sequence number.
+    #[inline]
+    pub fn with_lsn(persistence_layer: &'p P, lsn: u64) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer,
+            lsn,
+            deadline: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Sets the deadline.
+    #[inline]
+    #[must_use]
+    pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
+        AwaitIO {
+            persistence_layer: self.persistence_layer,
+            lsn: self.lsn,
+            deadline,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Forgets the IO operation.
+    #[inline]
+    pub fn forget(self) {
+        // Do nothing.
+    }
+}
+
+impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
+    type Output = Result<S::Instant, Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(result) = self
+            .persistence_layer
+            .check_io_completion(self.lsn, cx.waker())
+        {
+            Poll::Ready(result)
+        } else if self
+            .deadline
+            .as_ref()
+            .map_or(false, |d| *d < Instant::now())
+        {
+            Poll::Ready(Err(Error::Timeout))
+        } else {
+            // It assumes that the persistence layer will wake up the executor when ready.
+            Poll::Pending
+        }
+    }
+}
+
+impl<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'d, 'p, S, P> {
+    type Output = Result<S::Instant, Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.persistence_layer.read_log_record(cx.waker()) {
+            Ok(Some(_log_record)) => {
+                // TODO: implement it.
+                if self
+                    .deadline
+                    .as_ref()
+                    .map_or(false, |d| *d < Instant::now())
+                {
+                    Poll::Ready(Err(Error::Timeout))
+                } else {
+                    // It assumes that the persistence layer will wake up the executor when ready.
+                    Poll::Pending
+                }
+            }
+            Ok(None) => Poll::Ready(Ok(self.recovered)),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
 }

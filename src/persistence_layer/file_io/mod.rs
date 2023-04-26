@@ -7,20 +7,18 @@ use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, File, OpenOptions};
-use std::future::Future;
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::mem::{size_of, MaybeUninit};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::ptr::{addr_of, addr_of_mut};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::task::{Context, Poll, Waker};
+use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -86,85 +84,6 @@ struct FileIOSharedData {
 
     /// Log sequence number and [`Waker`] map.
     waker_map: Mutex<BTreeMap<u64, Waker>>,
-}
-
-impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
-    /// Creates an [`AwaitIO`] from a log sequence number.
-    #[inline]
-    pub fn with_lsn(persistence_layer: &'p P, lsn: u64) -> AwaitIO<'p, S, P> {
-        AwaitIO {
-            persistence_layer,
-            lsn,
-            deadline: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Sets the deadline.
-    #[inline]
-    #[must_use]
-    pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
-        AwaitIO {
-            persistence_layer: self.persistence_layer,
-            lsn: self.lsn,
-            deadline,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Forgets the IO operation.
-    #[inline]
-    pub fn forget(self) {
-        // Do nothing.
-    }
-}
-
-impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
-    type Output = Result<S::Instant, Error>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(result) = self
-            .persistence_layer
-            .check_io_completion(self.lsn, cx.waker())
-        {
-            Poll::Ready(result)
-        } else if self
-            .deadline
-            .as_ref()
-            .map_or(false, |d| *d < Instant::now())
-        {
-            Poll::Ready(Err(Error::Timeout))
-        } else {
-            // It assumes that the persistence layer will wake up the executor when ready.
-            Poll::Pending
-        }
-    }
-}
-
-impl<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'d, 'p, S, P> {
-    type Output = Result<S::Instant, Error>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.persistence_layer.read_log_record(cx.waker()) {
-            Ok(Some(_log_record)) => {
-                // TODO: implement it.
-                if self
-                    .deadline
-                    .as_ref()
-                    .map_or(false, |d| *d < Instant::now())
-                {
-                    Poll::Ready(Err(Error::Timeout))
-                } else {
-                    // It assumes that the persistence layer will wake up the executor when ready.
-                    Poll::Pending
-                }
-            }
-            Ok(None) => Poll::Ready(Ok(self.recovered)),
-            Err(error) => Poll::Ready(Err(error)),
-        }
-    }
 }
 
 impl<S: Sequencer> FileIO<S> {
