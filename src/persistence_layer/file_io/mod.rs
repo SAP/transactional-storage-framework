@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2023 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! The module implements IO subsystem on top of the OS file system layer to function as the
 //! persistence layer of a database system.
 
