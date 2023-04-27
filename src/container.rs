@@ -46,7 +46,7 @@ impl<'c, S: Sequencer, P: PersistenceLayer<S>> Iterator for VersionedRecordVisit
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use crate::sequencer::AtomicCounter;
     use crate::{Container, FileIO, Metadata};
 

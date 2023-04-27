@@ -431,7 +431,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::{Database, Metadata};
     use std::sync::Arc;

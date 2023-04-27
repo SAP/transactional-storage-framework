@@ -612,7 +612,7 @@ impl<S: Sequencer> Anchor<S> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use std::{path::Path, sync::Arc};
     use tokio::{fs::remove_dir_all, sync::Barrier};

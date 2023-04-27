@@ -197,7 +197,7 @@ impl ToInstant<AtomicCounter> for U64Tracker {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use std::sync::atomic::Ordering::Release;
     use std::sync::Arc;

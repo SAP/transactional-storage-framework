@@ -5,6 +5,9 @@
 //! The module implements IO subsystem on top of the OS file system layer to function as the
 //! persistence layer of a database system.
 
+mod random_access_file;
+pub use random_access_file::RandomAccessFile;
+
 use crate::journal::ID as JournalID;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;

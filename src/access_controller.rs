@@ -2199,7 +2199,7 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::{AtomicCounter, Database};
     use std::num::NonZeroU32;
