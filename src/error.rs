@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io;
+
 /// [`Error`] defines all the error codes used by the database storage system.
 ///
 /// This only defines error codes used in the framework, and individual component implementations
@@ -16,6 +18,9 @@ pub enum Error {
 
     /// Generic errors with a message string attached to it.
     Generic(&'static str),
+
+    /// IO error.
+    IO(io::ErrorKind),
 
     /// The desired resource could not be found in the database.
     NotFound,
