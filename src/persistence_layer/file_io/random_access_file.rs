@@ -64,10 +64,24 @@ mod windows {
 
         /// Abstraction of random read operations.
         #[inline]
-        pub fn read(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
-            let bytes_read = self.file.seek_read(buffer, offset)?;
-            if bytes_read != buffer.len() {
-                Err(Error::from(ErrorKind::UnexpectedEof))
+        pub fn read(&self, mut buffer: &mut [u8], mut offset: u64) -> Result<()> {
+            while !buffer.is_empty() {
+                match self.file.seek_read(buffer, offset) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let tmp = buffer;
+                        buffer = &mut tmp[n..];
+                        offset += n as u64;
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if !buffer.is_empty() {
+                Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ))
             } else {
                 Ok(())
             }
@@ -75,8 +89,24 @@ mod windows {
 
         /// Abstraction of random write operations.
         #[inline]
-        pub fn write(&self, buffer: &[u8], offset: u64) -> Result<()> {
-            self.file.seek_write(buffer, offset).map(|_| ())
+        pub fn write(&self, mut buffer: &[u8], mut offset: u64) -> Result<()> {
+            while !buffer.is_empty() {
+                match self.file.seek_write(buffer, offset) {
+                    Ok(0) => {
+                        return Err(Error::new(
+                            ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ));
+                    }
+                    Ok(n) => {
+                        buffer = &buffer[n..];
+                        offset += n as u64
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
         }
     }
 }
