@@ -36,7 +36,7 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// The identifier of the [`Transaction`] as part of a distributed transaction.
     ///
     /// It is `None` if the transaction is not part of a distributed transaction.
-    xid: Option<Vec<u8>>,
+    xid: Option<Box<[u8]>>,
 
     /// A piece of data that is shared between [`Journal`] and [`Transaction`].
     ///
@@ -191,7 +191,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     #[inline]
     pub async fn participate(&mut self, xid: &[u8]) -> Result<(), Error> {
         if let Some(own_xid) = self.xid.as_ref() {
-            if own_xid == xid {
+            if own_xid.as_ref() == xid {
                 Ok(())
             } else {
                 Err(Error::UnexpectedState)
