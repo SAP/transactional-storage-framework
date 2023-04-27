@@ -13,8 +13,7 @@ use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
 use std::collections::BTreeMap;
-use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::fs::{create_dir_all, OpenOptions};
 use std::marker::PhantomData;
 use std::mem::{size_of, MaybeUninit};
 use std::num::NonZeroU32;
@@ -26,7 +25,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Waker;
-use std::thread::{self, JoinHandle};
+use std::thread::{self, yield_now, JoinHandle};
 use std::time::Instant;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
@@ -112,10 +111,10 @@ impl<S: Sequencer> FileIO<S> {
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
         path_buffer.push(path);
 
-        let mut log0 = Self::open_file(&mut path_buffer, "0.log")?;
-        let mut log1 = Self::open_file(&mut path_buffer, "1.log")?;
-        let mut data0 = Self::open_file(&mut path_buffer, "0.dat")?;
-        let mut data1 = Self::open_file(&mut path_buffer, "1.dat")?;
+        let log0 = Self::open_file(&mut path_buffer, "0.log")?;
+        let log1 = Self::open_file(&mut path_buffer, "1.log")?;
+        let data0 = Self::open_file(&mut path_buffer, "0.dat")?;
+        let data1 = Self::open_file(&mut path_buffer, "1.dat")?;
         let shared_data = Arc::new(FileIOSharedData::default());
         let shared_data_clone = shared_data.clone();
         let (sender, mut receiver) =
@@ -123,10 +122,10 @@ impl<S: Sequencer> FileIO<S> {
         Ok(FileIO {
             worker: Some(thread::spawn(move || {
                 Self::process(
-                    &mut log0,
-                    &mut log1,
-                    &mut data0,
-                    &mut data1,
+                    &log0,
+                    &log1,
+                    &data0,
+                    &data1,
                     &mut receiver,
                     &shared_data_clone,
                 );
@@ -138,7 +137,10 @@ impl<S: Sequencer> FileIO<S> {
     }
 
     /// Opens the specified file.
-    fn open_file(path_buffer: &mut PathBuf, file_name: &'static str) -> Result<File, Error> {
+    fn open_file(
+        path_buffer: &mut PathBuf,
+        file_name: &'static str,
+    ) -> Result<RandomAccessFile, Error> {
         path_buffer.push(Path::new(file_name));
         let Some(file_path) = path_buffer.to_str() else {
             return Err(Error::Generic(file_name));
@@ -146,24 +148,24 @@ impl<S: Sequencer> FileIO<S> {
         let Ok(file) = OpenOptions::new()
                 .create(true)
                 .read(true)
-                .append(true)
+                .write(true)
                 .open(file_path) else {
                 return Err(Error::Generic(file_name));
             };
         path_buffer.pop();
-        Ok(file)
+        Ok(RandomAccessFile::from_file(file))
     }
 
     /// Processes IO tasks.
     fn process(
-        log0: &mut File,
-        _log1: &mut File,
-        _data0: &mut File,
-        _data1: &mut File,
+        log0: &RandomAccessFile,
+        _log1: &RandomAccessFile,
+        _data0: &RandomAccessFile,
+        _data1: &RandomAccessFile,
         receiver: &mut Receiver<IOTask<S>>,
         shared_data: &FileIOSharedData,
     ) {
-        let mut log_writer = BufWriter::new(log0);
+        let mut log0_offset = 0;
         let mut last_flushed_lsn = 0;
 
         // Insert the log buffer head to force the log sequence number ever increasing.
@@ -177,7 +179,13 @@ impl<S: Sequencer> FileIO<S> {
         while let Ok(task) = receiver.recv() {
             match task {
                 IOTask::Flush => (),
-                IOTask::Recover(_until) => (),
+                IOTask::Recover(_until) => {
+                    let mut read_offset = 0;
+                    let mut buffer: [u8; 32] = [0; 32];
+                    while log0.read(&mut buffer, read_offset).is_ok() {
+                        read_offset += 32;
+                    }
+                }
                 IOTask::Shutdown => break,
             }
             if let Some(mut log_buffer) =
@@ -185,9 +193,12 @@ impl<S: Sequencer> FileIO<S> {
             {
                 let first_lsn = last_flushed_lsn;
                 loop {
-                    log_writer
-                        .write_all(BufferredLogger::<S, Self>::as_u8_slice(&log_buffer.content))
-                        .expect("write failed");
+                    let data = BufferredLogger::<S, Self>::as_u8_slice(&log_buffer.content);
+                    if log0.write(data, log0_offset).is_err() {
+                        yield_now();
+                        continue;
+                    }
+                    log0_offset += data.len() as u64;
                     debug_assert!(last_flushed_lsn < log_buffer.lsn);
                     last_flushed_lsn = log_buffer.lsn;
                     if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr)
@@ -198,14 +209,15 @@ impl<S: Sequencer> FileIO<S> {
                         break;
                     }
                 }
-                log_writer.flush().expect("flush failed");
-                shared_data
-                    .last_flushed_lsn
-                    .store(last_flushed_lsn, Release);
-                if let Ok(mut waker_map) = shared_data.waker_map.lock() {
-                    for lsn in first_lsn + 1..=last_flushed_lsn {
-                        if let Some(waker) = waker_map.remove(&lsn) {
-                            waker.wake();
+                if log0.sync_all().is_ok() {
+                    shared_data
+                        .last_flushed_lsn
+                        .store(last_flushed_lsn, Release);
+                    if let Ok(mut waker_map) = shared_data.waker_map.lock() {
+                        for lsn in first_lsn + 1..=last_flushed_lsn {
+                            if let Some(waker) = waker_map.remove(&lsn) {
+                                waker.wake();
+                            }
                         }
                     }
                 }

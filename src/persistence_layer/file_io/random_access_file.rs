@@ -2,14 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Abstraction of a file for POSIX operating systems and Windows.
-
-#![allow(dead_code)]
+//! Abstraction over an operating system file for random access operations.
 
 #[cfg(unix)]
 mod unix {
     use std::fs::File;
     use std::io::Result;
+    use std::ops::Deref;
     use std::os::unix::fs::FileExt;
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
@@ -25,16 +24,25 @@ mod unix {
             RandomAccessFile { file }
         }
 
-        /// Abstraction of random read operations.
+        /// Abstraction over random read operations.
         #[inline]
         pub fn read(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
             self.file.read_exact_at(buffer, offset)
         }
 
-        /// Abstraction of random write operations.
+        /// Abstraction over random write operations.
         #[inline]
         pub fn write(&self, buffer: &[u8], offset: u64) -> Result<()> {
             self.file.write_all_at(buffer, offset)
+        }
+    }
+
+    impl Deref for RandomAccessFile {
+        type Target = File;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.file
         }
     }
 }
@@ -47,6 +55,7 @@ mod windows {
     use std::fs::File;
     use std::io::Result;
     use std::io::{Error, ErrorKind};
+    use std::ops::Deref;
     use std::os::windows::fs::FileExt;
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
@@ -62,7 +71,7 @@ mod windows {
             RandomAccessFile { file }
         }
 
-        /// Abstraction of random read operations.
+        /// Abstraction over random read operations.
         #[inline]
         pub fn read(&self, mut buffer: &mut [u8], mut offset: u64) -> Result<()> {
             while !buffer.is_empty() {
@@ -78,16 +87,13 @@ mod windows {
                 }
             }
             if !buffer.is_empty() {
-                Err(Error::new(
-                    ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                ))
+                Err(Error::from(ErrorKind::UnexpectedEof))
             } else {
                 Ok(())
             }
         }
 
-        /// Abstraction of random write operations.
+        /// Abstraction over random write operations.
         #[inline]
         pub fn write(&self, mut buffer: &[u8], mut offset: u64) -> Result<()> {
             while !buffer.is_empty() {
@@ -109,6 +115,15 @@ mod windows {
             Ok(())
         }
     }
+
+    impl Deref for RandomAccessFile {
+        type Target = File;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.file
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -127,8 +142,8 @@ mod tests {
         const FILE: &str = "random_access_file_write_read_test";
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
             .read(true)
+            .write(true)
             .open(FILE)
             .unwrap();
         let random_access_file = RandomAccessFile::from_file(file);
