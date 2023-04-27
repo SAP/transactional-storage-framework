@@ -73,7 +73,7 @@ mod windows {
                         buffer = &mut tmp[n..];
                         offset += n as u64;
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -102,7 +102,7 @@ mod windows {
                         buffer = &buffer[n..];
                         offset += n as u64
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
                     Err(e) => return Err(e),
                 }
             }
