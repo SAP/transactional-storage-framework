@@ -5,6 +5,7 @@
 use criterion::async_executor::FuturesExecutor;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use sap_tsf::{Database, ToObjectID};
+use std::fs::remove_dir_all;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,11 +18,8 @@ impl ToObjectID for O {
 }
 
 async fn create_check(size: usize, iters: u64) -> Duration {
-    let database = Arc::new(
-        Database::with_path(Path::new("bench_access_controller_create"))
-            .await
-            .unwrap(),
-    );
+    let path = Path::new("bench_access_controller_create");
+    let database = Arc::new(Database::with_path(path).await.unwrap());
     let access_controller = database.access_controller();
     let transaction = database.transaction();
     let mut journal = transaction.journal();
@@ -34,7 +32,12 @@ async fn create_check(size: usize, iters: u64) -> Duration {
                 .is_ok());
         }
     }
-    start.elapsed()
+    let elapsed = start.elapsed();
+    drop(journal);
+    drop(transaction);
+    drop(database);
+    assert!(remove_dir_all(path).is_ok());
+    elapsed
 }
 
 fn create(c: &mut Criterion) {
