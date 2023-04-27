@@ -1,4 +1,8 @@
-//! Abstraction of a file.
+// SPDX-FileCopyrightText: 2023 Changgyoo Park <wvwwvwwv@me.com>
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! Abstraction of a file for POSIX operating systems and Windows.
 
 #![allow(dead_code)]
 
@@ -63,7 +67,7 @@ mod windows {
         pub fn read(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
             let bytes_read = self.file.seek_read(buffer, offset)?;
             if bytes_read != buffer.len() {
-                Err(Error::new(ErrorKind::UnexpectedEof))
+                Err(Error::from(ErrorKind::UnexpectedEof))
             } else {
                 Ok(())
             }
@@ -72,7 +76,7 @@ mod windows {
         /// Abstraction of random write operations.
         #[inline]
         pub fn write(&self, buffer: &[u8], offset: u64) -> Result<()> {
-            self.file.seek_write(buffer, offset)
+            self.file.seek_write(buffer, offset).map(|_| ())
         }
     }
 }
