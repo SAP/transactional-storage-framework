@@ -66,7 +66,7 @@ mod windows {
         #[inline]
         pub fn read(&self, mut buffer: &mut [u8], mut offset: u64) -> Result<()> {
             while !buffer.is_empty() {
-                match self.seek_read(buffer, offset) {
+                match self.file.seek_read(buffer, offset) {
                     Ok(0) => break,
                     Ok(n) => {
                         let tmp = buffer;
@@ -91,7 +91,7 @@ mod windows {
         #[inline]
         pub fn write(&self, mut buffer: &[u8], mut offset: u64) -> Result<()> {
             while !buffer.is_empty() {
-                match self.seek_write(buffer, offset) {
+                match self.file.seek_write(buffer, offset) {
                     Ok(0) => {
                         return Err(Error::new(
                             ErrorKind::WriteZero,
