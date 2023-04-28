@@ -32,10 +32,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// until the transaction or journal is ended.
     type LogBuffer: BufferredLogger<S, Self>;
 
-    /// Recovers the database.
+    /// Recovers the database before serving any other requests.
     ///
-    /// If a specific logical instant is specified, it only recovers the storage up until the time
-    /// point.
+    /// A call to `recover` must precede any other calls to other methods in the
+    /// [`PersistenceLayer`], and the [`PersistenceLayer`] must not serve any other requests until
+    /// fully recovered. If a specific logical instant is specified, it only recovers the storage
+    /// up until the time point.
     ///
     /// # Errors
     ///

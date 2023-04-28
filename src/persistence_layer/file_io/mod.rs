@@ -9,6 +9,7 @@ mod random_access_file;
 pub use random_access_file::RandomAccessFile;
 
 mod io_task_processor;
+mod log_record;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;
