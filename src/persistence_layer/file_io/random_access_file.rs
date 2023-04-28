@@ -13,6 +13,7 @@ mod unix {
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
     /// [`File`].
+    #[derive(Debug)]
     pub struct RandomAccessFile {
         file: File,
     }
@@ -60,6 +61,7 @@ mod windows {
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
     /// [`File`].
+    #[derive(Debug)]
     pub struct RandomAccessFile {
         file: File,
     }

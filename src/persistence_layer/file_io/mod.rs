@@ -13,7 +13,7 @@ mod io_task_processor;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
-use io_task_processor::{process_io_tasks, IOTask};
+use io_task_processor::{FlusherData, IOTask};
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io;
@@ -33,7 +33,7 @@ use std::time::Instant;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
-/// [`FileIO`] spawns a thread for blocking IO operation.
+/// [`FileIO`] spawns two threads for file operations and synchronization with the device.
 ///
 /// TODO: implement page cache.
 /// TODO: implement checkpoint.
@@ -41,12 +41,12 @@ use std::time::Instant;
 #[derive(Debug)]
 pub struct FileIO<S: Sequencer> {
     /// The IO worker thread.
-    worker: Option<JoinHandle<()>>,
+    io_worker: Option<JoinHandle<()>>,
 
     /// Shared data among the worker and database threads.
     ///
     /// TODO: need sharding of `FileIOSharedData`.
-    shared_data: Arc<FileIOSharedData>,
+    file_io_data: Arc<FileIOData>,
 
     /// The IO task sender.
     sender: SyncSender<IOTask<S>>,
@@ -68,9 +68,21 @@ pub struct FileLogBuffer {
     next: usize,
 }
 
-/// [`FileIOSharedData`] is shared among the worker and database threads.
-#[derive(Debug, Default)]
-struct FileIOSharedData {
+/// [`FileIOData`] is shared among the worker and database threads.
+#[derive(Debug)]
+struct FileIOData {
+    /// The first log file.
+    log0: RandomAccessFile,
+
+    /// The second log file.
+    log1: RandomAccessFile,
+
+    /// The first database file.
+    data0: RandomAccessFile,
+
+    /// The second database file.
+    data1: RandomAccessFile,
+
     /// [`FileLogBuffer`] link.
     ///
     /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
@@ -81,6 +93,9 @@ struct FileIOSharedData {
 
     /// Log sequence number and [`Waker`] map.
     waker_map: Mutex<BTreeMap<u64, Waker>>,
+
+    /// Flusher data.
+    flusher_data: utils::BinarySemaphore<FlusherData>,
 }
 
 impl<S: Sequencer> FileIO<S> {
@@ -106,22 +121,24 @@ impl<S: Sequencer> FileIO<S> {
         let log1 = Self::open_file(&mut path_buffer, "1.log")?;
         let data0 = Self::open_file(&mut path_buffer, "0.dat")?;
         let data1 = Self::open_file(&mut path_buffer, "1.dat")?;
-        let shared_data = Arc::new(FileIOSharedData::default());
-        let shared_data_clone = shared_data.clone();
+        let file_io_data = Arc::new(FileIOData {
+            log0,
+            log1,
+            data0,
+            data1,
+            log_buffer_link: AtomicUsize::new(0),
+            last_flushed_lsn: AtomicU64::new(0),
+            waker_map: Mutex::default(),
+            flusher_data: utils::BinarySemaphore::default(),
+        });
+        let file_io_data_clone = file_io_data.clone();
         let (sender, mut receiver) =
             mpsc::sync_channel::<IOTask<S>>(utils::advise_num_shards() * 4);
         Ok(FileIO {
-            worker: Some(thread::spawn(move || {
-                process_io_tasks(
-                    &log0,
-                    &log1,
-                    &data0,
-                    &data1,
-                    &mut receiver,
-                    &shared_data_clone,
-                );
+            io_worker: Some(thread::spawn(move || {
+                io_task_processor::process_sync(&mut receiver, &file_io_data_clone);
             })),
-            shared_data,
+            file_io_data,
             sender,
             _phantom: PhantomData,
         })
@@ -187,7 +204,7 @@ impl<S: Sequencer> Drop for FileIO<S> {
                 _ => (),
             }
         }
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.io_worker.take() {
             drop(worker.join());
         }
     }
@@ -292,12 +309,12 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
 
     #[inline]
     fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
-        if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
+        if self.file_io_data.last_flushed_lsn.load(Acquire) >= lsn {
             Some(Ok(S::Instant::default()))
-        } else if let Ok(mut waker_map) = self.shared_data.waker_map.try_lock() {
+        } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
             // Push the `Waker` into the bag, and check the value again.
             waker_map.insert(lsn, waker.clone());
-            if self.shared_data.last_flushed_lsn.load(Acquire) >= lsn {
+            if self.file_io_data.last_flushed_lsn.load(Acquire) >= lsn {
                 waker_map.remove(&lsn);
                 Some(Ok(S::Instant::default()))
             } else {
