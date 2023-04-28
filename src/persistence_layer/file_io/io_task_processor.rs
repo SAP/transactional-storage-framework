@@ -54,8 +54,7 @@ pub(super) fn process_sync<S: Sequencer>(
     let mut last_log0_lsn = 0;
 
     // Insert the log buffer head to force the log sequence number ever increasing.
-    let mut log_buffer_head =
-        FileLogBuffer::<S>::from_log_record(LogRecord::Committed(0, S::Instant::default()));
+    let mut log_buffer_head = FileLogBuffer::default();
     let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
     let _: Result<usize, usize> =
         file_io_data
@@ -80,39 +79,22 @@ pub(super) fn process_sync<S: Sequencer>(
         if let Some(mut log_buffer) =
             take_log_buffer_link(&file_io_data.log_buffer_link, &mut log_buffer_head)
         {
-            let mut buffer: [u8; 32] = [0; 32];
-            let mut bytes_written = 0;
             loop {
-                if let Some(n) = log_buffer.log_record.write(&mut buffer[bytes_written..]) {
-                    bytes_written += n;
-                } else {
-                    if file_io_data
-                        .log0
-                        .write(&buffer[0..bytes_written], log0_offset)
-                        .is_err()
-                    {
-                        // Retry after yielding.
-                        yield_now();
-                        continue;
-                    }
-                    log0_offset += bytes_written as u64;
-                    bytes_written = 0;
+                if file_io_data
+                    .log0
+                    .write(&log_buffer.buffer[0..log_buffer.pos], log0_offset)
+                    .is_err()
+                {
+                    // Retry after yielding.
+                    yield_now();
                     continue;
                 }
+                debug_assert!(last_log0_lsn < log_buffer.lsn);
+                log0_offset += log_buffer.pos as u64;
+                last_log0_lsn = log_buffer.lsn;
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
-                    while file_io_data
-                        .log0
-                        .write(&buffer[0..bytes_written], log0_offset)
-                        .is_err()
-                    {
-                        // Retry after yielding.
-                        yield_now();
-                    }
-                    debug_assert!(last_log0_lsn < log_buffer.lsn);
-                    log0_offset += bytes_written as u64;
-                    last_log0_lsn = log_buffer.lsn;
                     break;
                 }
             }
@@ -164,14 +146,14 @@ fn flush_sync(file_io_data: &Arc<FileIOData>) {
 }
 
 /// Takes the specified [`FileLogBuffer`] linked list.
-fn take_log_buffer_link<S: Sequencer>(
+fn take_log_buffer_link(
     log_buffer_link: &AtomicUsize,
-    log_buffer_head: &mut FileLogBuffer<S>,
-) -> Option<Box<FileLogBuffer<S>>> {
+    log_buffer_head: &mut FileLogBuffer,
+) -> Option<Box<FileLogBuffer>> {
     let mut current_head = log_buffer_link.load(Acquire);
     let log_buffer_head_addr = addr_of_mut!(*log_buffer_head) as usize;
     while current_head != 0 && current_head != log_buffer_head_addr {
-        let current_head_ptr = current_head as *mut FileLogBuffer<S>;
+        let current_head_ptr = current_head as *mut FileLogBuffer;
         // Safety: `current_head_ptr` not being zero was checked.
         log_buffer_head.lsn = unsafe { (*current_head_ptr).lsn };
         if let Err(actual) =

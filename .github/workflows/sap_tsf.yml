@@ -38,8 +38,6 @@ jobs:
     - uses: actions/checkout@v3
     - name: Debug
       run: cargo test --verbose
-    - name: Release
-      run: cargo test --release --verbose
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 15

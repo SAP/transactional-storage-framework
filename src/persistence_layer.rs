@@ -121,16 +121,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// It constructs the content of a log record containing the fact that the transaction is being
     /// committed at the specified time point, and then returns a [`Future`] that actually waits
     /// for the content to be persisted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
     fn commit(
         &self,
+        log_buffer: Box<Self::LogBuffer>,
         id: TransactionID,
         commit_instant: S::Instant,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> AwaitIO<S, Self>;
 
     /// Checks if the IO operation associated with the log sequence number was completed.
     ///
@@ -152,7 +149,9 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
 /// made.
-pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + Sized {
+pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>:
+    Debug + Default + Send + Sized
+{
     /// Records database changes to the buffer.
     ///
     /// # Errors
@@ -170,17 +169,12 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
     ///
     /// This method is invoked when the associated journal is submitted or a log record is created
     /// and immediately submitted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the
-    /// persistence layer.
     fn flush(
         self: Box<Self>,
         persistence_layer: &P,
         submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, P>, Error>;
+    ) -> AwaitIO<S, P>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
