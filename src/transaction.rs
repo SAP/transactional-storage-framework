@@ -27,6 +27,11 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// commit.
     database: &'d Database<S, P>,
 
+    /// End-of-transaction log buffer.
+    ///
+    /// End-of-transaction log records can only be generated once per transaction.
+    eot_log_buffer: Option<Box<P::LogBuffer>>,
+
     /// The changes made by the transaction.
     ///
     /// [`Transaction`] assigns each submitted [`Journal`] a logical time point value in increasing
@@ -133,6 +138,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// ```
     #[inline]
     pub fn id(&self) -> ID {
+        debug_assert_eq!((self.anchor.as_ptr() as ID) & 0b11, 0);
         self.anchor.as_ptr() as ID
     }
 
@@ -230,7 +236,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     ///     let journal = transaction.journal();
     ///     let instant = journal.submit();
     ///     assert_eq!(transaction.now(), NonZeroU32::new(1));
-    ///     assert_eq!(instant.ok(), NonZeroU32::new(1));
+    ///     assert_eq!(Some(instant), NonZeroU32::new(1));
     /// };
     /// ```
     #[inline]
@@ -403,6 +409,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub(crate) fn new(database: &'d Database<S, P>) -> Transaction<'d, S, P> {
         Transaction {
             database,
+            eot_log_buffer: Some(Box::default()),
             journal_strand: ebr::AtomicArc::null(),
             xid: None,
             anchor: ebr::Arc::new(Anchor::new()),
@@ -446,12 +453,18 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
     /// Generates a commit log record.
     fn generate_commit_log_record(&mut self) -> Result<(AwaitIO<'d, S, P>, S::Instant), Error> {
-        let commit_instant = self.sequencer().advance(Release);
-        let io_completion =
-            self.database
-                .persistence_layer()
-                .commit(self.id(), commit_instant, None)?;
-        Ok((io_completion, commit_instant))
+        if let Some(eot_log_buffer) = self.eot_log_buffer.take() {
+            let commit_instant = self.sequencer().advance(Release);
+            let io_completion = self.database.persistence_layer().commit(
+                eot_log_buffer,
+                self.id(),
+                commit_instant,
+                None,
+            );
+            Ok((io_completion, commit_instant))
+        } else {
+            Err(Error::UnexpectedState)
+        }
     }
 
     /// Post-processes its transaction commit.
@@ -653,7 +666,7 @@ mod tests {
                 for i in 0..num_tasks {
                     assert!(transaction_clone.now().map_or(i == 0, |l| l.get() >= i));
                     let journal = transaction_clone.journal();
-                    assert!(journal.submit().ok() > NonZeroU32::new(i));
+                    assert!(Some(journal.submit()) > NonZeroU32::new(i));
                 }
             }));
         }

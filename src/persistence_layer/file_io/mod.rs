@@ -59,10 +59,13 @@ pub struct FileIO<S: Sequencer> {
 }
 
 /// [`FileLogBuffer`] implements [`BufferredLogger`].
-#[derive(Debug)]
-pub struct FileLogBuffer<S: Sequencer> {
+#[derive(Debug, Default)]
+pub struct FileLogBuffer {
     /// The associated log record.
-    log_record: LogRecord<S>,
+    buffer: [u8; 32],
+
+    /// The current position in the buffer.
+    pos: usize,
 
     /// The log sequence number.
     lsn: u64,
@@ -169,13 +172,10 @@ impl<S: Sequencer> FileIO<S> {
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence
     /// number of it.
-    fn push_log_buffer(
-        log_buffer_link: &AtomicUsize,
-        log_buffer_ptr: *mut FileLogBuffer<S>,
-    ) -> u64 {
+    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) -> u64 {
         let mut current_head = log_buffer_link.load(Acquire);
         loop {
-            let current_head_ptr = current_head as *const FileLogBuffer<S>;
+            let current_head_ptr = current_head as *const FileLogBuffer;
 
             // SAFETY: it assumes that the caller provided a valid pointer.
             let lsn = unsafe {
@@ -217,7 +217,7 @@ impl<S: Sequencer> Drop for FileIO<S> {
 }
 
 impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
-    type LogBuffer = FileLogBuffer<S>;
+    type LogBuffer = FileLogBuffer;
 
     #[inline]
     fn recover<'d, 'p>(
@@ -291,15 +291,16 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn commit(
         &self,
+        mut log_buffer: Box<Self::LogBuffer>,
         id: TransactionID,
         commit_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        let file_log_buffer = Box::new(FileLogBuffer::from_log_record(LogRecord::Committed(
-            id,
-            commit_instant,
-        )));
-        file_log_buffer.flush(self, None, deadline)
+    ) -> AwaitIO<S, Self> {
+        let Some(new_pos) = LogRecord::<S>::Committed(id, commit_instant).write(&mut log_buffer.buffer) else {
+            unreachable!("logic error");
+        };
+        log_buffer.pos = new_pos;
+        log_buffer.flush(self, None, deadline)
     }
 
     #[inline]
@@ -327,25 +328,16 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 }
 
-impl<S: Sequencer> FileLogBuffer<S> {
-    /// Creates a new [`FileLogBuffer`] from a log record.
-    fn from_log_record(log_record: LogRecord<S>) -> FileLogBuffer<S> {
-        FileLogBuffer {
-            log_record,
-            lsn: 0,
-            next: 0,
-        }
-    }
-
+impl FileLogBuffer {
     /// Takes the next [`FileLogBuffer`] if the address if not `nil` or `0`.
-    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer<S>>> {
+    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer>> {
         if self.next == 0 {
             return None;
         } else if self.next == nil {
             self.next = 0;
             return None;
         }
-        let log_buffer_ptr = self.next as *mut FileLogBuffer<S>;
+        let log_buffer_ptr = self.next as *mut FileLogBuffer;
         // Safety: the pointer was provided by `Box::into_raw`.
         let log_buffer = unsafe { Box::from_raw(log_buffer_ptr) };
         self.next = 0;
@@ -353,7 +345,7 @@ impl<S: Sequencer> FileLogBuffer<S> {
     }
 }
 
-impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S> {
+impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
     #[inline]
     fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
         &mut self,
@@ -371,7 +363,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S> {
         persistence_layer: &FileIO<S>,
         _submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
+    ) -> AwaitIO<S, FileIO<S>> {
         let file_log_buffer_ptr = Box::into_raw(self);
         let lsn = FileIO::<S>::push_log_buffer(
             &persistence_layer.file_io_data.log_buffer_link,
@@ -379,7 +371,7 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer<S> {
         );
         debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
-        Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
+        AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline)
     }
 }
 
@@ -407,29 +399,33 @@ mod test {
         let path = Path::new(DIR);
         let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
 
-        let log_buffer_1 = Box::new(FileLogBuffer::from_log_record(
-            LogRecord::<AtomicCounter>::Committed(0, 1),
-        ));
-        let log_buffer_2 = Box::new(FileLogBuffer::from_log_record(
-            LogRecord::<AtomicCounter>::Committed(4, 2),
-        ));
-        let log_buffer_3 = Box::new(FileLogBuffer::from_log_record(
-            LogRecord::<AtomicCounter>::Committed(8, 3),
-        ));
-        let log_buffer_4 = Box::new(FileLogBuffer::from_log_record(
-            LogRecord::<AtomicCounter>::Committed(12, 4),
-        ));
-        let (result_3, result_1, result_4, result_2) = match (
+        let mut log_buffer_1 = Box::<FileLogBuffer>::default();
+        let pos = LogRecord::<AtomicCounter>::Committed(0, 3)
+            .write(&mut log_buffer_1.buffer)
+            .unwrap();
+        log_buffer_1.pos = pos;
+        let mut log_buffer_2 = Box::<FileLogBuffer>::default();
+        let pos = LogRecord::<AtomicCounter>::Committed(4, 3)
+            .write(&mut log_buffer_2.buffer)
+            .unwrap();
+        log_buffer_2.pos = pos;
+        let mut log_buffer_3 = Box::<FileLogBuffer>::default();
+        let pos = LogRecord::<AtomicCounter>::Committed(8, 3)
+            .write(&mut log_buffer_3.buffer)
+            .unwrap();
+        log_buffer_3.pos = pos;
+        let mut log_buffer_4 = Box::<FileLogBuffer>::default();
+        let pos = LogRecord::<AtomicCounter>::Committed(12, 3)
+            .write(&mut log_buffer_4.buffer)
+            .unwrap();
+        log_buffer_4.pos = pos;
+
+        let (result_3, result_1, result_4, result_2) = futures::join!(
             log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
             log_buffer_1.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
             log_buffer_4.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
             log_buffer_2.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-        ) {
-            (Ok(await_io_3), Ok(await_io_1), Ok(await_io_4), Ok(await_io_2)) => {
-                futures::join!(await_io_3, await_io_1, await_io_4, await_io_2)
-            }
-            _ => unreachable!(),
-        };
+        );
 
         assert!(result_1.is_ok());
         assert!(result_2.is_ok());

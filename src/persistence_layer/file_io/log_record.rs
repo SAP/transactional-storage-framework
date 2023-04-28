@@ -24,7 +24,7 @@ pub(super) enum LogRecord<S: Sequencer> {
     Committed(TransactionID, S::Instant),
 
     /// The transaction is rolled back.
-    RolledBack(TransactionID),
+    RolledBack(TransactionID, u32),
 }
 
 impl<S: Sequencer> LogRecord<S> {
@@ -34,10 +34,10 @@ impl<S: Sequencer> LogRecord<S> {
         let eot_mark = transaction_id_with_mark & 0b11;
         let transaction_id = transaction_id_with_mark & (!0b11);
         match eot_mark {
-            0 =>  {
+            0 => {
                 // TODO: implement it.
                 None
-            },
+            }
             1 => {
                 // Prepared.
                 let (instant, value) = read_part::<S::Instant>(value)?;
@@ -50,7 +50,8 @@ impl<S: Sequencer> LogRecord<S> {
             }
             3 => {
                 // Rolled back.
-                Some((LogRecord::RolledBack(transaction_id), value))
+                let (to, value) = read_part::<u32>(value)?;
+                Some((LogRecord::RolledBack(transaction_id, to), value))
             }
             _ => unreachable!(),
         }
@@ -79,11 +80,12 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<S::Instant>(*instant, buffer)?;
                 Some(buffer_len - buffer.len())
             }
-            LogRecord::RolledBack(transaction_id) => {
+            LogRecord::RolledBack(transaction_id, to) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 let eot_mark = 3;
                 let transaction_id_with_mark = transaction_id | eot_mark;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
+                let buffer = write_part::<u32>(*to, buffer)?;
                 Some(buffer_len - buffer.len())
             }
         }
@@ -96,7 +98,7 @@ impl<S: Sequencer> PartialEq for LogRecord<S> {
         match (self, other) {
             (Self::Prepared(l0, l1), Self::Prepared(r0, r1))
             | (Self::Committed(l0, l1), Self::Committed(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::RolledBack(l0), Self::RolledBack(r0)) => l0 == r0,
+            (Self::RolledBack(l0, l1), Self::RolledBack(r0, r1)) => l0 == r0 && l1 == r1,
             _ => false,
         }
     }
@@ -134,9 +136,8 @@ fn write_part<T: Copy + Sized>(value: T, buffer: &mut [u8]) -> Option<&mut [u8]>
 
 #[cfg(test)]
 mod tests {
-    use crate::AtomicCounter;
-
     use super::*;
+    use crate::AtomicCounter;
     use quickcheck::QuickCheck;
 
     #[test]
@@ -146,7 +147,7 @@ mod tests {
             let transaction_id = (seed & (!0b11)) as u64;
             let instant = seed.rotate_left(32) as u64;
             let mut small_buffer = [0; 5];
-            let mut medium_buffer = [0; 13];
+            let mut medium_buffer = [0; 12];
             let mut large_buffer = [0; 32];
 
             match eot_mark {
@@ -175,7 +176,7 @@ mod tests {
                     recovered == committed
                 }
                 3 => {
-                    let rolled_back = LogRecord::<AtomicCounter>::RolledBack(transaction_id);
+                    let rolled_back = LogRecord::<AtomicCounter>::RolledBack(transaction_id, 1);
                     assert!(rolled_back.write(&mut small_buffer).is_none());
                     assert!(rolled_back.write(&mut medium_buffer).is_some());
                     assert!(rolled_back.write(&mut large_buffer).is_some());

@@ -189,20 +189,21 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     ///     let database = Database::with_path(Path::new("submit")).await.unwrap();
     ///     let transaction = database.transaction();
     ///     let journal = transaction.journal();
-    ///     assert_eq!(journal.submit().ok(), NonZeroU32::new(1));
+    ///     assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
     /// };
     /// ```
     #[inline]
-    pub fn submit(mut self) -> Result<NonZeroU32, Error> {
+    #[must_use]
+    pub fn submit(mut self) -> NonZeroU32 {
         let submit_instant = self.transaction.record(&self.anchor);
         if let Some(log_buffer) = self.log_buffer.take() {
             log_buffer.flush(
                 self.transaction.database().persistence_layer(),
                 Some(submit_instant),
                 None,
-            )?;
+            );
         }
-        Ok(submit_instant)
+        submit_instant
     }
 
     /// Captures the current state of the [`Journal`] as a [`Snapshot`].
@@ -581,13 +582,13 @@ mod tests {
         let database = Database::with_path(path).await.unwrap();
         let transaction = database.transaction();
         let journal_1 = transaction.journal();
-        assert_eq!(journal_1.submit().ok(), NonZeroU32::new(1));
+        assert_eq!(Some(journal_1.submit()), NonZeroU32::new(1));
         let journal_2 = transaction.journal();
-        assert_eq!(journal_2.submit().ok(), NonZeroU32::new(2));
+        assert_eq!(Some(journal_2.submit()), NonZeroU32::new(2));
         let journal_3 = transaction.journal();
         let journal_4 = transaction.journal();
-        assert_eq!(journal_4.submit().ok(), NonZeroU32::new(3));
-        assert_eq!(journal_3.submit().ok(), NonZeroU32::new(4));
+        assert_eq!(Some(journal_4.submit()), NonZeroU32::new(3));
+        assert_eq!(Some(journal_3.submit()), NonZeroU32::new(4));
         assert!(remove_dir_all(path).await.is_ok());
     }
 }
