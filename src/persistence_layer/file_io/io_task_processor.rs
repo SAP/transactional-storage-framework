@@ -4,18 +4,12 @@
 
 //! IO task processor.
 
-use super::{AwaitIO, FileIO, FileIOData, FileLogBuffer, RandomAccessFile};
-use crate::journal::ID as JournalID;
-use crate::persistence_layer::BufferredLogger;
-use crate::transaction::ID as TransactionID;
-use crate::{Error, Sequencer};
-use std::mem::{size_of, MaybeUninit};
-use std::num::NonZeroU32;
+use super::{FileIOData, FileLogBuffer, LogRecord, RandomAccessFile};
+use crate::Sequencer;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::thread::{self, yield_now};
-use std::time::Instant;
 use std::{ptr::addr_of_mut, sync::mpsc::Receiver};
 
 /// Types of IO related tasks.
@@ -60,7 +54,8 @@ pub(super) fn process_sync<S: Sequencer>(
     let mut last_log0_lsn = 0;
 
     // Insert the log buffer head to force the log sequence number ever increasing.
-    let mut log_buffer_head = FileLogBuffer::default();
+    let mut log_buffer_head =
+        FileLogBuffer::<S>::from_log_record(LogRecord::Committed(0, S::Instant::default()));
     let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
     let _: Result<usize, usize> =
         file_io_data
@@ -75,6 +70,7 @@ pub(super) fn process_sync<S: Sequencer>(
                 let mut buffer: [u8; 32] = [0; 32];
                 while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
                     read_offset += 32;
+                    let _log_record = LogRecord::<S>::from_raw_data(&buffer);
                 }
             }
             IOTask::Shutdown => {
@@ -84,20 +80,39 @@ pub(super) fn process_sync<S: Sequencer>(
         if let Some(mut log_buffer) =
             take_log_buffer_link(&file_io_data.log_buffer_link, &mut log_buffer_head)
         {
+            let mut buffer: [u8; 32] = [0; 32];
+            let mut bytes_written = 0;
             loop {
-                let data = BufferredLogger::<S, FileIO<S>>::as_u8_slice(&log_buffer.content);
-                if file_io_data.log0.write(data, log0_offset).is_err() {
-                    // Retry after yielding.
-                    yield_now();
+                if let Some(n) = log_buffer.log_record.write(&mut buffer[bytes_written..]) {
+                    bytes_written += n;
+                } else {
+                    if file_io_data
+                        .log0
+                        .write(&buffer[0..bytes_written], log0_offset)
+                        .is_err()
+                    {
+                        // Retry after yielding.
+                        yield_now();
+                        continue;
+                    }
+                    log0_offset += bytes_written as u64;
+                    bytes_written = 0;
                     continue;
                 }
-                log0_offset += data.len() as u64;
-                debug_assert!(last_log0_lsn < log_buffer.lsn);
-                last_log0_lsn = log_buffer.lsn;
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
-                    drop(log_buffer);
+                    while file_io_data
+                        .log0
+                        .write(&buffer[0..bytes_written], log0_offset)
+                        .is_err()
+                    {
+                        // Retry after yielding.
+                        yield_now();
+                    }
+                    debug_assert!(last_log0_lsn < log_buffer.lsn);
+                    log0_offset += bytes_written as u64;
+                    last_log0_lsn = log_buffer.lsn;
                     break;
                 }
             }
@@ -149,14 +164,14 @@ fn flush_sync(file_io_data: &Arc<FileIOData>) {
 }
 
 /// Takes the specified [`FileLogBuffer`] linked list.
-fn take_log_buffer_link(
+fn take_log_buffer_link<S: Sequencer>(
     log_buffer_link: &AtomicUsize,
-    log_buffer_head: &mut FileLogBuffer,
-) -> Option<Box<FileLogBuffer>> {
+    log_buffer_head: &mut FileLogBuffer<S>,
+) -> Option<Box<FileLogBuffer<S>>> {
     let mut current_head = log_buffer_link.load(Acquire);
     let log_buffer_head_addr = addr_of_mut!(*log_buffer_head) as usize;
     while current_head != 0 && current_head != log_buffer_head_addr {
-        let current_head_ptr = current_head as *mut FileLogBuffer;
+        let current_head_ptr = current_head as *mut FileLogBuffer<S>;
         // Safety: `current_head_ptr` not being zero was checked.
         log_buffer_head.lsn = unsafe { (*current_head_ptr).lsn };
         if let Err(actual) =
@@ -184,66 +199,4 @@ fn take_log_buffer_link(
         }
     }
     None
-}
-
-impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for Vec<MaybeUninit<u8>> {
-    #[inline]
-    fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
-        &mut self,
-        id: TransactionID,
-        journal_id: JournalID,
-        len: usize,
-        writer: W,
-    ) -> Result<(), Error> {
-        let reserved = if self.is_empty() {
-            let header_len = size_of::<TransactionID>() + size_of::<JournalID>();
-            self.reserve(header_len + len);
-
-            // Write the header.
-            id.to_le_bytes()
-                .iter()
-                .for_each(|i| self.push(MaybeUninit::new(*i)));
-            journal_id
-                .to_le_bytes()
-                .iter()
-                .for_each(|i| self.push(MaybeUninit::new(*i)));
-
-            self.resize_with(header_len + len, MaybeUninit::uninit);
-            &mut self[header_len..]
-        } else {
-            let prev_len = self.len();
-            self.resize_with(len, MaybeUninit::uninit);
-            &mut self[prev_len..]
-        };
-        debug_assert_eq!(reserved.len(), len);
-        writer(reserved);
-        Ok(())
-    }
-
-    #[inline]
-    fn flush(
-        self,
-        persistence_layer: &FileIO<S>,
-        _submit_instant: Option<NonZeroU32>,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, FileIO<S>>, Error> {
-        let mut file_log_buffer = Box::<FileLogBuffer>::default();
-        file_log_buffer.content = self;
-        let file_log_buffer_ptr = Box::into_raw(file_log_buffer);
-        let lsn = FileIO::<S>::push_log_buffer(
-            &persistence_layer.file_io_data.log_buffer_link,
-            file_log_buffer_ptr,
-        );
-        debug_assert_ne!(lsn, 0);
-        drop(persistence_layer.sender.try_send(IOTask::Flush));
-        Ok(AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline))
-    }
-
-    // TODO: generalize it, e.g., `trait Log`.
-    #[inline]
-    fn as_u8_slice(&self) -> &[u8] {
-        let maybe_uninit_slice = self.as_slice();
-        // Safety: casting to `u8` is safe.
-        unsafe { &*(maybe_uninit_slice as *const [MaybeUninit<u8>] as *const [u8]) }
-    }
 }

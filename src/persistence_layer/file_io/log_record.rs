@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)]
-
 use crate::transaction::ID as TransactionID;
 use crate::Sequencer;
 use std::mem::{size_of, MaybeUninit};
@@ -36,7 +34,10 @@ impl<S: Sequencer> LogRecord<S> {
         let eot_mark = transaction_id_with_mark & 0b11;
         let transaction_id = transaction_id_with_mark & (!0b11);
         match eot_mark {
-            0 => todo!(),
+            0 =>  {
+                // TODO: implement it.
+                None
+            },
             1 => {
                 // Prepared.
                 let (instant, value) = read_part::<S::Instant>(value)?;
@@ -55,20 +56,12 @@ impl<S: Sequencer> LogRecord<S> {
         }
     }
 
-    /// Calculates the length in bytes.
-    pub(super) fn len(&self) -> usize {
-        match self {
-            LogRecord::Prepared(_, _) | LogRecord::Committed(_, _) => {
-                size_of::<TransactionID>() + size_of::<S::Instant>()
-            }
-            LogRecord::RolledBack(_) => size_of::<TransactionID>(),
-        }
-    }
-
     /// Writes the data into the supplied buffer.
     ///
-    /// Returns `None` if the data could not be written to the buffer.
-    pub(super) fn write<'b>(&self, buffer: &'b mut [u8]) -> Option<&'b mut [u8]> {
+    /// Returns `None` if the data could not be written to the buffer, or returns the number of
+    /// bytes written to the buffer.
+    pub(super) fn write(&self, buffer: &mut [u8]) -> Option<usize> {
+        let buffer_len = buffer.len();
         match self {
             LogRecord::Prepared(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
@@ -76,7 +69,7 @@ impl<S: Sequencer> LogRecord<S> {
                 let transaction_id_with_mark = transaction_id | eot_mark;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 let buffer = write_part::<S::Instant>(*instant, buffer)?;
-                Some(buffer)
+                Some(buffer_len - buffer.len())
             }
             LogRecord::Committed(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
@@ -84,14 +77,14 @@ impl<S: Sequencer> LogRecord<S> {
                 let transaction_id_with_mark = transaction_id | eot_mark;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 let buffer = write_part::<S::Instant>(*instant, buffer)?;
-                Some(buffer)
+                Some(buffer_len - buffer.len())
             }
             LogRecord::RolledBack(transaction_id) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 let eot_mark = 3;
                 let transaction_id_with_mark = transaction_id | eot_mark;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                Some(buffer)
+                Some(buffer_len - buffer.len())
             }
         }
     }
