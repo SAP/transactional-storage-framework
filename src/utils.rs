@@ -7,11 +7,20 @@
 use std::convert::Into;
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::sync::{Condvar, Mutex};
 use std::thread::{available_parallelism, current, ThreadId};
 
-/// The non-cryptographic [`Hasher`] for integer values.
+/// A non-cryptographic [`Hasher`] for integer values.
 #[derive(Clone, Copy, Debug)]
 pub struct IntHasher(ArrayOrU64);
+
+/// A simple implementation of a binary semaphore.
+#[derive(Debug, Default)]
+pub struct BinarySemaphore<T: Debug + Default> {
+    condvar: Condvar,
+    mutex: Mutex<T>,
+}
 
 /// Returns the current thread identifier.
 ///
@@ -72,6 +81,16 @@ pub fn advise_num_shards() -> usize {
     available_parallelism().ok().map_or(1, Into::into)
 }
 
+/// [`ArrayOrU64`] is a `u64` integer that can also be used as an array of `u8`.
+#[derive(Clone, Copy)]
+union ArrayOrU64 {
+    /// Array.
+    array: [u8; 8],
+
+    /// Integer.
+    integer: u64,
+}
+
 impl Default for IntHasher {
     #[inline]
     fn default() -> Self {
@@ -111,14 +130,32 @@ impl Hasher for IntHasher {
     }
 }
 
-/// [`ArrayOrU64`] is a `u64` integer that can also be used as an array of `u8`.
-#[derive(Clone, Copy)]
-union ArrayOrU64 {
-    /// Array.
-    array: [u8; 8],
+impl<T: Debug + Default> BinarySemaphore<T> {
+    /// Waits for a signal.
+    #[inline]
+    pub fn wait_while<F: FnMut(&mut T) -> bool>(&self, condition: F) {
+        if let Ok(guard) = self.mutex.lock() {
+            drop(self.condvar.wait_while(guard, condition));
+        }
+    }
 
-    /// Integer.
-    integer: u64,
+    /// Sends a signal.
+    #[inline]
+    pub fn signal<F: FnOnce(&mut T)>(&self, prepare: F) {
+        if let Ok(mut guard) = self.mutex.lock() {
+            prepare(&mut *guard);
+            self.condvar.notify_one();
+        }
+    }
+}
+
+impl<T: Debug + Default> Deref for BinarySemaphore<T> {
+    type Target = Mutex<T>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.mutex
+    }
 }
 
 impl Debug for ArrayOrU64 {
