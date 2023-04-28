@@ -19,6 +19,7 @@ scc = "1.6"
 [dev-dependencies]
 criterion = { version = "0.4", features = ["async_futures"] }
 futures = "0.3"
+quickcheck = "1.0"
 static_assertions = "1.1"
 tokio = { version = "1.2", features = ["full"] }
 

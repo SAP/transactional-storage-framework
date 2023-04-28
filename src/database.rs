@@ -83,11 +83,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             kernel: kernel.clone(),
             task_processor,
         };
-        let io_completion =
+        let recovery_completion =
             kernel
                 .persistence_layer
                 .recover(&mut database, recover_until, deadline)?;
-        let recovered_instant = io_completion.await?;
+        let recovered_instant = recovery_completion.await?;
         let _: Result<S::Instant, S::Instant> = kernel.sequencer.update(recovered_instant, Relaxed);
         Ok(database)
     }

@@ -32,10 +32,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// until the transaction or journal is ended.
     type LogBuffer: BufferredLogger<S, Self>;
 
-    /// Recovers the database.
+    /// Recovers the database before serving any other requests.
     ///
-    /// If a specific logical instant is specified, it only recovers the storage up until the time
-    /// point.
+    /// A call to `recover` must precede any other calls to other methods in the
+    /// [`PersistenceLayer`], and the [`PersistenceLayer`] must not serve any other requests until
+    /// fully recovered. If a specific logical instant is specified, it only recovers the storage
+    /// up until the time point.
     ///
     /// # Errors
     ///
@@ -166,21 +168,19 @@ pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>: Debug + Send + 
 
     /// Flushes the content.
     ///
-    /// This method is invoked when the associated journal is submitted.
+    /// This method is invoked when the associated journal is submitted or a log record is created
+    /// and immediately submitted.
     ///
     /// # Errors
     ///
     /// Returns an [`Error`] if the content of the log record could not be passed to the
     /// persistence layer.
     fn flush(
-        self,
+        self: Box<Self>,
         persistence_layer: &P,
         submit_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, P>, Error>;
-
-    /// Expresses itself as a `u8` slice.
-    fn as_u8_slice(&self) -> &[u8];
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was
