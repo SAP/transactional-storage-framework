@@ -15,13 +15,13 @@ use std::{ptr::addr_of_mut, sync::mpsc::Receiver};
 /// Types of IO related tasks.
 #[derive(Debug)]
 pub(super) enum IOTask<S: Sequencer> {
-    /// The [`FileIO`] needs to flush log buffers.
+    /// The [`FileIO`](super::FileIO) needs to flush log buffers.
     Flush,
 
-    /// The [`FileIO`] needs to recover the database.
+    /// The [`FileIO`](super::FileIO) needs to recover the database.
     Recover(Option<S::Instant>),
 
-    /// The [`FileIO`] is shutting down.
+    /// The [`FileIO`](super::FileIO) is shutting down.
     Shutdown,
 }
 
