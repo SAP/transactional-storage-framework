@@ -9,7 +9,6 @@ use super::{
 };
 use scc::{ebr, HashIndex};
 use std::path::Path;
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -79,17 +78,16 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             persistence_layer,
         });
         let task_processor = TaskProcessor::spawn(kernel.clone());
-        let mut database = Database {
+        let database = Database {
             kernel: kernel.clone(),
             task_processor,
         };
         let recovery_completion =
             kernel
                 .persistence_layer
-                .recover(&mut database, recover_until, deadline)?;
-        let recovered_instant = recovery_completion.await?;
-        let _: Result<S::Instant, S::Instant> = kernel.sequencer.update(recovered_instant, Relaxed);
-        Ok(database)
+                .recover(database, recover_until, deadline)?;
+        let recovered_database = recovery_completion.await?;
+        Ok(recovered_database)
     }
 
     /// Backs up the current snapshot of the database.

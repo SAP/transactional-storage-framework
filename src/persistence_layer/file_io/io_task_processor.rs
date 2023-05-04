@@ -4,7 +4,8 @@
 
 //! IO task processor.
 
-use super::{FileIOData, FileLogBuffer, LogRecord, RandomAccessFile};
+use super::recovery::recover_database;
+use super::{FileIOData, FileLogBuffer, RandomAccessFile};
 use crate::Sequencer;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -14,12 +15,12 @@ use std::{ptr::addr_of_mut, sync::mpsc::Receiver};
 
 /// Types of IO related tasks.
 #[derive(Debug)]
-pub(super) enum IOTask<S: Sequencer> {
+pub(super) enum IOTask {
     /// The [`FileIO`](super::FileIO) needs to flush log buffers.
     Flush,
 
     /// The [`FileIO`](super::FileIO) needs to recover the database.
-    Recover(Option<S::Instant>),
+    Recover,
 
     /// The [`FileIO`](super::FileIO) is shutting down.
     Shutdown,
@@ -39,8 +40,8 @@ pub(super) struct FlusherData {
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
 pub(super) fn process_sync<S: Sequencer>(
-    receiver: &mut Receiver<IOTask<S>>,
-    file_io_data: &Arc<FileIOData>,
+    receiver: &mut Receiver<IOTask>,
+    file_io_data: &Arc<FileIOData<S>>,
 ) {
     // `flusher` calls `sync_data` or `sync_all` in the background.
     let file_io_data_clone = file_io_data.clone();
@@ -64,13 +65,8 @@ pub(super) fn process_sync<S: Sequencer>(
     while let Ok(task) = receiver.recv() {
         match task {
             IOTask::Flush => (),
-            IOTask::Recover(_until) => {
-                let mut read_offset = 0;
-                let mut buffer: [u8; 32] = [0; 32];
-                while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
-                    read_offset += 32;
-                    let _log_record = LogRecord::<S>::from_raw_data(&buffer);
-                }
+            IOTask::Recover => {
+                recover_database(file_io_data);
             }
             IOTask::Shutdown => {
                 break;
@@ -117,7 +113,7 @@ pub(super) fn process_sync<S: Sequencer>(
 /// Flushes dirty pages and updates metadata of the file.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
-fn flush_sync(file_io_data: &Arc<FileIOData>) {
+fn flush_sync<S: Sequencer>(file_io_data: &Arc<FileIOData<S>>) {
     while file_io_data
         .flusher_data
         .try_lock()

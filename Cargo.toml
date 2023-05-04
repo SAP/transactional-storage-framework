@@ -14,12 +14,12 @@ categories = ["asynchronous", "concurrency", "database-implementations"]
 keywords = ["async", "concurrent", "database"]
 
 [dependencies]
-scc = "1.6"
+scc = "1.7"
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["async_futures"] }
 futures = "0.3"
-quickcheck = "1.0"
+proptest = "1.1"
 static_assertions = "1.1"
 tokio = { version = "1.2", features = ["full"] }
 
