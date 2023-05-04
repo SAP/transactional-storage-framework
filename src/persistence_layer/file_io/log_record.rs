@@ -138,11 +138,11 @@ fn write_part<T: Copy + Sized>(value: T, buffer: &mut [u8]) -> Option<&mut [u8]>
 mod tests {
     use super::*;
     use crate::AtomicCounter;
-    use quickcheck::QuickCheck;
+    use proptest::prelude::*;
 
-    #[test]
-    fn prop_read_write() {
-        fn read_write(seed: usize) -> bool {
+    proptest! {
+        #[test]
+        fn read_write(seed in 0_usize..usize::MAX) {
             let eot_mark = seed % 0b11;
             let transaction_id = (seed & (!0b11)) as u64;
             let instant = seed.rotate_left(32) as u64;
@@ -150,7 +150,7 @@ mod tests {
             let mut medium_buffer = [0; 12];
             let mut large_buffer = [0; 32];
 
-            match eot_mark {
+            let result = match eot_mark {
                 0 => {
                     // TODO: implement and test it.
                     true
@@ -160,37 +160,41 @@ mod tests {
                     assert!(prepared.write(&mut small_buffer).is_none());
                     assert!(prepared.write(&mut medium_buffer).is_none());
                     assert!(prepared.write(&mut large_buffer).is_some());
-                    let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) else {
-                        return false;
-                    };
-                    recovered == prepared
+                    if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                        recovered == prepared
+                    } else {
+                        false
+                    }
                 }
                 2 => {
                     let committed = LogRecord::<AtomicCounter>::Committed(transaction_id, instant);
                     assert!(committed.write(&mut small_buffer).is_none());
                     assert!(committed.write(&mut medium_buffer).is_none());
                     assert!(committed.write(&mut large_buffer).is_some());
-                    let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) else {
-                        return false;
-                    };
-                    recovered == committed
+                    if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                        recovered == committed
+                    } else {
+                        false
+                    }
                 }
                 3 => {
                     let rolled_back = LogRecord::<AtomicCounter>::RolledBack(transaction_id, 1);
                     assert!(rolled_back.write(&mut small_buffer).is_none());
                     assert!(rolled_back.write(&mut medium_buffer).is_some());
                     assert!(rolled_back.write(&mut large_buffer).is_some());
-                    let Some((recovered_from_medium, _)) = LogRecord::<AtomicCounter>::from_raw_data(&medium_buffer) else {
-                        return false;
-                    };
-                    let Some((recovered_from_large, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) else {
-                        return false;
-                    };
-                    recovered_from_large == rolled_back && recovered_from_medium == rolled_back
+                    if let Some((recovered_from_medium, _)) = LogRecord::<AtomicCounter>::from_raw_data(&medium_buffer) {
+                        if let Some((recovered_from_large, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                            recovered_from_large == rolled_back && recovered_from_medium == rolled_back
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 }
                 _ => unreachable!(),
-            }
+            };
+            assert!(result);
         }
-        QuickCheck::new().quickcheck(read_write as fn(usize) -> bool);
     }
 }
