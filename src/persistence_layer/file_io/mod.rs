@@ -8,6 +8,7 @@
 mod io_task_processor;
 mod log_record;
 mod random_access_file;
+mod recovery;
 
 pub use random_access_file::RandomAccessFile;
 
@@ -16,6 +17,8 @@ use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
 use io_task_processor::{FlusherData, IOTask};
+use log_record::LogRecord;
+use recovery::RecoveryData;
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io;
@@ -26,13 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
-
-use self::log_record::LogRecord;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
@@ -47,12 +47,10 @@ pub struct FileIO<S: Sequencer> {
     io_worker: Option<JoinHandle<()>>,
 
     /// Shared data among the worker and database threads.
-    ///
-    /// TODO: need sharding of `FileIOSharedData`.
-    file_io_data: Arc<FileIOData>,
+    file_io_data: Arc<FileIOData<S>>,
 
     /// The IO task sender.
-    sender: SyncSender<IOTask<S>>,
+    sender: SyncSender<IOTask>,
 
     /// This pacifies `Clippy` complaining the lack of usage of `S`.
     _phantom: PhantomData<S>,
@@ -76,7 +74,10 @@ pub struct FileLogBuffer {
 
 /// [`FileIOData`] is shared among the worker and database threads.
 #[derive(Debug)]
-struct FileIOData {
+struct FileIOData<S: Sequencer> {
+    /// The database to recover.
+    recovery_data: Mutex<Option<Box<RecoveryData<S>>>>,
+
     /// The first log file.
     log0: RandomAccessFile,
 
@@ -128,6 +129,7 @@ impl<S: Sequencer> FileIO<S> {
         let data0 = Self::open_file(&mut path_buffer, "0.dat")?;
         let data1 = Self::open_file(&mut path_buffer, "1.dat")?;
         let file_io_data = Arc::new(FileIOData {
+            recovery_data: Mutex::default(),
             log0,
             log1,
             data0,
@@ -138,8 +140,7 @@ impl<S: Sequencer> FileIO<S> {
             flusher_data: utils::BinarySemaphore::default(),
         });
         let file_io_data_clone = file_io_data.clone();
-        let (sender, mut receiver) =
-            mpsc::sync_channel::<IOTask<S>>(utils::advise_num_shards() * 4);
+        let (sender, mut receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             io_worker: Some(thread::spawn(move || {
                 io_task_processor::process_sync(&mut receiver, &file_io_data_clone);
@@ -220,21 +221,28 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     type LogBuffer = FileLogBuffer;
 
     #[inline]
-    fn recover<'d, 'p>(
-        &'p self,
-        database: &'d mut Database<S, Self>,
+    fn recover(
+        &self,
+        database: Database<S, Self>,
         until: Option<<S as Sequencer>::Instant>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitRecovery<'d, 'p, S, Self>, Error> {
-        if self.sender.try_send(IOTask::Recover(until)).is_err() {
+    ) -> Result<AwaitRecovery<S, Self>, Error> {
+        if let Ok(mut recovery_data) = self.file_io_data.recovery_data.lock() {
+            debug_assert!(recovery_data.is_none());
+            recovery_data.replace(Box::new(RecoveryData::new(database, until)));
+        } else {
+            // Locking unexpectedly failed.
+            return Err(Error::UnexpectedState);
+        }
+        if self.sender.try_send(IOTask::Recover).is_err() {
             // `Recover` must be the first request.
             return Err(Error::UnexpectedState);
         }
+
         Ok(AwaitRecovery {
-            database,
             persistence_layer: self,
-            recovered: S::Instant::default(),
             deadline,
+            _phantom: PhantomData,
         })
     }
 
@@ -304,11 +312,6 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn read_log_record(&self, _waker: &Waker) -> Result<Option<Box<[u8]>>, Error> {
-        Ok(None)
-    }
-
-    #[inline]
     fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
         if self.file_io_data.last_flushed_lsn.load(Acquire) >= lsn {
             Some(Ok(S::Instant::default()))
@@ -325,6 +328,28 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
             waker.wake_by_ref();
             None
         }
+    }
+
+    #[inline]
+    fn check_recovery(&self, waker: &Waker) -> Result<Option<Database<S, Self>>, Error> {
+        // Locking may block the thread.
+        if let Ok(mut guard) = self.file_io_data.recovery_data.lock() {
+            if let Some(mut recovery_data) = guard.take() {
+                if let Some(result) = recovery_data.get_result() {
+                    // Recovery completed.
+                    result?;
+                    return Ok(Some(recovery_data.take()));
+                }
+                recovery_data.set_waker(waker.clone());
+                guard.replace(recovery_data);
+            }
+        }
+        Ok(None)
+    }
+
+    #[inline]
+    fn cancel_recovery(&self) {
+        unimplemented!()
     }
 }
 

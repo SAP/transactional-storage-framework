@@ -14,7 +14,7 @@ categories = ["asynchronous", "concurrency", "database-implementations"]
 keywords = ["async", "concurrent", "database"]
 
 [dependencies]
-scc = "1.6"
+scc = "1.7"
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["async_futures"] }

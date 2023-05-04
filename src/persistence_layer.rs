@@ -39,15 +39,17 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// fully recovered. If a specific logical instant is specified, it only recovers the storage
     /// up until the time point.
     ///
+    /// The supplied [`Database`] must be in an initial state.
+    ///
     /// # Errors
     ///
     /// Returns an [`Error`] if the database could not be recovered.
-    fn recover<'d, 'p>(
-        &'p self,
-        database: &'d mut Database<S, Self>,
+    fn recover(
+        &self,
+        database: Database<S, Self>,
         until: Option<S::Instant>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitRecovery<'d, 'p, S, Self>, Error>;
+    ) -> Result<AwaitRecovery<S, Self>, Error>;
 
     /// Backs up the complete database.
     ///
@@ -137,14 +139,17 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// It returns the latest known logical instant value of the database.
     fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 
-    /// Reads a log record during recovery.
+    /// Checks if the database has been recovered from the persistence layer.
     ///
-    /// Returns `None` if there are no more log records to read.
+    /// Returns `None` if the database is being recovered.
     ///
     /// # Errors
     ///
-    /// Returns an [`Error`] if reading data from files failed.
-    fn read_log_record(&self, waker: &Waker) -> Result<Option<Box<[u8]>>, Error>;
+    /// Returns an [`Error`] if something went wrong during recovery.
+    fn check_recovery(&self, waker: &Waker) -> Result<Option<Database<S, Self>>, Error>;
+
+    /// Cancels database recovery.
+    fn cancel_recovery(&self);
 }
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
@@ -202,19 +207,15 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
 ///
 /// Dropping an [`AwaitRecovery`] without awaiting it is allowed if a timeout value is specified.
 #[derive(Debug)]
-pub struct AwaitRecovery<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> {
-    /// The database to recover.
-    #[allow(dead_code)]
-    database: &'d mut Database<S, P>,
-
+pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer from which the data is read.
     persistence_layer: &'p P,
 
-    /// The logical instant associated with the recovered database snapshot.
-    recovered: S::Instant,
-
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
+
+    /// Phantom to use `S`.
+    _phantom: PhantomData<S>,
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
@@ -271,26 +272,26 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     }
 }
 
-impl<'d, 'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'d, 'p, S, P> {
-    type Output = Result<S::Instant, Error>;
+impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'p, S, P> {
+    type Output = Result<Database<S, P>, Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.persistence_layer.read_log_record(cx.waker()) {
-            Ok(Some(_log_record)) => {
-                // TODO: implement it.
+        match self.persistence_layer.check_recovery(cx.waker()) {
+            Ok(Some(database)) => Poll::Ready(Ok(database)),
+            Ok(None) => {
                 if self
                     .deadline
                     .as_ref()
                     .map_or(false, |d| *d < Instant::now())
                 {
+                    self.persistence_layer.cancel_recovery();
                     Poll::Ready(Err(Error::Timeout))
                 } else {
                     // It assumes that the persistence layer will wake up the executor when ready.
                     Poll::Pending
                 }
             }
-            Ok(None) => Poll::Ready(Ok(self.recovered)),
             Err(error) => Poll::Ready(Err(error)),
         }
     }
