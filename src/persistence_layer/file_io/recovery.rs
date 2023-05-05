@@ -24,6 +24,9 @@ pub(super) struct RecoveryData<S: Sequencer> {
     result: Option<Result<(), Error>>,
 }
 
+// No log entries are wider than 32 bytes.
+const BUFFER_SIZE: usize = 32;
+
 impl<S: Sequencer> RecoveryData<S> {
     /// Creates a new [`RecoveryData`].
     pub(super) fn new(database: Database<S, FileIO<S>>, until: Option<S::Instant>) -> Self {
@@ -52,36 +55,71 @@ impl<S: Sequencer> RecoveryData<S> {
 }
 
 pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
-    let mut read_offset = 0;
-    let mut buffer: [u8; 32] = [0; 32];
-    while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
-        read_offset += 32;
-        let mut buffer_piece: &[u8] = &buffer;
-        while !buffer_piece.is_empty() {
-            if let Some((log_record, remaining)) = LogRecord::<S>::from_raw_data(buffer_piece) {
-                buffer_piece = remaining;
-                match log_record {
-                    LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
-                        if let Ok(mut recovery_data) = file_io_data.recovery_data.lock() {
-                            let result = recovery_data
-                                .as_mut()
-                                .unwrap()
-                                .database
-                                .sequencer()
-                                .update(instant, Release);
-                            debug_assert!(result.is_ok());
-                        }
-                    }
-                    LogRecord::RolledBack(_, _rollback_to) => todo!(),
-                }
+    let file_len = match file_io_data.log0.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            let mut guard = file_io_data.recovery_data.lock().unwrap();
+            let recovery_data = guard.as_mut().unwrap();
+            recovery_data.result.replace(Err(Error::IO(error.kind())));
+            if let Some(waker) = recovery_data.waker.take() {
+                waker.wake();
             }
+            return;
+        }
+    };
+
+    let mut read_offset = 0;
+    let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+    while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
+        let mut guard = file_io_data.recovery_data.lock().unwrap();
+        let database = &guard.as_mut().unwrap().database;
+        read_offset += interpret(&buffer, database);
+    }
+    if read_offset < file_len && file_len - read_offset < BUFFER_SIZE as u64 {
+        // More to read in the log file.
+        #[allow(clippy::cast_possible_truncation)]
+        let buffer_piece = &mut buffer[0..(file_len - read_offset) as usize];
+        if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
+            let mut guard = file_io_data.recovery_data.lock().unwrap();
+            let database = &guard.as_mut().unwrap().database;
+            read_offset += interpret(&buffer, database);
         }
     }
 
-    if let Ok(mut recovery_data) = file_io_data.recovery_data.lock() {
-        recovery_data.as_mut().unwrap().result.replace(Ok(()));
-        if let Some(waker) = recovery_data.as_mut().unwrap().waker.take() {
-            waker.wake();
+    let mut guard = file_io_data.recovery_data.lock().unwrap();
+    let recovery_data = guard.as_mut().unwrap();
+    if read_offset == file_len {
+        recovery_data.result.replace(Ok(()));
+    } else {
+        recovery_data
+            .result
+            .replace(Err(Error::IO(std::io::ErrorKind::InvalidData)));
+    }
+    if let Some(waker) = recovery_data.waker.take() {
+        waker.wake();
+    }
+}
+
+/// Interprets a log buffer.
+fn interpret<S: Sequencer>(mut buffer: &[u8], database: &Database<S, FileIO<S>>) -> u64 {
+    let buffer_len = buffer.len();
+    while !buffer.is_empty() {
+        if let Some((log_record, remaining)) = LogRecord::<S>::from_raw_data(buffer) {
+            buffer = remaining;
+            match log_record {
+                LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
+                    // TODO: instantiate recovery transactions.
+                    let result = database.sequencer().update(instant, Release);
+                    debug_assert!(result.is_ok());
+                }
+                LogRecord::RolledBack(_, _rollback_to) => todo!(),
+            }
+        } else {
+            // The length of the buffer piece was insufficient.
+            debug_assert_ne!(buffer.len(), BUFFER_SIZE);
+            debug_assert_eq!(buffer.len() / 8, 0);
+            return (buffer_len - buffer.len()) as u64;
         }
     }
+    buffer_len as u64
 }

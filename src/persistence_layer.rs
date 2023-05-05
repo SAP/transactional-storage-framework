@@ -146,10 +146,25 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// # Errors
     ///
     /// Returns an [`Error`] if something went wrong during recovery.
-    fn check_recovery(&self, waker: &Waker) -> Result<Option<Database<S, Self>>, Error>;
+    fn check_recovery(&self, waker: &Waker) -> Result<RecoveryResult<S, Self>, Error>;
 
     /// Cancels database recovery.
     fn cancel_recovery(&self);
+}
+
+/// The result of database recovery.
+#[derive(Debug)]
+pub enum RecoveryResult<S: Sequencer, P: PersistenceLayer<S>> {
+    /// Unable to check the recovery status.
+    ///
+    /// Needs to poll the recovery status.
+    Unknown,
+
+    /// The database is being recovered.
+    InProgress,
+
+    /// The database has been recovered.
+    Recovered(Database<S, P>),
 }
 
 /// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
@@ -278,21 +293,26 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitRecovery<'p, S, P
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.persistence_layer.check_recovery(cx.waker()) {
-            Ok(Some(database)) => Poll::Ready(Ok(database)),
-            Ok(None) => {
-                if self
-                    .deadline
-                    .as_ref()
-                    .map_or(false, |d| *d < Instant::now())
-                {
-                    self.persistence_layer.cancel_recovery();
-                    Poll::Ready(Err(Error::Timeout))
-                } else {
-                    // It assumes that the persistence layer will wake up the executor when ready.
-                    Poll::Pending
+            Ok(recovery_result) => match recovery_result {
+                RecoveryResult::Unknown => {
+                    cx.waker().wake_by_ref();
                 }
-            }
-            Err(error) => Poll::Ready(Err(error)),
+                RecoveryResult::InProgress => (),
+                RecoveryResult::Recovered(database) => {
+                    return Poll::Ready(Ok(database));
+                }
+            },
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        if self
+            .deadline
+            .as_ref()
+            .map_or(false, |d| *d < Instant::now())
+        {
+            self.persistence_layer.cancel_recovery();
+            Poll::Ready(Err(Error::Timeout))
+        } else {
+            Poll::Pending
         }
     }
 }
