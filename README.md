@@ -52,8 +52,11 @@ The framework consists of generic components that can be customizable and plugga
 
 ```rust
 use sap_tsf::Database;
+use std::path::Path;
 
-let database = Database::default();
+const DIR: &str = "db";
+let path = Path::new(DIR);
+let database = Database::with_path(path).await.unwrap();
 ```
 
 ### Sequencer
