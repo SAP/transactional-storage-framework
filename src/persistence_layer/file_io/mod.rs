@@ -12,6 +12,7 @@ mod recovery;
 
 pub use random_access_file::RandomAccessFile;
 
+use super::RecoveryResult;
 use crate::journal::ID as JournalID;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
 use crate::transaction::ID as TransactionID;
@@ -293,6 +294,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _prepare_instant: <S as Sequencer>::Instant,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
+        // TODO: implement it.
         Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
     }
 
@@ -331,25 +333,28 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn check_recovery(&self, waker: &Waker) -> Result<Option<Database<S, Self>>, Error> {
-        // Locking may block the thread.
-        if let Ok(mut guard) = self.file_io_data.recovery_data.lock() {
+    fn check_recovery(&self, waker: &Waker) -> Result<RecoveryResult<S, Self>, Error> {
+        if let Ok(mut guard) = self.file_io_data.recovery_data.try_lock() {
             if let Some(mut recovery_data) = guard.take() {
                 if let Some(result) = recovery_data.get_result() {
                     // Recovery completed.
                     result?;
-                    return Ok(Some(recovery_data.take()));
+                    return Ok(RecoveryResult::Recovered(recovery_data.take()));
                 }
                 recovery_data.set_waker(waker.clone());
                 guard.replace(recovery_data);
+                return Ok(RecoveryResult::InProgress);
             }
         }
-        Ok(None)
+
+        // Locking failed.
+        Ok(RecoveryResult::Unknown)
     }
 
     #[inline]
     fn cancel_recovery(&self) {
-        unimplemented!()
+        // TODO: implement it.
+        todo!()
     }
 }
 

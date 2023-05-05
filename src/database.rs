@@ -431,7 +431,8 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Kernel<S, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Database, Metadata};
+    use crate::Database;
+    use std::sync::atomic::Ordering::Relaxed;
     use std::sync::Arc;
     use tokio::fs::remove_dir_all;
 
@@ -441,22 +442,19 @@ mod tests {
         let path = Path::new(DIR);
         let database = Arc::new(Database::with_path(path).await.unwrap());
         let transaction = database.transaction();
-        let snapshot = transaction.snapshot();
-        let mut journal = transaction.journal();
-        let metadata = Metadata::default();
-        assert!(database
-            .create_container("hello".to_string(), metadata, &mut journal, None)
-            .await
-            .is_ok());
-        let metadata = Metadata::default();
-        assert!(database
-            .create_container("hello".to_string(), metadata, &mut journal, None)
-            .await
-            .is_err());
-        drop(journal);
-        drop(snapshot);
-        drop(transaction);
+        assert!(transaction.commit().await.is_ok());
+        let transaction = database.transaction();
+        assert!(transaction.commit().await.is_ok());
+
+        let instant = database.sequencer().now(Relaxed);
         drop(database);
+
+        let database_recovered = Arc::new(Database::with_path(path).await.unwrap());
+        let recovered_instant = database_recovered.sequencer().now(Relaxed);
+
+        assert_eq!(instant, recovered_instant);
+        drop(database_recovered);
+
         assert!(remove_dir_all(path).await.is_ok());
     }
 }
