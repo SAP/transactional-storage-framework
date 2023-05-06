@@ -131,7 +131,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
-    /// Checks if the IO operation associated with the log sequence number was completed.
+    /// Checks if the IO operation associated with the log offset was completed.
     ///
     /// If the IO operation is still in progress, the supplied [`Waker`] is kept in the
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
@@ -234,7 +234,7 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
-    /// Creates an [`AwaitIO`] from a log sequence number.
+    /// Creates an [`AwaitIO`] from the end-of-buffer offset in the log file.
     #[inline]
     pub fn with_eob_offset(persistence_layer: &'p P, eob_offset: u64) -> AwaitIO<'p, S, P> {
         AwaitIO {

@@ -53,7 +53,7 @@ pub(super) fn process_sync<S: Sequencer>(
 
     let mut log0_offset = 0;
 
-    // Insert the log buffer head to force the log sequence number ever increasing.
+    // Insert the log buffer head to share the current log offset value with database workers.
     let mut log_buffer_head = FileLogBuffer::default();
     let log_buffer_head_addr = addr_of_mut!(log_buffer_head) as usize;
     let _: Result<usize, usize> =

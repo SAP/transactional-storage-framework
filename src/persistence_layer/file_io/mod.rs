@@ -97,7 +97,7 @@ struct FileIOData<S: Sequencer> {
     /// The first offset in the log file that has yet to be flushed.
     first_offset_to_flush: AtomicU64,
 
-    /// Log sequence number and [`Waker`] map.
+    /// Log offset values and [`Waker`] map.
     waker_map: Mutex<BTreeMap<u64, Waker>>,
 
     /// Flusher data.
@@ -170,10 +170,8 @@ impl<S: Sequencer> FileIO<S> {
         Ok(RandomAccessFile::from_file(file, &metadata))
     }
 
-    /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence
-    /// number of it.
-    ///
-    /// Returns the next starting offset in the log file.
+    /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the end-of-buffer
+    /// offset.
     fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) -> u64 {
         let mut head = log_buffer_link.load(Acquire);
         loop {
