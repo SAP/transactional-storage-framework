@@ -940,6 +940,7 @@ impl<S: Sequencer> AccessController<S> {
     /// Cleans up [`ObjectState`] and gets the supplied wait queue into the [`ObjectState`].
     ///
     /// Returns `true` if there are waiting transactions.
+    #[allow(clippy::too_many_lines)]
     fn post_process_object_state(
         object_state: &mut ObjectState<S>,
         mut wait_queue: Option<WaitQueue<S>>,
@@ -955,7 +956,8 @@ impl<S: Sequencer> AccessController<S> {
                             ExclusiveAwaitable::with_owner_and_wait_queue(
                                 owner.clone(),
                                 wait_queue,
-                            ),
+                            )
+                            .into(),
                         );
                     } else {
                         return false;
@@ -975,7 +977,8 @@ impl<S: Sequencer> AccessController<S> {
                             return false;
                         }
                         *ownership = Ownership::ProtectedAwaitable(
-                            SharedAwaitable::with_owner_and_wait_queue(owner.clone(), wait_queue),
+                            SharedAwaitable::with_owner_and_wait_queue(owner.clone(), wait_queue)
+                                .into(),
                         );
                     } else {
                         return false;
@@ -1002,7 +1005,8 @@ impl<S: Sequencer> AccessController<S> {
                             ExclusiveAwaitable::with_owner_and_wait_queue(
                                 owner.clone(),
                                 wait_queue,
-                            ),
+                            )
+                            .into(),
                         );
                     } else {
                         return false;
@@ -1025,7 +1029,8 @@ impl<S: Sequencer> AccessController<S> {
                             ExclusiveAwaitable::with_owner_and_wait_queue(
                                 owner.clone(),
                                 wait_queue,
-                            ),
+                            )
+                            .into(),
                         );
                     } else {
                         return false;
@@ -1090,7 +1095,7 @@ impl<S: Sequencer> AccessController<S> {
                         if !awaitable {
                             // Prepare for awaiting access to the database object.
                             *ownership = Ownership::CreatedAwaitable(
-                                ExclusiveAwaitable::with_owner(owner.clone()),
+                                ExclusiveAwaitable::with_owner(owner.clone()).into(),
                             );
                         }
                         return Ok(None);
@@ -1140,7 +1145,7 @@ impl<S: Sequencer> AccessController<S> {
                             }
                             let mut shared_awaitable = SharedAwaitable::with_owner(owner.clone());
                             shared_awaitable.owner_set.insert(Owner::new(new_owner));
-                            *ownership = Ownership::ProtectedAwaitable(shared_awaitable);
+                            *ownership = Ownership::ProtectedAwaitable(shared_awaitable.into());
                             return Ok(Some(true));
                         }
                         Ownership::ProtectedAwaitable(shared_awaitable) => {
@@ -1165,7 +1170,8 @@ impl<S: Sequencer> AccessController<S> {
                 ObjectState::Created(instant) => {
                     // The database object is not owned or locked.
                     *object_state = ObjectState::Owned(Ownership::ProtectedAwaitable(
-                        SharedAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                        SharedAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner))
+                            .into(),
                     ));
                     return Ok(Some(true));
                 }
@@ -1211,14 +1217,14 @@ impl<S: Sequencer> AccessController<S> {
                                 ExclusiveAwaitable::with_owner(Owner::new(new_owner));
                             exclusive_awaitable
                                 .set_prior_state(Ownership::Protected(owner.clone()));
-                            *ownership = Ownership::LockedAwaitable(exclusive_awaitable);
+                            *ownership = Ownership::LockedAwaitable(exclusive_awaitable.into());
                             return Ok(Some(true));
                         } else if owner.is_terminated() {
                             *ownership = Ownership::Locked(Owner::new(new_owner));
                             return Ok(Some(true));
                         } else if deadline.is_some() {
                             *ownership = Ownership::ProtectedAwaitable(
-                                SharedAwaitable::with_owner(owner.clone()),
+                                SharedAwaitable::with_owner(owner.clone()).into(),
                             );
                             return Ok(None);
                         }
@@ -1233,7 +1239,8 @@ impl<S: Sequencer> AccessController<S> {
                                     ExclusiveAwaitable::with_instant_and_owner(
                                         shared_awaitable.creation_instant,
                                         Owner::new(new_owner),
-                                    ),
+                                    )
+                                    .into(),
                                 );
                             }
                             return Ok(Some(true));
@@ -1250,7 +1257,8 @@ impl<S: Sequencer> AccessController<S> {
                 },
                 ObjectState::Created(instant) => {
                     *object_state = ObjectState::Owned(Ownership::LockedAwaitable(
-                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner))
+                            .into(),
                     ));
                     return Ok(Some(true));
                 }
@@ -1296,7 +1304,7 @@ impl<S: Sequencer> AccessController<S> {
                                 ExclusiveAwaitable::with_owner(Owner::new(new_owner));
                             exclusive_awaitable
                                 .set_prior_state(Ownership::Protected(owner.clone()));
-                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                            *ownership = Ownership::DeletedAwaitable(exclusive_awaitable.into());
                             return Ok(Some(true));
                         } else if owner.is_terminated() {
                             *ownership = Ownership::Deleted(Owner::new(new_owner));
@@ -1304,7 +1312,7 @@ impl<S: Sequencer> AccessController<S> {
                         } else if deadline.is_some() {
                             // Allocate a wait queue and retry.
                             *ownership = Ownership::ProtectedAwaitable(
-                                SharedAwaitable::with_owner(owner.clone()),
+                                SharedAwaitable::with_owner(owner.clone()).into(),
                             );
                             return Ok(None);
                         }
@@ -1319,7 +1327,8 @@ impl<S: Sequencer> AccessController<S> {
                                     ExclusiveAwaitable::with_instant_and_owner(
                                         shared_awaitable.creation_instant,
                                         Owner::new(new_owner),
-                                    ),
+                                    )
+                                    .into(),
                                 );
                             }
                             return Ok(Some(true));
@@ -1337,7 +1346,8 @@ impl<S: Sequencer> AccessController<S> {
                 },
                 ObjectState::Created(instant) => {
                     *object_state = ObjectState::Owned(Ownership::DeletedAwaitable(
-                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner)),
+                        ExclusiveAwaitable::with_instant_and_owner(*instant, Owner::new(new_owner))
+                            .into(),
                     ));
                     return Ok(Some(true));
                 }
@@ -1372,10 +1382,13 @@ impl<S: Sequencer> AccessController<S> {
                     return Err(Error::SerializationFailure);
                 }
                 *ownership = if is_created {
-                    Ownership::ProtectedAwaitable(SharedAwaitable::with_instant_and_owner(
-                        commit_instant,
-                        Owner::new(new_owner),
-                    ))
+                    Ownership::ProtectedAwaitable(
+                        SharedAwaitable::with_instant_and_owner(
+                            commit_instant,
+                            Owner::new(new_owner),
+                        )
+                        .into(),
+                    )
                 } else {
                     Ownership::Protected(Owner::new(new_owner))
                 };
@@ -1432,11 +1445,13 @@ impl<S: Sequencer> AccessController<S> {
                     } else {
                         exclusive_awaitable.creation_instant
                     };
-                    *ownership =
-                        Ownership::ProtectedAwaitable(SharedAwaitable::with_instant_and_owner(
+                    *ownership = Ownership::ProtectedAwaitable(
+                        SharedAwaitable::with_instant_and_owner(
                             creation_instant,
                             Owner::new(new_owner),
-                        ));
+                        )
+                        .into(),
+                    );
                     return Ok((true, true));
                 }
             }
@@ -1492,10 +1507,13 @@ impl<S: Sequencer> AccessController<S> {
                     Err(Error::SerializationFailure)
                 } else {
                     *ownership = if is_created {
-                        Ownership::LockedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            commit_instant,
-                            Owner::new(new_owner),
-                        ))
+                        Ownership::LockedAwaitable(
+                            ExclusiveAwaitable::with_instant_and_owner(
+                                commit_instant,
+                                Owner::new(new_owner),
+                            )
+                            .into(),
+                        )
                     } else {
                         Ownership::Locked(Owner::new(new_owner))
                     };
@@ -1553,11 +1571,13 @@ impl<S: Sequencer> AccessController<S> {
                     } else {
                         exclusive_awaitable.creation_instant
                     };
-                    *ownership =
-                        Ownership::LockedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                    *ownership = Ownership::LockedAwaitable(
+                        ExclusiveAwaitable::with_instant_and_owner(
                             creation_instant,
                             Owner::new(new_owner),
-                        ));
+                        )
+                        .into(),
+                    );
                     return Ok((true, true));
                 }
             }
@@ -1613,10 +1633,13 @@ impl<S: Sequencer> AccessController<S> {
                     Err(Error::SerializationFailure)
                 } else {
                     *ownership = if is_created {
-                        Ownership::DeletedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
-                            commit_instant,
-                            Owner::new(new_owner),
-                        ))
+                        Ownership::DeletedAwaitable(
+                            ExclusiveAwaitable::with_instant_and_owner(
+                                commit_instant,
+                                Owner::new(new_owner),
+                            )
+                            .into(),
+                        )
                     } else {
                         Ownership::Deleted(Owner::new(new_owner))
                     };
@@ -1641,7 +1664,7 @@ impl<S: Sequencer> AccessController<S> {
                 } else {
                     exclusive_awaitable.set_prior_state(Ownership::Locked(owner.clone()));
                 }
-                *ownership = Ownership::DeletedAwaitable(exclusive_awaitable);
+                *ownership = Ownership::DeletedAwaitable(exclusive_awaitable.into());
                 Ok(Some(true))
             }
             Relationship::Concurrent => {
@@ -1686,11 +1709,13 @@ impl<S: Sequencer> AccessController<S> {
                     } else {
                         exclusive_awaitable.creation_instant
                     };
-                    *ownership =
-                        Ownership::DeletedAwaitable(ExclusiveAwaitable::with_instant_and_owner(
+                    *ownership = Ownership::DeletedAwaitable(
+                        ExclusiveAwaitable::with_instant_and_owner(
                             creation_instant,
                             Owner::new(new_owner),
-                        ));
+                        )
+                        .into(),
+                    );
                     return Ok((true, true));
                 }
             }
@@ -1718,13 +1743,15 @@ impl<S: Sequencer> AccessController<S> {
                     let old_exclusive_awaitable =
                         ExclusiveAwaitable::take_other(exclusive_awaitable);
                     if is_created {
-                        new_exclusive_awaitable
-                            .set_prior_state(Ownership::CreatedAwaitable(old_exclusive_awaitable));
+                        new_exclusive_awaitable.set_prior_state(Ownership::CreatedAwaitable(
+                            old_exclusive_awaitable.into(),
+                        ));
                     } else {
-                        new_exclusive_awaitable
-                            .set_prior_state(Ownership::LockedAwaitable(old_exclusive_awaitable));
+                        new_exclusive_awaitable.set_prior_state(Ownership::LockedAwaitable(
+                            old_exclusive_awaitable.into(),
+                        ));
                     }
-                    *ownership = Ownership::DeletedAwaitable(new_exclusive_awaitable);
+                    *ownership = Ownership::DeletedAwaitable(new_exclusive_awaitable.into());
                     return Ok((true, true));
                 }
             }
@@ -1762,11 +1789,11 @@ impl<S: Sequencer> AccessController<S> {
     /// Augments [`WaitQueue`]
     fn augment_wait_queue(is_created: bool, is_deleted: bool, owner: Owner<S>) -> Ownership<S> {
         if is_created {
-            Ownership::CreatedAwaitable(ExclusiveAwaitable::with_owner(owner))
+            Ownership::CreatedAwaitable(ExclusiveAwaitable::with_owner(owner).into())
         } else if is_deleted {
-            Ownership::DeletedAwaitable(ExclusiveAwaitable::with_owner(owner))
+            Ownership::DeletedAwaitable(ExclusiveAwaitable::with_owner(owner).into())
         } else {
-            Ownership::LockedAwaitable(ExclusiveAwaitable::with_owner(owner))
+            Ownership::LockedAwaitable(ExclusiveAwaitable::with_owner(owner).into())
         }
     }
 }
@@ -1836,6 +1863,7 @@ impl<S: Sequencer> ObjectState<S> {
     /// This rolls any promoted ownership back to the previous state if the owner was rolled back,
     /// or replaces [`ObjectState::Owned`] with [`ObjectState::Created`] or
     /// [`ObjectState::Deleted`] if the owner was committed.
+    #[allow(clippy::too_many_lines)]
     fn prepare_ownership_transfer(&mut self) {
         if let ObjectState::Owned(ownership) = self {
             // Try to revoke previously promoted access privileges if the owner was rolled back.
@@ -1854,7 +1882,8 @@ impl<S: Sequencer> ObjectState<S> {
                                         ExclusiveAwaitable::with_owner_and_wait_queue(
                                             owner.clone(),
                                             wait_queue,
-                                        ),
+                                        )
+                                        .into(),
                                     );
                                     continue;
                                 }
@@ -1867,7 +1896,8 @@ impl<S: Sequencer> ObjectState<S> {
                                         SharedAwaitable::with_owner_and_wait_queue(
                                             owner.clone(),
                                             wait_queue,
-                                        ),
+                                        )
+                                        .into(),
                                     );
                                     continue;
                                 }
@@ -1965,42 +1995,36 @@ impl<S: Sequencer> Clone for Request<S> {
 
 impl<S: Sequencer> SharedAwaitable<S> {
     /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted.
-    fn with_owner(owner: Owner<S>) -> Box<SharedAwaitable<S>> {
+    fn with_owner(owner: Owner<S>) -> SharedAwaitable<S> {
         let mut owner_set = BTreeSet::new();
         owner_set.insert(owner);
-        Box::new(SharedAwaitable {
+        SharedAwaitable {
             creation_instant: S::Instant::default(),
             owner_set,
             wait_queue: WaitQueue::default(),
-        })
+        }
     }
 
     /// Creates a new [`SharedAwaitable`] with a single owner inserted and a wait queue set.
-    fn with_owner_and_wait_queue(
-        owner: Owner<S>,
-        wait_queue: WaitQueue<S>,
-    ) -> Box<SharedAwaitable<S>> {
+    fn with_owner_and_wait_queue(owner: Owner<S>, wait_queue: WaitQueue<S>) -> SharedAwaitable<S> {
         let mut owner_set = BTreeSet::new();
         owner_set.insert(owner);
-        Box::new(SharedAwaitable {
+        SharedAwaitable {
             creation_instant: S::Instant::default(),
             owner_set,
             wait_queue,
-        })
+        }
     }
 
     /// Creates a new [`SharedAwaitable`] with a single owner inserted.
-    fn with_instant_and_owner(
-        creation_instant: S::Instant,
-        owner: Owner<S>,
-    ) -> Box<SharedAwaitable<S>> {
+    fn with_instant_and_owner(creation_instant: S::Instant, owner: Owner<S>) -> SharedAwaitable<S> {
         let mut owner_set = BTreeSet::new();
         owner_set.insert(owner);
-        Box::new(SharedAwaitable {
+        SharedAwaitable {
             creation_instant,
             owner_set,
             wait_queue: WaitQueue::default(),
-        })
+        }
     }
 
     /// Checks if the specified owner is linearizable with all the owners in the owner set.
@@ -2026,7 +2050,7 @@ impl<S: Sequencer> SharedAwaitable<S> {
         let mut exclusive_awaitable =
             ExclusiveAwaitable::with_owner_and_wait_queue(Owner::new(new_owner), wait_queue);
         exclusive_awaitable.set_prior_state(Ownership::ProtectedAwaitable(Box::new(self.clone())));
-        Some(exclusive_awaitable)
+        Some(exclusive_awaitable.into())
     }
 
     /// Cleans up committed and rolled back owners.
@@ -2062,36 +2086,36 @@ impl<S: Sequencer> Clone for SharedAwaitable<S> {
 
 impl<S: Sequencer> ExclusiveAwaitable<S> {
     /// Creates a new [`ExclusiveAwaitable`] from another instance of it.
-    fn take_other(other: &mut ExclusiveAwaitable<S>) -> Box<ExclusiveAwaitable<S>> {
-        Box::new(ExclusiveAwaitable {
+    fn take_other(other: &mut ExclusiveAwaitable<S>) -> ExclusiveAwaitable<S> {
+        ExclusiveAwaitable {
             creation_instant: other.creation_instant,
             owner: other.owner.clone(),
             prior_ownership: other.prior_ownership.take(),
             wait_queue: take(&mut other.wait_queue),
-        })
+        }
     }
 
     /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted.
-    fn with_owner(owner: Owner<S>) -> Box<ExclusiveAwaitable<S>> {
-        Box::new(ExclusiveAwaitable {
+    fn with_owner(owner: Owner<S>) -> ExclusiveAwaitable<S> {
+        ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
             prior_ownership: None,
             wait_queue: WaitQueue::default(),
-        })
+        }
     }
 
     /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted and a wait queue set.
     fn with_owner_and_wait_queue(
         owner: Owner<S>,
         wait_queue: WaitQueue<S>,
-    ) -> Box<ExclusiveAwaitable<S>> {
-        Box::new(ExclusiveAwaitable {
+    ) -> ExclusiveAwaitable<S> {
+        ExclusiveAwaitable {
             creation_instant: S::Instant::default(),
             owner,
             prior_ownership: None,
             wait_queue,
-        })
+        }
     }
 
     /// Creates a new [`ExclusiveAwaitable`] with a single owner inserted and the creation instant
@@ -2099,13 +2123,13 @@ impl<S: Sequencer> ExclusiveAwaitable<S> {
     fn with_instant_and_owner(
         creation_instant: S::Instant,
         owner: Owner<S>,
-    ) -> Box<ExclusiveAwaitable<S>> {
-        Box::new(ExclusiveAwaitable {
+    ) -> ExclusiveAwaitable<S> {
+        ExclusiveAwaitable {
             creation_instant,
             owner,
             prior_ownership: None,
             wait_queue: WaitQueue::default(),
-        })
+        }
     }
 
     /// Returns `true` if the [`ExclusiveAwaitable`] is empty.
