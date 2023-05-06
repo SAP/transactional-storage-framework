@@ -169,7 +169,7 @@ impl<S: Sequencer> FileIO<S> {
             .map_err(|e| Error::IO(e.kind()))?;
         let metadata = file.metadata().map_err(|e| Error::IO(e.kind()))?;
         path_buffer.pop();
-        Ok(RandomAccessFile::from_file(file, metadata))
+        Ok(RandomAccessFile::from_file(file, &metadata))
     }
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence

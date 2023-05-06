@@ -12,7 +12,7 @@ mod unix {
     use std::ops::Deref;
     use std::os::unix::fs::FileExt;
     use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::Ordering::{self, Relaxed, Release};
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
     /// [`File`].
@@ -22,15 +22,13 @@ mod unix {
         file: File,
 
         /// The current length of the file.
-        ///
-        /// TODO: update the length on write.
         len: AtomicU64,
     }
 
     impl RandomAccessFile {
         /// Creates a new [`RandomAccessFile`].
         #[inline]
-        pub fn from_file(file: File, metadata: Metadata) -> RandomAccessFile {
+        pub fn from_file(file: File, metadata: &Metadata) -> RandomAccessFile {
             RandomAccessFile {
                 file,
                 len: AtomicU64::new(metadata.len()),
@@ -52,7 +50,22 @@ mod unix {
         /// Abstraction over random write operations.
         #[inline]
         pub fn write(&self, buffer: &[u8], offset: u64) -> Result<()> {
-            self.file.write_all_at(buffer, offset)
+            let result = self.file.write_all_at(buffer, offset);
+            if result.is_ok() {
+                let mut current_len = self.len.load(Relaxed);
+                while current_len < offset {
+                    match self.len.compare_exchange(
+                        current_len,
+                        offset + buffer.len() as u64,
+                        Release,
+                        Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => current_len = actual,
+                    }
+                }
+            }
+            result
         }
     }
 
@@ -77,6 +90,7 @@ mod windows {
     use std::ops::Deref;
     use std::os::windows::fs::FileExt;
     use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering::{self, Relaxed, Release};
 
     /// [`RandomAccessFile`] allows the user to freely read and write any random location of the
     /// [`File`].
@@ -92,7 +106,7 @@ mod windows {
     impl RandomAccessFile {
         /// Creates a new [`RandomAccessFile`].
         #[inline]
-        pub fn from_file(file: File, metadata: Metadata) -> RandomAccessFile {
+        pub fn from_file(file: File, metadata: &Metadata) -> RandomAccessFile {
             RandomAccessFile {
                 file,
                 len: AtomicU64::new(metadata.len()),
@@ -146,6 +160,16 @@ mod windows {
                     Err(e) => return Err(e),
                 }
             }
+            let mut current_len = self.len.load(Relaxed);
+            while current_len < offset {
+                match self
+                    .len
+                    .compare_exchange(current_len, offset, Release, Relaxed)
+                {
+                    Ok(_) => break,
+                    Err(actual) => current_len = actual,
+                }
+            }
             Ok(())
         }
     }
@@ -180,13 +204,17 @@ mod tests {
             .open(FILE)
             .unwrap();
         let metadata = file.metadata().unwrap();
-        let random_access_file = RandomAccessFile::from_file(file, metadata);
+        let random_access_file = RandomAccessFile::from_file(file, &metadata);
         assert_eq!(random_access_file.len(Relaxed), 0);
         let mut write_buffer: [u8; 32] = [0; 32];
         for d in 0..32_u8 {
             write_buffer[d as usize] = d;
         }
         assert!(random_access_file.write(&write_buffer, 18).is_ok());
+        assert_eq!(
+            random_access_file.len(Relaxed),
+            write_buffer.len() as u64 + 18
+        );
 
         let mut read_buffer: [u8; 16] = [0; 16];
         assert!(random_access_file.read(&mut read_buffer, 18).is_ok());
