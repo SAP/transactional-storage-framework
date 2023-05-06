@@ -70,7 +70,12 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
             return;
         }
         let database = &guard.as_mut().unwrap().database;
-        read_offset += apply_to_database(&buffer, database);
+        if let Some(bytes_read) = apply_to_database(&buffer, database) {
+            read_offset += bytes_read;
+        } else {
+            read_offset = file_len;
+            break;
+        }
     }
     if read_offset < file_len && file_len - read_offset < BUFFER_SIZE as u64 {
         // More to read in the log file.
@@ -83,7 +88,11 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
                 return;
             }
             let database = &guard.as_mut().unwrap().database;
-            read_offset += apply_to_database(&buffer, database);
+            if let Some(bytes_read) = apply_to_database(&buffer, database) {
+                read_offset += bytes_read;
+            } else {
+                read_offset = file_len;
+            }
         }
     }
 
@@ -106,12 +115,20 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
 }
 
 /// Applies log records in the buffer to the database.
-fn apply_to_database<S: Sequencer>(mut buffer: &[u8], database: &Database<S, FileIO<S>>) -> u64 {
+///
+/// Returns `None` if it read the end of the log file.
+fn apply_to_database<S: Sequencer>(
+    mut buffer: &[u8],
+    database: &Database<S, FileIO<S>>,
+) -> Option<u64> {
     let buffer_len = buffer.len();
     while !buffer.is_empty() {
         if let Some((log_record, remaining)) = LogRecord::<S>::from_raw_data(buffer) {
             buffer = remaining;
             match log_record {
+                LogRecord::EndOfLog => {
+                    return None;
+                }
                 LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
                     // TODO: instantiate recovery transactions.
                     let result = database.sequencer().update(instant, Release);
@@ -123,8 +140,8 @@ fn apply_to_database<S: Sequencer>(mut buffer: &[u8], database: &Database<S, Fil
             // The length of the buffer piece was insufficient.
             debug_assert_ne!(buffer.len(), BUFFER_SIZE);
             debug_assert_eq!(buffer.len() / 8, 0);
-            return (buffer_len - buffer.len()) as u64;
+            return Some((buffer_len - buffer.len()) as u64);
         }
     }
-    buffer_len as u64
+    Some(buffer_len as u64)
 }

@@ -32,8 +32,8 @@ pub(super) struct FlusherData {
     /// The flusher will shut down.
     shutdown: bool,
 
-    /// The last written offset in the file.
-    last_written_offset: u64,
+    /// The current offset in the log file to write.
+    write_offset: u64,
 }
 
 /// Processes IO tasks.
@@ -77,7 +77,7 @@ pub(super) fn process_sync<S: Sequencer>(
             loop {
                 if file_io_data
                     .log0
-                    .write(&log_buffer.buffer[0..log_buffer.used_bytes], log0_offset)
+                    .write(&log_buffer.buffer[0..log_buffer.bytes_written], log0_offset)
                     .is_err()
                 {
                     // Retry after yielding.
@@ -85,7 +85,7 @@ pub(super) fn process_sync<S: Sequencer>(
                     continue;
                 }
                 debug_assert_eq!(log0_offset, log_buffer.offset);
-                log0_offset += log_buffer.used_bytes as u64;
+                log0_offset += log_buffer.bytes_written as u64;
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
@@ -96,7 +96,7 @@ pub(super) fn process_sync<S: Sequencer>(
             // Let the flusher know that data was written to files.
             file_io_data
                 .flusher_data
-                .signal(|flusher_data| flusher_data.last_written_offset = log0_offset);
+                .signal(|flusher_data| flusher_data.write_offset = log0_offset);
         }
     }
 
@@ -118,18 +118,18 @@ fn flush_sync<S: Sequencer>(file_io_data: &Arc<FileIOData<S>>) {
         .ok()
         .map_or(true, |flusher_data| !flusher_data.shutdown)
     {
-        let last_flushed_offset = file_io_data.last_flushed_offset.load(Relaxed);
-        let mut last_written_offset = last_flushed_offset;
+        let first_offset_to_flush = file_io_data.first_offset_to_flush.load(Relaxed);
+        let mut write_offset = 0;
         file_io_data.flusher_data.wait_while(|flusher_data| {
-            last_written_offset = flusher_data.last_written_offset;
-            !flusher_data.shutdown && last_written_offset <= last_flushed_offset
+            write_offset = flusher_data.write_offset;
+            !flusher_data.shutdown && write_offset <= first_offset_to_flush
         });
-        if last_written_offset > last_flushed_offset && file_io_data.log0.sync_all().is_ok() {
+        if write_offset > first_offset_to_flush && file_io_data.log0.sync_all().is_ok() {
             file_io_data
-                .last_flushed_offset
-                .store(last_written_offset, Release);
+                .first_offset_to_flush
+                .store(write_offset, Release);
             if let Ok(mut waker_map) = file_io_data.waker_map.lock() {
-                for offset in last_flushed_offset + 1..=last_written_offset {
+                for offset in first_offset_to_flush + 1..=write_offset {
                     if let Some(waker) = waker_map.remove(&offset) {
                         waker.wake();
                     }
@@ -150,7 +150,7 @@ fn take_log_buffer_link(
         let current_head_ptr = current_head as *mut FileLogBuffer;
         log_buffer_head.offset =
             // Safety: `current_head_ptr` not being zero was checked.
-            unsafe { (*current_head_ptr).offset + (*current_head_ptr).used_bytes as u64 };
+            unsafe { (*current_head_ptr).offset + (*current_head_ptr).bytes_written as u64 };
         if let Err(actual) =
             log_buffer_link.compare_exchange(current_head, log_buffer_head_addr, AcqRel, Acquire)
         {
