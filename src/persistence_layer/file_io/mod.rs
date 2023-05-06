@@ -161,15 +161,15 @@ impl<S: Sequencer> FileIO<S> {
         let Some(file_path) = path_buffer.to_str() else {
             return Err(Error::IO(io::ErrorKind::NotFound));
         };
-        let Ok(file) = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .open(file_path) else {
-                return Err(Error::IO(io::ErrorKind::NotFound));
-            };
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(file_path)
+            .map_err(|e| Error::IO(e.kind()))?;
+        let metadata = file.metadata().map_err(|e| Error::IO(e.kind()))?;
         path_buffer.pop();
-        Ok(RandomAccessFile::from_file(file))
+        Ok(RandomAccessFile::from_file(file, metadata))
     }
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the log sequence

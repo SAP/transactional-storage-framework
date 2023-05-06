@@ -4,7 +4,7 @@
 
 use super::{log_record::LogRecord, FileIOData};
 use crate::{Database, Error, FileIO, Sequencer};
-use std::sync::atomic::Ordering::Release;
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::task::Waker;
 
 /// Collection of data for database recovery.
@@ -55,25 +55,13 @@ impl<S: Sequencer> RecoveryData<S> {
 }
 
 pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
-    let file_len = match file_io_data.log0.metadata() {
-        Ok(metadata) => metadata.len(),
-        Err(error) => {
-            let mut guard = file_io_data.recovery_data.lock().unwrap();
-            let recovery_data = guard.as_mut().unwrap();
-            recovery_data.result.replace(Err(Error::IO(error.kind())));
-            if let Some(waker) = recovery_data.waker.take() {
-                waker.wake();
-            }
-            return;
-        }
-    };
-
+    let file_len = file_io_data.log0.len(Acquire);
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
         let mut guard = file_io_data.recovery_data.lock().unwrap();
         let database = &guard.as_mut().unwrap().database;
-        read_offset += interpret(&buffer, database);
+        read_offset += apply_to_database(&buffer, database);
     }
     if read_offset < file_len && file_len - read_offset < BUFFER_SIZE as u64 {
         // More to read in the log file.
@@ -82,7 +70,7 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
         if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
             let mut guard = file_io_data.recovery_data.lock().unwrap();
             let database = &guard.as_mut().unwrap().database;
-            read_offset += interpret(&buffer, database);
+            read_offset += apply_to_database(&buffer, database);
         }
     }
 
@@ -100,8 +88,8 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
     }
 }
 
-/// Interprets a log buffer.
-fn interpret<S: Sequencer>(mut buffer: &[u8], database: &Database<S, FileIO<S>>) -> u64 {
+/// Applies log records in the buffer to the database.
+fn apply_to_database<S: Sequencer>(mut buffer: &[u8], database: &Database<S, FileIO<S>>) -> u64 {
     let buffer_len = buffer.len();
     while !buffer.is_empty() {
         if let Some((log_record, remaining)) = LogRecord::<S>::from_raw_data(buffer) {
