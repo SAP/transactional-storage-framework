@@ -8,7 +8,6 @@
 mod unix {
     use std::fs::{File, Metadata};
     use std::io::Result;
-    use std::ops::Deref;
     use std::os::unix::fs::FileExt;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::{self, Relaxed, Release};
@@ -40,6 +39,12 @@ mod unix {
             self.len.load(order)
         }
 
+        /// Synchronizes the data and metadata with the device.
+        #[inline]
+        pub fn sync_all(&self) -> Result<()> {
+            self.file.sync_all()
+        }
+
         /// Abstraction over random read operations.
         #[inline]
         pub fn read(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
@@ -53,7 +58,7 @@ mod unix {
             if result.is_ok() {
                 let mut current_len = self.len.load(Relaxed);
                 let new_len = offset + buffer.len() as u64;
-                while current_len < offset {
+                while current_len < new_len {
                     match self
                         .len
                         .compare_exchange(current_len, new_len, Release, Relaxed)
@@ -66,15 +71,6 @@ mod unix {
             result
         }
     }
-
-    impl Deref for RandomAccessFile {
-        type Target = File;
-
-        #[inline]
-        fn deref(&self) -> &Self::Target {
-            &self.file
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -85,7 +81,6 @@ mod windows {
     use std::fs::{File, Metadata};
     use std::io::Result;
     use std::io::{Error, ErrorKind};
-    use std::ops::Deref;
     use std::os::windows::fs::FileExt;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::{self, Relaxed, Release};
@@ -115,6 +110,12 @@ mod windows {
         #[inline]
         pub fn len(&self, order: Ordering) -> u64 {
             self.len.load(order)
+        }
+
+        /// Synchronizes the data and metadata with the device.
+        #[inline]
+        pub fn sync_all(&self) -> Result<()> {
+            self.file.sync_all()
         }
 
         /// Abstraction over random read operations.
@@ -169,15 +170,6 @@ mod windows {
                 }
             }
             Ok(())
-        }
-    }
-
-    impl Deref for RandomAccessFile {
-        type Target = File;
-
-        #[inline]
-        fn deref(&self) -> &Self::Target {
-            &self.file
         }
     }
 }

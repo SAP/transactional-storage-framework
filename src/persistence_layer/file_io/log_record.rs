@@ -17,6 +17,11 @@ use std::ptr::addr_of;
 /// - If EOT = 11, the transaction is being rolled back.
 #[derive(Copy, Clone, Debug, Eq)]
 pub(super) enum LogRecord<S: Sequencer> {
+    /// End-of-log marker.
+    ///
+    /// Consecutive eight `0`s represent the end of a log file.
+    EndOfLog,
+
     /// The transaction is prepared.
     Prepared(TransactionID, S::Instant),
 
@@ -31,6 +36,11 @@ impl<S: Sequencer> LogRecord<S> {
     /// Tries to parse the supplied `u8` slice as a [`LogRecord`].
     pub(super) fn from_raw_data(value: &[u8]) -> Option<(Self, &[u8])> {
         let (transaction_id_with_mark, value) = read_part::<TransactionID>(value)?;
+
+        if transaction_id_with_mark == 0 {
+            return Some((Self::EndOfLog, value));
+        }
+
         let eot_mark = transaction_id_with_mark & 0b11;
         let transaction_id = transaction_id_with_mark & (!0b11);
         match eot_mark {
@@ -59,11 +69,12 @@ impl<S: Sequencer> LogRecord<S> {
 
     /// Writes the data into the supplied buffer.
     ///
-    /// Returns `None` if the data could not be written to the buffer, or returns the number of
-    /// bytes written to the buffer.
+    /// Returns `None` if the data could not be written to the buffer, otherwise returns the number
+    /// of bytes written to the buffer.
     pub(super) fn write(&self, buffer: &mut [u8]) -> Option<usize> {
         let buffer_len = buffer.len();
         match self {
+            LogRecord::EndOfLog => None,
             LogRecord::Prepared(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 let eot_mark = 1;
@@ -96,6 +107,7 @@ impl<S: Sequencer> PartialEq for LogRecord<S> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::EndOfLog, Self::EndOfLog) => true,
             (Self::Prepared(l0, l1), Self::Prepared(r0, r1))
             | (Self::Committed(l0, l1), Self::Committed(r0, r1)) => l0 == r0 && l1 == r1,
             (Self::RolledBack(l0, l1), Self::RolledBack(r0, r1)) => l0 == r0 && l1 == r1,

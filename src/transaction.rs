@@ -627,8 +627,11 @@ impl<S: Sequencer> Anchor<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use static_assertions::assert_eq_size;
     use std::{path::Path, sync::Arc};
     use tokio::{fs::remove_dir_all, sync::Barrier};
+
+    assert_eq_size!(ID, [u8; 8]);
 
     /// Helper that prolongs the lifetime of a [`Transaction`] to send it to a spawned task.
     fn prolong_transaction<S: Sequencer, P: PersistenceLayer<S>>(
