@@ -12,9 +12,8 @@ mod recovery;
 
 pub use random_access_file::RandomAccessFile;
 
-use super::RecoveryResult;
 use crate::journal::ID as JournalID;
-use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger};
+use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger, RecoveryResult};
 use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
 use io_task_processor::{FlusherData, IOTask};
@@ -41,7 +40,6 @@ use std::time::Instant;
 ///
 /// TODO: implement page cache.
 /// TODO: implement checkpoint.
-/// TODO: use IDL.
 #[derive(Debug)]
 pub struct FileIO<S: Sequencer> {
     /// The IO worker thread.
@@ -57,6 +55,10 @@ pub struct FileIO<S: Sequencer> {
     _phantom: PhantomData<S>,
 }
 
+/// The unit size of a file IO operation.
+#[allow(dead_code)]
+pub const IO_UNIT_SIZE: u64 = 1_u64 << 12;
+
 /// [`FileLogBuffer`] implements [`BufferredLogger`].
 #[derive(Debug, Default)]
 pub struct FileLogBuffer {
@@ -64,10 +66,10 @@ pub struct FileLogBuffer {
     buffer: [u8; 32],
 
     /// The current position in the buffer.
-    pos: usize,
+    used_bytes: usize,
 
-    /// The log sequence number.
-    lsn: u64,
+    /// The offset in the log file of the log record.
+    offset: u64,
 
     /// The address of the next [`FileLogBuffer`].
     next: usize,
@@ -97,7 +99,7 @@ struct FileIOData<S: Sequencer> {
     log_buffer_link: AtomicUsize,
 
     /// The log sequence number of the last flushed log buffer.
-    last_flushed_lsn: AtomicU64,
+    last_flushed_offset: AtomicU64,
 
     /// Log sequence number and [`Waker`] map.
     waker_map: Mutex<BTreeMap<u64, Waker>>,
@@ -136,7 +138,7 @@ impl<S: Sequencer> FileIO<S> {
             data0,
             data1,
             log_buffer_link: AtomicUsize::new(0),
-            last_flushed_lsn: AtomicU64::new(0),
+            last_flushed_offset: AtomicU64::new(0),
             waker_map: Mutex::default(),
             flusher_data: utils::BinarySemaphore::default(),
         });
@@ -180,14 +182,15 @@ impl<S: Sequencer> FileIO<S> {
             let current_head_ptr = current_head as *const FileLogBuffer;
 
             // SAFETY: it assumes that the caller provided a valid pointer.
-            let lsn = unsafe {
-                (*log_buffer_ptr).lsn = if current_head_ptr.is_null() {
-                    1
+            let eob_offset = unsafe {
+                debug_assert_ne!((*log_buffer_ptr).used_bytes, 0);
+                (*log_buffer_ptr).offset = if current_head_ptr.is_null() {
+                    0
                 } else {
-                    (*current_head_ptr).lsn + 1
+                    (*current_head_ptr).offset + (*current_head_ptr).used_bytes as u64
                 };
                 (*log_buffer_ptr).next = current_head;
-                (*log_buffer_ptr).lsn
+                (*log_buffer_ptr).offset + (*log_buffer_ptr).used_bytes as u64
             };
             if let Err(actual) = log_buffer_link.compare_exchange(
                 current_head,
@@ -197,7 +200,7 @@ impl<S: Sequencer> FileIO<S> {
             ) {
                 current_head = actual;
             } else {
-                return lsn;
+                return eob_offset;
             }
         }
     }
@@ -255,7 +258,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -264,7 +267,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -274,7 +277,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _xid: &[u8],
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -284,7 +287,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -295,7 +298,7 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         // TODO: implement it.
-        Ok(AwaitIO::with_lsn(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -309,19 +312,19 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
         let Some(new_pos) = LogRecord::<S>::Committed(id, commit_instant).write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
         };
-        log_buffer.pos = new_pos;
+        log_buffer.used_bytes = new_pos;
         log_buffer.flush(self, None, deadline)
     }
 
     #[inline]
-    fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
-        if self.file_io_data.last_flushed_lsn.load(Acquire) >= lsn {
+    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
+        if self.file_io_data.last_flushed_offset.load(Acquire) >= offset {
             Some(Ok(S::Instant::default()))
         } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
             // Push the `Waker` into the bag, and check the value again.
-            waker_map.insert(lsn, waker.clone());
-            if self.file_io_data.last_flushed_lsn.load(Acquire) >= lsn {
-                waker_map.remove(&lsn);
+            waker_map.insert(offset, waker.clone());
+            if self.file_io_data.last_flushed_offset.load(Acquire) >= offset {
+                waker_map.remove(&offset);
                 Some(Ok(S::Instant::default()))
             } else {
                 None
@@ -353,8 +356,9 @@ impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
 
     #[inline]
     fn cancel_recovery(&self) {
-        // TODO: implement it.
-        todo!()
+        if let Ok(mut guard) = self.file_io_data.recovery_data.try_lock() {
+            guard.as_mut().unwrap().cancel();
+        }
     }
 }
 
@@ -395,13 +399,12 @@ impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
         deadline: Option<Instant>,
     ) -> AwaitIO<S, FileIO<S>> {
         let file_log_buffer_ptr = Box::into_raw(self);
-        let lsn = FileIO::<S>::push_log_buffer(
+        let eob_offset = FileIO::<S>::push_log_buffer(
             &persistence_layer.file_io_data.log_buffer_link,
             file_log_buffer_ptr,
         );
-        debug_assert_ne!(lsn, 0);
         drop(persistence_layer.sender.try_send(IOTask::Flush));
-        AwaitIO::with_lsn(persistence_layer, lsn).set_deadline(deadline)
+        AwaitIO::with_eob_offset(persistence_layer, eob_offset).set_deadline(deadline)
     }
 }
 
@@ -433,22 +436,22 @@ mod test {
         let pos = LogRecord::<AtomicCounter>::Committed(0, 3)
             .write(&mut log_buffer_1.buffer)
             .unwrap();
-        log_buffer_1.pos = pos;
+        log_buffer_1.used_bytes = pos;
         let mut log_buffer_2 = Box::<FileLogBuffer>::default();
         let pos = LogRecord::<AtomicCounter>::Committed(4, 3)
             .write(&mut log_buffer_2.buffer)
             .unwrap();
-        log_buffer_2.pos = pos;
+        log_buffer_2.used_bytes = pos;
         let mut log_buffer_3 = Box::<FileLogBuffer>::default();
         let pos = LogRecord::<AtomicCounter>::Committed(8, 3)
             .write(&mut log_buffer_3.buffer)
             .unwrap();
-        log_buffer_3.pos = pos;
+        log_buffer_3.used_bytes = pos;
         let mut log_buffer_4 = Box::<FileLogBuffer>::default();
         let pos = LogRecord::<AtomicCounter>::Committed(12, 3)
             .write(&mut log_buffer_4.buffer)
             .unwrap();
-        log_buffer_4.pos = pos;
+        log_buffer_4.used_bytes = pos;
 
         let (result_3, result_1, result_4, result_2) = futures::join!(
             log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),

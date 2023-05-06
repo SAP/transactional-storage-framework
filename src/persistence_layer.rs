@@ -137,7 +137,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check_io_completion(&self, lsn: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
@@ -208,8 +208,8 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer by which the IO operation is performed.
     persistence_layer: &'p P,
 
-    /// The log sequence number to await.
-    lsn: u64,
+    /// The end-of-buffer offset in the log file.
+    eob_offset: u64,
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
@@ -236,10 +236,10 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
     /// Creates an [`AwaitIO`] from a log sequence number.
     #[inline]
-    pub fn with_lsn(persistence_layer: &'p P, lsn: u64) -> AwaitIO<'p, S, P> {
+    pub fn with_eob_offset(persistence_layer: &'p P, eob_offset: u64) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer,
-            lsn,
+            eob_offset,
             deadline: None,
             _phantom: PhantomData,
         }
@@ -251,7 +251,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
     pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer: self.persistence_layer,
-            lsn: self.lsn,
+            eob_offset: self.eob_offset,
             deadline,
             _phantom: PhantomData,
         }
@@ -271,7 +271,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(result) = self
             .persistence_layer
-            .check_io_completion(self.lsn, cx.waker())
+            .check_io_completion(self.eob_offset, cx.waker())
         {
             Poll::Ready(result)
         } else if self

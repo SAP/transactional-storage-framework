@@ -48,6 +48,11 @@ impl<S: Sequencer> RecoveryData<S> {
         self.waker.replace(waker);
     }
 
+    /// Cancels the recovery task.
+    pub(super) fn cancel(&mut self) {
+        self.result.replace(Err(Error::Timeout));
+    }
+
     /// Takes [`Database`] by consuming `self`.
     pub(super) fn take(self) -> Database<S, FileIO<S>> {
         self.database
@@ -60,6 +65,10 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
         let mut guard = file_io_data.recovery_data.lock().unwrap();
+        if guard.as_ref().unwrap().result.is_some() {
+            // Canceled.
+            return;
+        }
         let database = &guard.as_mut().unwrap().database;
         read_offset += apply_to_database(&buffer, database);
     }
@@ -69,12 +78,20 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
         let buffer_piece = &mut buffer[0..(file_len - read_offset) as usize];
         if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
             let mut guard = file_io_data.recovery_data.lock().unwrap();
+            if guard.as_ref().unwrap().result.is_some() {
+                // Canceled.
+                return;
+            }
             let database = &guard.as_mut().unwrap().database;
             read_offset += apply_to_database(&buffer, database);
         }
     }
 
     let mut guard = file_io_data.recovery_data.lock().unwrap();
+    if guard.as_ref().unwrap().result.is_some() {
+        // Canceled.
+        return;
+    }
     let recovery_data = guard.as_mut().unwrap();
     if read_offset == file_len {
         recovery_data.result.replace(Ok(()));

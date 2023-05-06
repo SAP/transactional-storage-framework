@@ -32,8 +32,8 @@ pub(super) struct FlusherData {
     /// The flusher will shut down.
     shutdown: bool,
 
-    /// Last written LSN.
-    last_written_lsn: u64,
+    /// The last written offset in the file.
+    last_written_offset: u64,
 }
 
 /// Processes IO tasks.
@@ -52,7 +52,6 @@ pub(super) fn process_sync<S: Sequencer>(
     let _: &RandomAccessFile = &file_io_data.data1;
 
     let mut log0_offset = 0;
-    let mut last_log0_lsn = 0;
 
     // Insert the log buffer head to force the log sequence number ever increasing.
     let mut log_buffer_head = FileLogBuffer::default();
@@ -78,16 +77,15 @@ pub(super) fn process_sync<S: Sequencer>(
             loop {
                 if file_io_data
                     .log0
-                    .write(&log_buffer.buffer[0..log_buffer.pos], log0_offset)
+                    .write(&log_buffer.buffer[0..log_buffer.used_bytes], log0_offset)
                     .is_err()
                 {
                     // Retry after yielding.
                     yield_now();
                     continue;
                 }
-                debug_assert!(last_log0_lsn < log_buffer.lsn);
-                log0_offset += log_buffer.pos as u64;
-                last_log0_lsn = log_buffer.lsn;
+                debug_assert_eq!(log0_offset, log_buffer.offset);
+                log0_offset += log_buffer.used_bytes as u64;
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
@@ -98,7 +96,7 @@ pub(super) fn process_sync<S: Sequencer>(
             // Let the flusher know that data was written to files.
             file_io_data
                 .flusher_data
-                .signal(|flusher_data| flusher_data.last_written_lsn = last_log0_lsn);
+                .signal(|flusher_data| flusher_data.last_written_offset = log0_offset);
         }
     }
 
@@ -120,19 +118,19 @@ fn flush_sync<S: Sequencer>(file_io_data: &Arc<FileIOData<S>>) {
         .ok()
         .map_or(true, |flusher_data| !flusher_data.shutdown)
     {
-        let last_flushed_lsn = file_io_data.last_flushed_lsn.load(Relaxed);
-        let mut last_written_lsn = last_flushed_lsn;
+        let last_flushed_offset = file_io_data.last_flushed_offset.load(Relaxed);
+        let mut last_written_offset = last_flushed_offset;
         file_io_data.flusher_data.wait_while(|flusher_data| {
-            last_written_lsn = flusher_data.last_written_lsn;
-            !flusher_data.shutdown && last_written_lsn <= last_flushed_lsn
+            last_written_offset = flusher_data.last_written_offset;
+            !flusher_data.shutdown && last_written_offset <= last_flushed_offset
         });
-        if last_written_lsn > last_flushed_lsn && file_io_data.log0.sync_all().is_ok() {
+        if last_written_offset > last_flushed_offset && file_io_data.log0.sync_all().is_ok() {
             file_io_data
-                .last_flushed_lsn
-                .store(last_written_lsn, Release);
+                .last_flushed_offset
+                .store(last_written_offset, Release);
             if let Ok(mut waker_map) = file_io_data.waker_map.lock() {
-                for lsn in last_flushed_lsn + 1..=last_written_lsn {
-                    if let Some(waker) = waker_map.remove(&lsn) {
+                for offset in last_flushed_offset + 1..=last_written_offset {
+                    if let Some(waker) = waker_map.remove(&offset) {
                         waker.wake();
                     }
                 }
@@ -150,8 +148,9 @@ fn take_log_buffer_link(
     let log_buffer_head_addr = addr_of_mut!(*log_buffer_head) as usize;
     while current_head != 0 && current_head != log_buffer_head_addr {
         let current_head_ptr = current_head as *mut FileLogBuffer;
-        // Safety: `current_head_ptr` not being zero was checked.
-        log_buffer_head.lsn = unsafe { (*current_head_ptr).lsn };
+        log_buffer_head.offset =
+            // Safety: `current_head_ptr` not being zero was checked.
+            unsafe { (*current_head_ptr).offset + (*current_head_ptr).used_bytes as u64 };
         if let Err(actual) =
             log_buffer_link.compare_exchange(current_head, log_buffer_head_addr, AcqRel, Acquire)
         {
@@ -162,7 +161,7 @@ fn take_log_buffer_link(
             let mut next_log_buffer_opt = current_log_buffer.take_next_if_not(log_buffer_head_addr);
             while let Some(mut next_log_buffer) = next_log_buffer_opt.take() {
                 // Invert the direction of links to make it a FIFO queue.
-                debug_assert_eq!(current_log_buffer.lsn, next_log_buffer.lsn + 1);
+                debug_assert!(current_log_buffer.offset > next_log_buffer.offset);
                 let next_after_next_log_buffer =
                     next_log_buffer.take_next_if_not(log_buffer_head_addr);
                 next_log_buffer.next = Box::into_raw(current_log_buffer) as usize;
