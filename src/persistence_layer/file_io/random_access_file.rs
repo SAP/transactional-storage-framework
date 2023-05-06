@@ -6,8 +6,7 @@
 
 #[cfg(unix)]
 mod unix {
-    use std::fs::File;
-    use std::fs::Metadata;
+    use std::fs::{File, Metadata};
     use std::io::Result;
     use std::ops::Deref;
     use std::os::unix::fs::FileExt;
@@ -53,13 +52,12 @@ mod unix {
             let result = self.file.write_all_at(buffer, offset);
             if result.is_ok() {
                 let mut current_len = self.len.load(Relaxed);
+                let new_len = offset + buffer.len() as u64;
                 while current_len < offset {
-                    match self.len.compare_exchange(
-                        current_len,
-                        offset + buffer.len() as u64,
-                        Release,
-                        Relaxed,
-                    ) {
+                    match self
+                        .len
+                        .compare_exchange(current_len, new_len, Release, Relaxed)
+                    {
                         Ok(_) => break,
                         Err(actual) => current_len = actual,
                     }
@@ -84,7 +82,7 @@ pub use unix::RandomAccessFile;
 
 #[cfg(windows)]
 mod windows {
-    use std::fs::File;
+    use std::fs::{File, Metadata};
     use std::io::Result;
     use std::io::{Error, ErrorKind};
     use std::ops::Deref;
