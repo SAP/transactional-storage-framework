@@ -441,10 +441,11 @@ mod tests {
         const DIR: &str = "database_basic_test";
         let path = Path::new(DIR);
         let database = Arc::new(Database::with_path(path).await.unwrap());
-        let transaction = database.transaction();
-        assert!(transaction.commit().await.is_ok());
-        let transaction = database.transaction();
-        assert!(transaction.commit().await.is_ok());
+
+        for _ in 0..32 {
+            let transaction = database.transaction();
+            assert!(transaction.commit().await.is_ok());
+        }
 
         let instant = database.sequencer().now(Relaxed);
         drop(database);
