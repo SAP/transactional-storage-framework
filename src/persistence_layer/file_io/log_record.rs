@@ -14,7 +14,12 @@ use std::ptr::addr_of;
 ///
 /// The byte representation of [`LogRecord`] is as follows.
 /// - 62-bit transaction ID, 2-bit EOT marker.
-/// - If EOT = 00, TODO: define it.
+/// - If EOT = 00,
+/// -- 62-bit journal ID, 2-bit opcode.
+/// -- If opcode == 00, the journal created data identified as the `u64` value that follows.
+/// -- If opcode == 01, the journal created data identified as the two `u64` values that follow.
+/// -- If opcode == 10, the journal deleted data identified as the `u64` value that follows.
+/// -- If opcode == 11, the journal deleted data identified as the two `u64` values that follow.
 /// - If EOT = 01, the transaction is being prepared for commit, and `S::Instant` follows.
 /// - If EOT = 10, the transaction is being committed, and `S::Instant` follows.
 /// - If EOT = 11, the transaction is being rolled back.
