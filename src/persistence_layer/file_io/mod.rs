@@ -83,11 +83,8 @@ struct FileIOData<S: Sequencer> {
     /// The second log file.
     log1: RandomAccessFile,
 
-    /// The first database file.
-    data0: RandomAccessFile,
-
-    /// The second database file.
-    data1: RandomAccessFile,
+    /// The database file.
+    db: RandomAccessFile,
 
     /// [`FileLogBuffer`] link.
     ///
@@ -125,14 +122,12 @@ impl<S: Sequencer> FileIO<S> {
 
         let log0 = Self::open_file(&mut path_buffer, "0.log")?;
         let log1 = Self::open_file(&mut path_buffer, "1.log")?;
-        let data0 = Self::open_file(&mut path_buffer, "0.dat")?;
-        let data1 = Self::open_file(&mut path_buffer, "1.dat")?;
+        let db = Self::open_file(&mut path_buffer, "db.dat")?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
             log0,
             log1,
-            data0,
-            data1,
+            db,
             log_buffer_link: AtomicUsize::new(0),
             first_offset_to_flush: AtomicU64::new(0),
             waker_map: Mutex::default(),

@@ -48,8 +48,7 @@ pub(super) fn process_sync<S: Sequencer>(
     let flusher = thread::spawn(move || flush_sync(&file_io_data_clone));
 
     let _: &RandomAccessFile = &file_io_data.log1;
-    let _: &RandomAccessFile = &file_io_data.data0;
-    let _: &RandomAccessFile = &file_io_data.data1;
+    let _: &RandomAccessFile = &file_io_data.db;
 
     let mut log0_offset = 0;
 
