@@ -9,7 +9,7 @@ use std::task::Waker;
 
 /// Collection of data for database recovery.
 #[derive(Debug)]
-pub(super) struct RecoveryData<S: Sequencer> {
+pub(super) struct RecoveryData<S: Sequencer<Instant = u64>> {
     /// Database to recover.
     database: Database<S, FileIO<S>>,
 
@@ -27,7 +27,7 @@ pub(super) struct RecoveryData<S: Sequencer> {
 // No log entries are wider than 32 bytes.
 const BUFFER_SIZE: usize = 32;
 
-impl<S: Sequencer> RecoveryData<S> {
+impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
     /// Creates a new [`RecoveryData`].
     pub(super) fn new(database: Database<S, FileIO<S>>, until: Option<S::Instant>) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl<S: Sequencer> RecoveryData<S> {
     }
 }
 
-pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
+pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileIOData<S>) {
     let file_len = file_io_data.log0.len(Acquire);
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
@@ -117,7 +117,7 @@ pub(super) fn recover_database<S: Sequencer>(file_io_data: &FileIOData<S>) {
 /// Applies log records in the buffer to the database.
 ///
 /// Returns `None` if it read the end of the log file.
-fn apply_to_database<S: Sequencer>(
+fn apply_to_database<S: Sequencer<Instant = u64>>(
     mut buffer: &[u8],
     database: &Database<S, FileIO<S>>,
 ) -> Option<u64> {

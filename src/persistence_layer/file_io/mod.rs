@@ -4,6 +4,9 @@
 
 //! The module implements IO subsystem on top of the OS file system layer to function as the
 //! persistence layer of a database system.
+//!
+//! The [`FileIO`] persistence layer only supports [`Sequencer`] types with the logical instant
+//! type fixed to `u64`.
 
 mod io_task_processor;
 mod log_record;
@@ -36,12 +39,13 @@ use std::time::Instant;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
-/// [`FileIO`] spawns two threads for file operations and synchronization with the device.
+/// [`FileIO`] spawns two threads for file operations and synchronization with the device. Any
+/// [`Sequencer`] implementations generating `u64` clock values can be used for [`FileIO`].
 ///
 /// TODO: implement page cache.
 /// TODO: implement checkpoint.
 #[derive(Debug)]
-pub struct FileIO<S: Sequencer> {
+pub struct FileIO<S: Sequencer<Instant = u64>> {
     /// The IO worker thread.
     io_worker: Option<JoinHandle<()>>,
 
@@ -73,7 +77,7 @@ pub struct FileLogBuffer {
 
 /// [`FileIOData`] is shared among the worker and database threads.
 #[derive(Debug)]
-struct FileIOData<S: Sequencer> {
+struct FileIOData<S: Sequencer<Instant = u64>> {
     /// The database to recover.
     recovery_data: Mutex<Option<Box<RecoveryData<S>>>>,
 
@@ -101,7 +105,7 @@ struct FileIOData<S: Sequencer> {
     flusher_data: utils::BinarySemaphore<FlusherData>,
 }
 
-impl<S: Sequencer> FileIO<S> {
+impl<S: Sequencer<Instant = u64>> FileIO<S> {
     /// Creates a default [`FileIO`].
     ///
     /// The default log and checkpoint files are set to `0.log`, `1.log`, `0.dat`, `1.dat` in the
@@ -197,7 +201,7 @@ impl<S: Sequencer> FileIO<S> {
     }
 }
 
-impl<S: Sequencer> Drop for FileIO<S> {
+impl<S: Sequencer<Instant = u64>> Drop for FileIO<S> {
     #[inline]
     fn drop(&mut self) {
         loop {
@@ -212,7 +216,7 @@ impl<S: Sequencer> Drop for FileIO<S> {
     }
 }
 
-impl<S: Sequencer> PersistenceLayer<S> for FileIO<S> {
+impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     type LogBuffer = FileLogBuffer;
 
     #[inline]
@@ -370,7 +374,7 @@ impl FileLogBuffer {
     }
 }
 
-impl<S: Sequencer> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
+impl<S: Sequencer<Instant = u64>> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
     #[inline]
     fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
         &mut self,

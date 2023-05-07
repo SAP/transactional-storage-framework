@@ -39,7 +39,7 @@ pub(super) struct FlusherData {
 /// Processes IO tasks.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
-pub(super) fn process_sync<S: Sequencer>(
+pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     receiver: &mut Receiver<IOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
@@ -110,7 +110,7 @@ pub(super) fn process_sync<S: Sequencer>(
 /// Flushes dirty pages and updates metadata of the file.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
-fn flush_sync<S: Sequencer>(file_io_data: &Arc<FileIOData<S>>) {
+fn flush_sync<S: Sequencer<Instant = u64>>(file_io_data: &Arc<FileIOData<S>>) {
     while file_io_data
         .flusher_data
         .try_lock()
