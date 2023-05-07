@@ -303,7 +303,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         Ok(new_instant)
     }
 
-    /// Prepares the [Transaction] for commit.
+    /// Prepares the [`Transaction`] for commit.
     ///
     /// It returns a [`Committable`], giving one last chance to roll back the prepared
     /// transaction.
@@ -356,7 +356,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         })
     }
 
-    /// Commits the [Transaction].
+    /// Commits the [`Transaction`].
     ///
     /// # Errors
     ///
@@ -380,7 +380,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         indoubt_transaction.await
     }
 
-    /// Rolls back the changes made by the [Transaction].
+    /// Rolls back the changes made by the [`Transaction`].
     ///
     /// # Panics
     ///

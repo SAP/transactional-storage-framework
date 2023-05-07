@@ -129,6 +129,10 @@ fn apply_to_database<S: Sequencer>(
                 LogRecord::EndOfLog => {
                     return None;
                 }
+                LogRecord::Created(_, _, _) => todo!(),
+                LogRecord::CreatedTwo(_, _, _, _) => todo!(),
+                LogRecord::Deleted(_, _, _) => todo!(),
+                LogRecord::DeletedTwo(_, _, _, _) => todo!(),
                 LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
                     // TODO: instantiate recovery transactions.
                     let result = database.sequencer().update(instant, Release);
