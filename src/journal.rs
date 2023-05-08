@@ -39,11 +39,14 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
 ///
 /// The identifier of a journal is only within the transaction, and the same identifier can be used
 /// after the journal was rolled back.
+///
+/// The lower three bits are always zero.
 pub type ID = u64;
 
 /// [`Anchor`] is a piece of data that outlives its associated [`Journal`] allowing asynchronous
 /// operations.
 #[derive(Debug)]
+#[repr(align(16))]
 pub(super) struct Anchor<S: Sequencer> {
     /// Points to the key fields of the [`Transaction`].
     transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
@@ -268,6 +271,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
 impl<S: Sequencer> Anchor<S> {
     /// The identifier of the corresponding journal is returned.
     pub(super) fn id(&self) -> ID {
+        debug_assert_eq!((self as *const Anchor<S> as ID) & 0b111, 0);
         self as *const Anchor<S> as ID
     }
 

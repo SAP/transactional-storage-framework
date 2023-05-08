@@ -49,10 +49,38 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
+/// [`Playback`] is a type of transaction during [`Database`] recovery.
+///
+/// [`Playback`] is almost the same with [`Transaction`] except that it never generates log
+/// records, and the sole purpose of the type is to apply the database change history stored in the
+/// log file to the [`Database`].
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Playback<'d, S: Sequencer, P: PersistenceLayer<S>> {
+    /// The transaction refers to the corresponding [`Database`] to persist pending changes at
+    /// commit.
+    database: &'d Database<S, P>,
+
+    /// The changes made by the transaction to play back.
+    journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
+
+    /// The identifier of the [`Transaction`] as part of a distributed transaction.
+    ///
+    /// It is `None` if the transaction is not part of a distributed transaction.
+    xid: Option<Box<[u8]>>,
+
+    /// A piece of data that is shared between [`Journal`] and [`Transaction`].
+    ///
+    /// It outlives the [`Transaction`], and it is dropped when no database objects refer to it.
+    anchor: ebr::Arc<Anchor<S>>,
+}
+
 /// The type of transaction identifiers.
 ///
 /// The identifier of a transaction is only valid during the lifetime of the transaction. The same
 /// identifier can be used by an unrelated transaction afterwards.
+///
+/// The lower three bits are always zero.
 pub type ID = u64;
 
 /// Possible [`Transaction`] states.
@@ -97,6 +125,7 @@ pub const MAX_TRANSACTION_INSTANT: NonZeroU32 = unsafe { NonZeroU32::new_uncheck
 
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
 #[derive(Debug)]
+#[repr(align(16))]
 pub(super) struct Anchor<S: Sequencer> {
     /// The transaction state.
     ///
@@ -138,7 +167,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     /// ```
     #[inline]
     pub fn id(&self) -> ID {
-        debug_assert_eq!((self.anchor.as_ptr() as ID) & 0b11, 0);
+        debug_assert_eq!((self.anchor.as_ptr() as ID) & 0b111, 0);
         self.anchor.as_ptr() as ID
     }
 

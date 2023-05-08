@@ -76,7 +76,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
             loop {
                 if file_io_data
                     .log0
-                    .write(&log_buffer.buffer[0..log_buffer.bytes_written], log0_offset)
+                    .write(&log_buffer.buffer[0..log_buffer.pos()], log0_offset)
                     .is_err()
                 {
                     // Retry after yielding.
@@ -84,7 +84,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                     continue;
                 }
                 debug_assert_eq!(log0_offset, log_buffer.offset);
-                log0_offset += log_buffer.bytes_written as u64;
+                log0_offset += log_buffer.pos() as u64;
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
@@ -149,7 +149,7 @@ fn take_log_buffer_link(
         let current_head_ptr = current_head as *mut FileLogBuffer;
         log_buffer_head.offset =
             // Safety: `current_head_ptr` not being zero was checked.
-            unsafe { (*current_head_ptr).offset + (*current_head_ptr).bytes_written as u64 };
+            unsafe { (*current_head_ptr).offset + (*current_head_ptr).pos() as u64 };
         if let Err(actual) =
             log_buffer_link.compare_exchange(current_head, log_buffer_head_addr, AcqRel, Acquire)
         {

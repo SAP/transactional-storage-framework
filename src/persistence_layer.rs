@@ -5,11 +5,10 @@
 mod file_io;
 pub use file_io::FileIO;
 
-use super::{Database, Error, JournalID, Sequencer, TransactionID};
+use super::{Database, Error, Sequencer, TransactionID};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
@@ -172,19 +171,6 @@ pub enum RecoveryResult<S: Sequencer, P: PersistenceLayer<S>> {
 pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>:
     Debug + Default + Send + Sized
 {
-    /// Records database changes to the buffer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the buffer.
-    fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
-        &mut self,
-        id: TransactionID,
-        journal_id: JournalID,
-        len: usize,
-        writer: W,
-    ) -> Result<(), Error>;
-
     /// Flushes the content.
     ///
     /// This method is invoked when the associated journal is submitted or a log record is created

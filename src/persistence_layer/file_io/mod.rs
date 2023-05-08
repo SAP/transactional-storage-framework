@@ -15,7 +15,6 @@ mod recovery;
 
 pub use random_access_file::RandomAccessFile;
 
-use crate::journal::ID as JournalID;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger, RecoveryResult};
 use crate::transaction::ID as TransactionID;
 use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
@@ -26,7 +25,6 @@ use std::collections::BTreeMap;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
@@ -66,7 +64,7 @@ pub struct FileLogBuffer {
     buffer: [u8; 32],
 
     /// The number of byes written to the buffer.
-    bytes_written: usize,
+    bytes_written: u8,
 
     /// The offset in the log file of the log record.
     offset: u64,
@@ -184,7 +182,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log_buffer.offset = if let Some(head) = unsafe { head_ptr.as_ref() } {
                 // The offset of the last previously pushed log buffer is the starting offset
                 // of the supplied log buffer.
-                head.offset + head.bytes_written as u64
+                head.offset + u64::from(head.bytes_written)
             } else {
                 // It is the first lob buffer.
                 0
@@ -195,7 +193,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             {
                 head = actual;
             } else {
-                return log_buffer.offset + log_buffer.bytes_written as u64;
+                return log_buffer.offset + u64::from(log_buffer.bytes_written);
             }
         }
     }
@@ -223,7 +221,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn recover(
         &self,
         database: Database<S, Self>,
-        until: Option<<S as Sequencer>::Instant>,
+        until: Option<u64>,
         deadline: Option<Instant>,
     ) -> Result<AwaitRecovery<S, Self>, Error> {
         if let Ok(mut recovery_data) = self.file_io_data.recovery_data.lock() {
@@ -289,7 +287,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn prepare(
         &self,
         _id: TransactionID,
-        _prepare_instant: <S as Sequencer>::Instant,
+        _prepare_instant: u64,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
         // TODO: implement it.
@@ -301,26 +299,26 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
         id: TransactionID,
-        commit_instant: <S as Sequencer>::Instant,
+        commit_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         let Some(new_pos) = LogRecord::<S>::Committed(id, commit_instant).write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
         };
-        log_buffer.bytes_written = new_pos;
+        log_buffer.set_buffer_position(new_pos);
         log_buffer.flush(self, None, deadline)
     }
 
     #[inline]
-    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<S::Instant, Error>> {
+    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<u64, Error>> {
         if self.file_io_data.first_offset_to_flush.load(Acquire) >= offset {
-            Some(Ok(S::Instant::default()))
+            Some(Ok(u64::default()))
         } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
             // Push the `Waker` into the bag, and check the value again.
             waker_map.insert(offset, waker.clone());
             if self.file_io_data.first_offset_to_flush.load(Acquire) >= offset {
                 waker_map.remove(&offset);
-                Some(Ok(S::Instant::default()))
+                Some(Ok(u64::default()))
             } else {
                 None
             }
@@ -358,6 +356,20 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
 }
 
 impl FileLogBuffer {
+    /// Returns the current buffer starting position.
+    fn pos(&self) -> usize {
+        self.bytes_written as usize
+    }
+
+    /// Sets the new buffer starting position.
+    fn set_buffer_position(&mut self, pos: usize) {
+        debug_assert!(pos <= self.buffer.len());
+        {
+            #![allow(clippy::cast_possible_truncation)]
+            self.bytes_written = pos as u8;
+        }
+    }
+
     /// Takes the next [`FileLogBuffer`] if the address if not `nil` or `0`.
     fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer>> {
         if self.next == 0 {
@@ -375,17 +387,6 @@ impl FileLogBuffer {
 }
 
 impl<S: Sequencer<Instant = u64>> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
-    #[inline]
-    fn record<W: FnOnce(&mut [MaybeUninit<u8>])>(
-        &mut self,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _len: usize,
-        _writer: W,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
-
     #[inline]
     fn flush(
         self: Box<Self>,
@@ -435,22 +436,22 @@ mod test {
         let pos = LogRecord::<MonotonicU64>::Committed(0, 3)
             .write(&mut log_buffer_1.buffer)
             .unwrap();
-        log_buffer_1.bytes_written = pos;
+        log_buffer_1.set_buffer_position(pos);
         let mut log_buffer_2 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(4, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(16, 3)
             .write(&mut log_buffer_2.buffer)
             .unwrap();
-        log_buffer_2.bytes_written = pos;
+        log_buffer_2.set_buffer_position(pos);
         let mut log_buffer_3 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(8, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(32, 3)
             .write(&mut log_buffer_3.buffer)
             .unwrap();
-        log_buffer_3.bytes_written = pos;
+        log_buffer_3.set_buffer_position(pos);
         let mut log_buffer_4 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(12, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(48, 3)
             .write(&mut log_buffer_4.buffer)
             .unwrap();
-        log_buffer_4.bytes_written = pos;
+        log_buffer_4.set_buffer_position(pos);
 
         let (result_3, result_1, result_4, result_2) = futures::join!(
             log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
