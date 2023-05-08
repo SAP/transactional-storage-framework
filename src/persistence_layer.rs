@@ -67,27 +67,19 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     ) -> Result<AwaitIO<S, Self>, Error>;
 
     /// Manually generates a checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if a checkpoint could not be generated within the specified deadline.
     fn checkpoint(
         &self,
         database: &Database<S, Self>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> AwaitIO<S, Self>;
 
     /// The transaction is participating in a distributed transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
     fn participate(
         &self,
         id: TransactionID,
         xid: &[u8],
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> AwaitIO<S, Self>;
 
     /// Submits the content of the log buffer.
     ///
@@ -120,16 +112,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Rewinding the transaction to `transaction_instant == 0` amounts to rolling back the entire
     /// transaction. This only generates a log record indicating that the transaction was rolled
     /// back, and the corresponding unreachable database objects are cleaned up in the background.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the content of the log record could not be passed to the device.
     fn rewind(
         &self,
         id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> AwaitIO<S, Self>;
 
     /// A transaction is being prepared for commit.
     ///
@@ -141,7 +129,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         id: TransactionID,
         prepare_instant: S::Instant,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
+    ) -> AwaitIO<S, Self>;
 
     /// A transaction is being committed.
     ///

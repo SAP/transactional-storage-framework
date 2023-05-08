@@ -232,10 +232,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 Err(Error::UnexpectedState)
             }
         } else {
-            let io_completion =
-                self.database
-                    .persistence_layer()
-                    .participate(self.id(), xid, None)?;
+            let io_completion = self
+                .database
+                .persistence_layer()
+                .participate(self.id(), xid, None);
             io_completion.await?;
             self.xid.replace(xid.into());
             Ok(())
@@ -321,10 +321,10 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let new_instant = current.as_ref().and_then(|r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
-        let io_completion =
-            self.database
-                .persistence_layer()
-                .rewind(self.id(), new_instant, None)?;
+        let io_completion = self
+            .database
+            .persistence_layer()
+            .rewind(self.id(), new_instant, None);
 
         // Do not wait for an IO completion.
         io_completion.forget();
@@ -373,7 +373,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let io_completion =
             self.database
                 .persistence_layer()
-                .prepare(self.id(), prepare_instant, None)?;
+                .prepare(self.id(), prepare_instant, None);
 
         if self.xid.is_some() {
             io_completion.await?;
