@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`AtomicCounter`] implementation.
+//! [`MonotonicU64`] [`Sequencer`] implementation.
 
 use super::{Sequencer, ToInstant};
 use crate::utils;
@@ -10,12 +10,12 @@ use scc::Queue;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 
-/// [`AtomicCounter`] implements [`Sequencer`] on top of a single atomic counter.
+/// [`MonotonicU64`] implements [`Sequencer`] on top of a single `u64` atomic counter.
 ///
 /// An atomic counter is known to be inefficient when the system is equipped with a large number of
 /// processors.
 #[derive(Debug)]
-pub struct AtomicCounter {
+pub struct MonotonicU64 {
     /// The current logical clock value.
     clock: AtomicU64,
 
@@ -48,7 +48,7 @@ struct Entry {
 #[derive(Debug, Default)]
 struct EntryContainer(Queue<Entry>);
 
-impl Sequencer for AtomicCounter {
+impl Sequencer for MonotonicU64 {
     type Instant = u64;
     type Tracker = U64Tracker;
 
@@ -144,13 +144,13 @@ impl Sequencer for AtomicCounter {
     }
 }
 
-impl Default for AtomicCounter {
+impl Default for MonotonicU64 {
     #[inline]
     fn default() -> Self {
         let num_shards = utils::advise_num_shards();
         let mut sharded_entry_list = Vec::with_capacity(num_shards);
         sharded_entry_list.resize_with(num_shards, EntryContainer::default);
-        AtomicCounter {
+        MonotonicU64 {
             // Starts from `1` in order to avoid using `0`.
             clock: AtomicU64::new(1),
             sharded_entry_list,
@@ -189,7 +189,7 @@ unsafe impl Send for U64Tracker {}
 // Safety: the instance being pointed by `U64Tracker` can be accessed by other threads.
 unsafe impl Sync for U64Tracker {}
 
-impl ToInstant<AtomicCounter> for U64Tracker {
+impl ToInstant<MonotonicU64> for U64Tracker {
     #[inline]
     fn to_instant(&self) -> u64 {
         self.entry().instant
@@ -205,7 +205,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn atomic_counter() {
-        let atomic_counter: Arc<AtomicCounter> = Arc::new(AtomicCounter::default());
+        let atomic_counter: Arc<MonotonicU64> = Arc::new(MonotonicU64::default());
         let num_tasks = 16;
         let mut task_handles = Vec::with_capacity(num_tasks);
         let barrier = Arc::new(Barrier::new(num_tasks));

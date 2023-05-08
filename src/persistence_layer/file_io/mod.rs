@@ -410,7 +410,7 @@ impl<S: Sequencer<Instant = u64>> BufferredLogger<S, FileIO<S>> for FileLogBuffe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::AtomicCounter;
+    use crate::MonotonicU64;
     use std::time::Duration;
     use tokio::fs::remove_dir_all;
 
@@ -420,7 +420,7 @@ mod test {
     async fn open_close() {
         const DIR: &str = "file_io_open_close_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
         drop(file_io);
         assert!(remove_dir_all(path).await.is_ok());
     }
@@ -429,25 +429,25 @@ mod test {
     async fn log_buffer() {
         const DIR: &str = "file_io_log_buffer_test";
         let path = Path::new(DIR);
-        let file_io = FileIO::<AtomicCounter>::with_path(path).unwrap();
+        let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
 
         let mut log_buffer_1 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<AtomicCounter>::Committed(0, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(0, 3)
             .write(&mut log_buffer_1.buffer)
             .unwrap();
         log_buffer_1.bytes_written = pos;
         let mut log_buffer_2 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<AtomicCounter>::Committed(4, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(4, 3)
             .write(&mut log_buffer_2.buffer)
             .unwrap();
         log_buffer_2.bytes_written = pos;
         let mut log_buffer_3 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<AtomicCounter>::Committed(8, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(8, 3)
             .write(&mut log_buffer_3.buffer)
             .unwrap();
         log_buffer_3.bytes_written = pos;
         let mut log_buffer_4 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<AtomicCounter>::Committed(12, 3)
+        let pos = LogRecord::<MonotonicU64>::Committed(12, 3)
             .write(&mut log_buffer_4.buffer)
             .unwrap();
         log_buffer_4.bytes_written = pos;

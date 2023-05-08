@@ -7,8 +7,8 @@
 //! The [`Sequencer`] trait and the [`Instant`](Sequencer::Instant) are the basis of all the
 //! database operations as they define the flow of time.
 
-mod atomic_counter;
-pub use atomic_counter::AtomicCounter;
+mod monotonic_u64;
+pub use monotonic_u64::MonotonicU64;
 
 use std::fmt::Debug;
 use std::sync::atomic::Ordering;

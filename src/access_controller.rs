@@ -2225,7 +2225,7 @@ impl<S: Sequencer> Drop for WaitQueue<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AtomicCounter, Database};
+    use crate::{Database, MonotonicU64};
     use std::num::NonZeroU32;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
@@ -2235,7 +2235,7 @@ mod tests {
     use tokio::fs::remove_dir_all;
     use tokio::sync::Barrier;
 
-    static_assertions::assert_eq_size!(ObjectState<AtomicCounter>, [u8; 16]);
+    static_assertions::assert_eq_size!(ObjectState<MonotonicU64>, [u8; 16]);
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
     const TIMEOUT_EXPECTED: Duration = Duration::from_millis(1);

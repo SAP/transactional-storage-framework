@@ -47,12 +47,12 @@ impl<'c, S: Sequencer, P: PersistenceLayer<S>> Iterator for VersionedRecordVisit
 
 #[cfg(test)]
 mod tests {
-    use crate::sequencer::AtomicCounter;
+    use crate::sequencer::MonotonicU64;
     use crate::{Container, FileIO, Metadata};
 
     #[tokio::test]
     async fn container() {
         let metadata = Metadata {};
-        let _container = Container::<AtomicCounter, FileIO<AtomicCounter>>::new(metadata);
+        let _container = Container::<MonotonicU64, FileIO<MonotonicU64>>::new(metadata);
     }
 }

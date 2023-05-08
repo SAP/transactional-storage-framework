@@ -71,35 +71,45 @@ impl<S: Sequencer> LogRecord<S> {
                 match opcode {
                     0b00 => {
                         // Created.
-                        let (data_id, value) = read_part::<u64>(value)?;
+                        let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::Created(transaction_id, journal_id, data_id),
+                            LogRecord::Created(transaction_id, journal_id, object_id),
                             value,
                         ))
                     }
                     0b01 => {
                         // Created two.
-                        let (data_id_1, value) = read_part::<u64>(value)?;
-                        let (data_id_2, value) = read_part::<u64>(value)?;
+                        let (object_id_1, value) = read_part::<u64>(value)?;
+                        let (object_id_2, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::CreatedTwo(transaction_id, journal_id, data_id_1, data_id_2),
+                            LogRecord::CreatedTwo(
+                                transaction_id,
+                                journal_id,
+                                object_id_1,
+                                object_id_2,
+                            ),
                             value,
                         ))
                     }
                     0b10 => {
                         // Deleted.
-                        let (data_id, value) = read_part::<u64>(value)?;
+                        let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::Deleted(transaction_id, journal_id, data_id),
+                            LogRecord::Deleted(transaction_id, journal_id, object_id),
                             value,
                         ))
                     }
                     0b11 => {
                         // Deleted two.
-                        let (data_id_1, value) = read_part::<u64>(value)?;
-                        let (data_id_2, value) = read_part::<u64>(value)?;
+                        let (object_id_1, value) = read_part::<u64>(value)?;
+                        let (object_id_2, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::DeletedTwo(transaction_id, journal_id, data_id_1, data_id_2),
+                            LogRecord::DeletedTwo(
+                                transaction_id,
+                                journal_id,
+                                object_id_1,
+                                object_id_2,
+                            ),
                             value,
                         ))
                     }
@@ -133,38 +143,38 @@ impl<S: Sequencer> LogRecord<S> {
         let buffer_len = buffer.len();
         let buffer = match self {
             LogRecord::EndOfLog => return None,
-            LogRecord::Created(transaction_id, journal_id, data_id) => {
+            LogRecord::Created(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 debug_assert_eq!(journal_id & 0b11, 0);
                 let buffer = write_part::<TransactionID>(*transaction_id, buffer)?;
                 let buffer = write_part::<JournalID>(*journal_id, buffer)?;
-                write_part::<u64>(*data_id, buffer)?
+                write_part::<u64>(*object_id, buffer)?
             }
-            LogRecord::CreatedTwo(transaction_id, journal_id, data_id_1, data_id_2) => {
+            LogRecord::CreatedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 debug_assert_eq!(journal_id & 0b11, 0);
                 let buffer = write_part::<TransactionID>(*transaction_id, buffer)?;
                 let journal_id_with_opcode = journal_id | 0b01;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
-                let buffer = write_part::<u64>(*data_id_1, buffer)?;
-                write_part::<u64>(*data_id_2, buffer)?
+                let buffer = write_part::<u64>(*object_id_1, buffer)?;
+                write_part::<u64>(*object_id_2, buffer)?
             }
-            LogRecord::Deleted(transaction_id, journal_id, data_id) => {
+            LogRecord::Deleted(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 debug_assert_eq!(journal_id & 0b11, 0);
                 let buffer = write_part::<TransactionID>(*transaction_id, buffer)?;
                 let journal_id_with_opcode = journal_id | 0b10;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
-                write_part::<u64>(*data_id, buffer)?
+                write_part::<u64>(*object_id, buffer)?
             }
-            LogRecord::DeletedTwo(transaction_id, journal_id, data_id_1, data_id_2) => {
+            LogRecord::DeletedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
                 debug_assert_eq!(journal_id & 0b11, 0);
                 let buffer = write_part::<TransactionID>(*transaction_id, buffer)?;
                 let journal_id_with_opcode = journal_id | 0b11;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
-                let buffer = write_part::<u64>(*data_id_1, buffer)?;
-                write_part::<u64>(*data_id_2, buffer)?
+                let buffer = write_part::<u64>(*object_id_1, buffer)?;
+                write_part::<u64>(*object_id_2, buffer)?
             }
             LogRecord::Prepared(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & 0b11, 0);
@@ -246,7 +256,7 @@ fn write_part<T: Copy + Sized>(value: T, buffer: &mut [u8]) -> Option<&mut [u8]>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::IntHasher, AtomicCounter};
+    use crate::{utils::IntHasher, MonotonicU64};
     use proptest::prelude::*;
     use std::hash::{Hash, Hasher};
 
@@ -270,44 +280,44 @@ mod tests {
                     let opcode = hash & 0b11;
                     match opcode {
                         0b00 => {
-                            let created = LogRecord::<AtomicCounter>::Created(transaction_id, journal_id, hash);
+                            let created = LogRecord::<MonotonicU64>::Created(transaction_id, journal_id, hash);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
-                            if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                                 recovered == created
                             } else {
                                 false
                             }
                         }
                         0b01 => {
-                            let created = LogRecord::<AtomicCounter>::CreatedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let created = LogRecord::<MonotonicU64>::CreatedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
-                            if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                                 recovered == created
                             } else {
                                 false
                             }
                         }
                         0b10 => {
-                            let deleted = LogRecord::<AtomicCounter>::Deleted(transaction_id, journal_id, hash);
+                            let deleted = LogRecord::<MonotonicU64>::Deleted(transaction_id, journal_id, hash);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());
-                            if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                                 recovered == deleted
                             } else {
                                 false
                             }
                         }
                         0b11 => {
-                            let deleted = LogRecord::<AtomicCounter>::DeletedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let deleted = LogRecord::<MonotonicU64>::DeletedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());
-                            if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                                 recovered == deleted
                             } else {
                                 false
@@ -317,34 +327,34 @@ mod tests {
                     }
                 }
                 0b01 => {
-                    let prepared = LogRecord::<AtomicCounter>::Prepared(transaction_id, instant);
+                    let prepared = LogRecord::<MonotonicU64>::Prepared(transaction_id, instant);
                     assert!(prepared.write(&mut small_buffer).is_none());
                     assert!(prepared.write(&mut medium_buffer).is_none());
                     assert!(prepared.write(&mut large_buffer).is_some());
-                    if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                    if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                         recovered == prepared
                     } else {
                         false
                     }
                 }
                 0b10 => {
-                    let committed = LogRecord::<AtomicCounter>::Committed(transaction_id, instant);
+                    let committed = LogRecord::<MonotonicU64>::Committed(transaction_id, instant);
                     assert!(committed.write(&mut small_buffer).is_none());
                     assert!(committed.write(&mut medium_buffer).is_none());
                     assert!(committed.write(&mut large_buffer).is_some());
-                    if let Some((recovered, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                    if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                         recovered == committed
                     } else {
                         false
                     }
                 }
                 0b11 => {
-                    let rolled_back = LogRecord::<AtomicCounter>::RolledBack(transaction_id, 1);
+                    let rolled_back = LogRecord::<MonotonicU64>::RolledBack(transaction_id, 1);
                     assert!(rolled_back.write(&mut small_buffer).is_none());
                     assert!(rolled_back.write(&mut medium_buffer).is_some());
                     assert!(rolled_back.write(&mut large_buffer).is_some());
-                    if let Some((recovered_from_medium, _)) = LogRecord::<AtomicCounter>::from_raw_data(&medium_buffer) {
-                        if let Some((recovered_from_large, _)) = LogRecord::<AtomicCounter>::from_raw_data(&large_buffer) {
+                    if let Some((recovered_from_medium, _)) = LogRecord::<MonotonicU64>::from_raw_data(&medium_buffer) {
+                        if let Some((recovered_from_large, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
                             recovered_from_large == rolled_back && recovered_from_medium == rolled_back
                         } else {
                             false
