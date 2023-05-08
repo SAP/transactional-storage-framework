@@ -3,3 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 dev_comments = true
+
+[Hunspell]
+extra_dictionaries = ["/Users/i064499/transactional-storage-framework/.config/glossary.txt"]
+use_builtin = true

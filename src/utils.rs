@@ -116,7 +116,7 @@ impl Hasher for IntHasher {
         }
     }
 
-    /// The finalizer was excerpted from
+    /// The parameters are excerpted from
     /// `http://mostlymangling.blogspot.com/2018/07/on-mixing-functions-in-fast-splittable.html`
     #[inline]
     fn finish(&self) -> u64 {
