@@ -18,7 +18,7 @@ This documentation describes how the framework and the file-IO persistence layer
 
 Exclusive locks acquired for creating new data by a transaction are treated in a special way that they turn into the logical time point of the transaction commit exactly when the transaction is committed. The logical time point values which were initially exclusive locks are used for multi-version concurrency control.
 
-* Write the data to the allocated pages with the data marked invisible.
+* Write the data to the allocated pages.
 
 * Generate log records containing the offsets of the data in the database file.
 
@@ -44,19 +44,29 @@ Each individual read operation needs to have a consistent view on the database, 
 
 * Acquire exclusive locks on target data.
 
-As soon as target data is evaluated, the target data is locked for deletion through the access controller.
+As soon as target data is evaluated, the target data is locked for deletion through the access controller. The deletion is atomically completed when the transaction is committed.
 
 * Generate log records.
 
+Log records containing the data identifiers are generated and persisted in the disk.
+
+* Mark the target data deleted.
+
+The corresponding data is marked deleted in the persistence layer.
+
 * Commit the transaction.
 
-* Rollback the transaction.
+* Garbage collect the access controller.
+
+The access controller entries are garbage collected if all the current and future readers see the deletion.
+
+* Deallocate pages.
+
+Pages which only contain deleted data without associated access controller entries are pushed into the free page pool.
 
 ### MVCC Garbage Collection
 
 * Deleted data.
-
-The access controller keeps access control data of deleted data until the data becomes completely unreachable. The access controller notifies the owner of the deleted data that it is going to delete the corresponding access control data before actually deleting it, so that the owner is able to unlink all the possible paths to the data; here, the ordering between the access controller manipulation and unlinking must be kept since transactions check the access control data first, and then if the data is still reachable afterwards.
 
 * Dangling data.
 

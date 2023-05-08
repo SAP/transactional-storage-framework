@@ -15,7 +15,7 @@ pub(super) struct RecoveryData<S: Sequencer<Instant = u64>> {
 
     /// Recover until the logical time point.
     #[allow(dead_code)]
-    until: Option<S::Instant>,
+    until: Option<u64>,
 
     /// [`Waker`] associated with the database owner.
     waker: Option<Waker>,
@@ -29,7 +29,7 @@ const BUFFER_SIZE: usize = 32;
 
 impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
     /// Creates a new [`RecoveryData`].
-    pub(super) fn new(database: Database<S, FileIO<S>>, until: Option<S::Instant>) -> Self {
+    pub(super) fn new(database: Database<S, FileIO<S>>, until: Option<u64>) -> Self {
         Self {
             database,
             until,
@@ -129,14 +129,15 @@ fn apply_to_database<S: Sequencer<Instant = u64>>(
                 LogRecord::EndOfLog => {
                     return None;
                 }
+                LogRecord::BufferCommitted => todo!(),
+                LogRecord::BufferRolledBack => todo!(),
                 LogRecord::Created(_, _, _) => todo!(),
                 LogRecord::CreatedTwo(_, _, _, _) => todo!(),
                 LogRecord::Deleted(_, _, _) => todo!(),
                 LogRecord::DeletedTwo(_, _, _, _) => todo!(),
                 LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
                     // TODO: instantiate recovery transactions.
-                    let result = database.sequencer().update(instant, Release);
-                    debug_assert!(result.is_ok());
+                    let _: Result<u64, u64> = database.sequencer().update(instant, Release);
                 }
                 LogRecord::RolledBack(_, _rollback_to) => todo!(),
             }

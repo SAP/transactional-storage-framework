@@ -35,7 +35,7 @@ mod persistence_layer;
 pub use persistence_layer::{AwaitIO, FileIO, PersistenceLayer};
 
 pub mod sequencer;
-pub use sequencer::{AtomicCounter, Sequencer};
+pub use sequencer::{MonotonicU64, Sequencer};
 
 mod snapshot;
 pub use snapshot::Snapshot;

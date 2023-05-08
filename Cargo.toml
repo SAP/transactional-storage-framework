@@ -28,7 +28,7 @@ name = "access_controller"
 harness = false
 
 [[bench]]
-name = "atomic_counter"
+name = "monotonic_u64"
 harness = false
 
 [[bench]]

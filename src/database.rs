@@ -4,7 +4,7 @@
 
 use super::task_processor::{Task, TaskProcessor};
 use super::{
-    AccessController, AtomicCounter, Container, Error, FileIO, Journal, Metadata, PersistenceLayer,
+    AccessController, Container, Error, FileIO, Journal, Metadata, MonotonicU64, PersistenceLayer,
     Sequencer, Snapshot, Transaction,
 };
 use scc::{ebr, HashIndex};
@@ -17,7 +17,7 @@ use std::time::Instant;
 /// [`Database`] provides the interface for users to interact with each individual transactional
 /// [`Container`] in it.
 #[derive(Debug)]
-pub struct Database<S: Sequencer = AtomicCounter, P: PersistenceLayer<S> = FileIO<S>> {
+pub struct Database<S: Sequencer = MonotonicU64, P: PersistenceLayer<S> = FileIO<S>> {
     /// The kernel of the database.
     ///
     /// The kernel of the database has to be allocated on the heap in order to provide stable
@@ -57,11 +57,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{AtomicCounter, Database, FileIO};
+    /// use sap_tsf::{Database, FileIO, MonotonicU64 };
     /// use std::path::Path;
     ///
     /// async {
-    ///     let database: Database<AtomicCounter> = Database::with_persistence_layer(
+    ///     let database: Database<MonotonicU64> = Database::with_persistence_layer(
     ///         FileIO::with_path(Path::new("empty")).unwrap(), None, None).await.unwrap();
     /// };
     /// ```
@@ -371,10 +371,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     }
 }
 
-impl Database<AtomicCounter, FileIO<AtomicCounter>> {
+impl Database<MonotonicU64, FileIO<MonotonicU64>> {
     /// Creates a new [`Database`] instance from the files in the specified path.
     ///
-    /// The type of the sequencer is [`AtomicCounter`] and that of the persistence layer is
+    /// The type of the sequencer is [`MonotonicU64`] and that of the persistence layer is
     /// [`FileIO`].
     ///
     /// # Errors
@@ -394,7 +394,7 @@ impl Database<AtomicCounter, FileIO<AtomicCounter>> {
     /// ```
     #[inline]
     pub async fn with_path(path: &Path) -> Result<Self, Error> {
-        let file_io = FileIO::<AtomicCounter>::with_path(path)?;
+        let file_io = FileIO::<MonotonicU64>::with_path(path)?;
         Self::with_persistence_layer(file_io, None, None).await
     }
 }
