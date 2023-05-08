@@ -349,7 +349,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         commit_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        let Some(new_pos) = LogRecord::<S>::Committed(id, commit_instant).write(&mut log_buffer.buffer) else {
+        let Some(new_pos) = LogRecord::<S>::TransactionCommitted(id, commit_instant).write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
@@ -458,22 +458,22 @@ mod test {
         let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
 
         let mut log_buffer_1 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(0, 3)
+        let pos = LogRecord::<MonotonicU64>::TransactionCommitted(0, 3)
             .write(&mut log_buffer_1.buffer)
             .unwrap();
         log_buffer_1.set_buffer_position(pos);
         let mut log_buffer_2 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(16, 3)
+        let pos = LogRecord::<MonotonicU64>::TransactionCommitted(16, 3)
             .write(&mut log_buffer_2.buffer)
             .unwrap();
         log_buffer_2.set_buffer_position(pos);
         let mut log_buffer_3 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(32, 3)
+        let pos = LogRecord::<MonotonicU64>::TransactionCommitted(32, 3)
             .write(&mut log_buffer_3.buffer)
             .unwrap();
         log_buffer_3.set_buffer_position(pos);
         let mut log_buffer_4 = Box::<FileLogBuffer>::default();
-        let pos = LogRecord::<MonotonicU64>::Committed(48, 3)
+        let pos = LogRecord::<MonotonicU64>::TransactionCommitted(48, 3)
             .write(&mut log_buffer_4.buffer)
             .unwrap();
         log_buffer_4.set_buffer_position(pos);
