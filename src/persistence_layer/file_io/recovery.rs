@@ -129,17 +129,20 @@ fn apply_to_database<S: Sequencer<Instant = u64>>(
                 LogRecord::EndOfLog => {
                     return None;
                 }
-                LogRecord::BufferCommitted => todo!(),
-                LogRecord::BufferRolledBack => todo!(),
-                LogRecord::Created(_, _, _) => todo!(),
-                LogRecord::CreatedTwo(_, _, _, _) => todo!(),
-                LogRecord::Deleted(_, _, _) => todo!(),
-                LogRecord::DeletedTwo(_, _, _, _) => todo!(),
-                LogRecord::Prepared(_, instant) | LogRecord::Committed(_, instant) => {
+                LogRecord::BufferSubmitted(_) => todo!(),
+                LogRecord::BufferDiscarded => todo!(),
+                LogRecord::JournalCreatedObject(_, _, _) => todo!(),
+                LogRecord::JournalCreatedTwoObjects(_, _, _, _) => todo!(),
+                LogRecord::JournalDeletedObject(_, _, _) => todo!(),
+                LogRecord::JournalDeletedTwoObjects(_, _, _, _) => todo!(),
+                LogRecord::JournalSubmitted(_, _, _) => todo!(),
+                LogRecord::JournalDiscarded(_, _) => todo!(),
+                LogRecord::TransactionPrepared(_, instant)
+                | LogRecord::TransactionCommitted(_, instant) => {
                     // TODO: instantiate recovery transactions.
                     let _: Result<u64, u64> = database.sequencer().update(instant, Release);
                 }
-                LogRecord::RolledBack(_, _rollback_to) => todo!(),
+                LogRecord::TransactionRolledBack(_, _rollback_to) => todo!(),
             }
         } else {
             // The length of the buffer piece was insufficient.

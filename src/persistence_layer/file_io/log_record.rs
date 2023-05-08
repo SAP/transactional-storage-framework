@@ -8,26 +8,32 @@ use crate::Sequencer;
 use std::mem::{size_of, MaybeUninit};
 use std::ptr::addr_of;
 
-/// Individual log record.
+/// Individual log record representation.
 ///
 /// The maximum size of a log record is limited to 32-byte when the size of `S::Instant` is not
 /// larger than 24-byte.
 ///
-/// The byte representation of [`LogRecord`] is as follows.
+/// The bit representation of [`LogRecord`] is as follows.
 /// - 61-bit transaction ID, and 3-bit transaction control opcode follows.
 /// - If `transaction opcode = 0b000`, the event is unrelated to a transaction.
-/// -- `0x0000000000000000`: the end of log file.
-/// -- `0x0000000FF0000000`: the buffer was committed.
-/// -- `0x000000FFFF000000`: the buffer was rolled back.
+/// -- `0b00000000`: the end of log file.
+/// -- `0b00001000`: the buffer was submitted, and a `u32` value follows.
+/// -- `0b00010000`: the buffer was discarded.
 /// -- TODO: page reorganization.
 /// - If `transaction opcode = 0b100`, the event happened in a transaction.
 /// -- 61-bit journal ID, 3-bit opcode.
 /// -- If `opcode = 0b000`, the journal created data identified as the `u64` value that follows.
-/// -- If `opcode = 0b001`, the journal created data identified as the two `u64` values that follow.
+/// -- If `opcode = 0b001`, the journal created data identified as the two `u64` values that
+/// follow.
 /// -- If `opcode = 0b010`, the journal deleted data identified as the `u64` value that follows.
-/// -- If `opcode = 0b011`, the journal deleted data identified as the two `u64` values that follow.
-/// - If `transaction opcode = 0b101`, the transaction is being prepared for commit, and `S::Instant` follows.
-/// - If `transaction opcode = 0b110`, the transaction is being committed, and `S::Instant` follows.
+/// -- If `opcode = 0b011`, the journal deleted data identified as the two `u64` values that
+/// follow.
+/// -- If `opcode = 0b100`, the journal was submitted.
+/// -- If `opcode = 0b101`, the journal was discarded.
+/// - If `transaction opcode = 0b101`, the transaction is being prepared for commit, and
+/// `S::Instant` follows.
+/// - If `transaction opcode = 0b110`, the transaction is being committed, and `S::Instant`
+/// follows.
 /// - If `transaction opcode = 0b111`, the transaction is being rolled back.
 #[derive(Copy, Clone, Debug, Eq)]
 pub(super) enum LogRecord<S: Sequencer> {
@@ -36,42 +42,61 @@ pub(super) enum LogRecord<S: Sequencer> {
     /// Consecutive eight `0`s represent the end of a log file.
     EndOfLog,
 
-    /// The log buffer was committed.
-    BufferCommitted,
+    /// The log buffer was submitted.
+    ///
+    /// Log records of this type are not written to log buffers directly, instead they are derived
+    /// from the log buffer state.
+    BufferSubmitted(u32),
 
-    /// The log buffer was rolled back.
-    BufferRolledBack,
+    /// The log buffer was discarded.
+    ///
+    /// Log records of this type are not written to log buffers directly, instead they are derived
+    /// from the log buffer state.
+    BufferDiscarded,
 
     /// The transaction created a database object identified as the `u64` value.
-    Created(TransactionID, JournalID, u64),
+    JournalCreatedObject(TransactionID, JournalID, u64),
 
     /// The transaction created two database objects identified as the two `u64` values.
-    CreatedTwo(TransactionID, JournalID, u64, u64),
+    JournalCreatedTwoObjects(TransactionID, JournalID, u64, u64),
 
     /// The transaction deleted a database object identified as the `u64` value.
-    Deleted(TransactionID, JournalID, u64),
+    JournalDeletedObject(TransactionID, JournalID, u64),
 
     /// The transaction deleted two database objects identified as the two `u64` values.
-    DeletedTwo(TransactionID, JournalID, u64, u64),
+    JournalDeletedTwoObjects(TransactionID, JournalID, u64, u64),
+
+    /// The journal was submitted.
+    ///
+    /// The handling of this log record type is identical to that of [`Self::BufferSubmitted`].
+    JournalSubmitted(TransactionID, JournalID, u32),
+
+    /// The journal was discarded.
+    ///
+    /// The handling of this log record type is identical to that of [`Self::BufferDiscarded`].
+    JournalDiscarded(TransactionID, JournalID),
 
     /// The transaction is prepared.
-    Prepared(TransactionID, S::Instant),
+    TransactionPrepared(TransactionID, S::Instant),
 
     /// The transaction is committed.
-    Committed(TransactionID, S::Instant),
+    TransactionCommitted(TransactionID, S::Instant),
 
     /// The transaction is rolled back.
-    RolledBack(TransactionID, u32),
+    TransactionRolledBack(TransactionID, u32),
 }
-
-/// The log buffer was committed.
-pub const BUFFER_COMMITTED: u64 = 0x0000_00FF_FF00_0000;
-
-/// The log buffer was rolled back.
-pub const BUFFER_ROLLED_BACK: u64 = 0x0000_FFFF_FFFF_0000;
 
 /// Opcode bit mask.
 pub const OPCODE_MASK: u64 = 0b111;
+
+/// Extended opcode bit mask.
+pub const EXTENDED_OPCODE_MASK: u64 = 0b1111_1000;
+
+/// The log buffer was committed.
+pub const BUFFER_COMMITTED: u64 = 0b0000_1000;
+
+/// The log buffer was rolled back.
+pub const BUFFER_ROLLED_BACK: u64 = 0b0001_0000;
 
 /// The journal created a database object.
 pub const JOURNAL_CREATED_ONE: u64 = 0b000;
@@ -84,6 +109,12 @@ pub const JOURNAL_DELETED_ONE: u64 = 0b010;
 
 /// The journal deleted two database objects.
 pub const JOURNAL_DELETED_TWO: u64 = 0b011;
+
+/// The journal was submitted to the transaction.
+pub const JOURNAL_SUBMITTED: u64 = 0b100;
+
+/// The journal was discarded.
+pub const JOURNAL_DISCARDED: u64 = 0b101;
 
 /// The transaction updated the database.
 pub const TRANSACTION_UPDATED: u64 = 0b100;
@@ -99,20 +130,27 @@ pub const TRANSACTION_ROLLED_BACK: u64 = 0b111;
 
 impl<S: Sequencer> LogRecord<S> {
     /// Tries to parse the supplied `u8` slice as a [`LogRecord`].
+    #[allow(clippy::too_many_lines)]
     pub(super) fn from_raw_data(value: &[u8]) -> Option<(Self, &[u8])> {
         let (transaction_id_with_opcode, value) = read_part::<TransactionID>(value)?;
 
+        if transaction_id_with_opcode == 0 {
+            return Some((Self::EndOfLog, value));
+        }
+
         let transaction_opcode = transaction_id_with_opcode & OPCODE_MASK;
         if transaction_opcode == 0 {
-            match transaction_id_with_opcode {
-                0 => {
-                    return Some((Self::EndOfLog, value));
-                }
+            let extended_opcode = transaction_id_with_opcode & EXTENDED_OPCODE_MASK;
+            match extended_opcode {
                 BUFFER_COMMITTED => {
-                    return Some((LogRecord::BufferCommitted, value));
+                    let transaction_instant: u32 = (transaction_id_with_opcode >> 32)
+                        .try_into()
+                        .ok()
+                        .map_or(0, |v| v);
+                    return Some((LogRecord::BufferSubmitted(transaction_instant), value));
                 }
                 BUFFER_ROLLED_BACK => {
-                    return Some((LogRecord::BufferRolledBack, value));
+                    return Some((LogRecord::BufferDiscarded, value));
                 }
                 _ => unimplemented!(),
             }
@@ -129,7 +167,7 @@ impl<S: Sequencer> LogRecord<S> {
                         // Created.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::Created(transaction_id, journal_id, object_id),
+                            LogRecord::JournalCreatedObject(transaction_id, journal_id, object_id),
                             value,
                         ))
                     }
@@ -138,7 +176,7 @@ impl<S: Sequencer> LogRecord<S> {
                         let (object_id_1, value) = read_part::<u64>(value)?;
                         let (object_id_2, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::CreatedTwo(
+                            LogRecord::JournalCreatedTwoObjects(
                                 transaction_id,
                                 journal_id,
                                 object_id_1,
@@ -151,7 +189,7 @@ impl<S: Sequencer> LogRecord<S> {
                         // Deleted.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::Deleted(transaction_id, journal_id, object_id),
+                            LogRecord::JournalDeletedObject(transaction_id, journal_id, object_id),
                             value,
                         ))
                     }
@@ -160,7 +198,7 @@ impl<S: Sequencer> LogRecord<S> {
                         let (object_id_1, value) = read_part::<u64>(value)?;
                         let (object_id_2, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::DeletedTwo(
+                            LogRecord::JournalDeletedTwoObjects(
                                 transaction_id,
                                 journal_id,
                                 object_id_1,
@@ -169,23 +207,44 @@ impl<S: Sequencer> LogRecord<S> {
                             value,
                         ))
                     }
+                    JOURNAL_SUBMITTED => {
+                        let (transaction_instant, value) = read_part::<u32>(value)?;
+                        Some((
+                            LogRecord::JournalSubmitted(
+                                transaction_id,
+                                journal_id,
+                                transaction_instant,
+                            ),
+                            value,
+                        ))
+                    }
+                    JOURNAL_DISCARDED => Some((
+                        LogRecord::JournalDiscarded(transaction_id, journal_id),
+                        value,
+                    )),
                     _ => unimplemented!(),
                 }
             }
             TRANSACTION_PREPARED => {
                 // Prepared.
                 let (instant, value) = read_part::<S::Instant>(value)?;
-                Some((LogRecord::Prepared(transaction_id, instant), value))
+                Some((
+                    LogRecord::TransactionPrepared(transaction_id, instant),
+                    value,
+                ))
             }
             TRANSACTION_COMMITTED => {
                 // Committed.
                 let (instant, value) = read_part::<S::Instant>(value)?;
-                Some((LogRecord::Committed(transaction_id, instant), value))
+                Some((
+                    LogRecord::TransactionCommitted(transaction_id, instant),
+                    value,
+                ))
             }
             TRANSACTION_ROLLED_BACK => {
                 // Rolled back.
                 let (to, value) = read_part::<u32>(value)?;
-                Some((LogRecord::RolledBack(transaction_id, to), value))
+                Some((LogRecord::TransactionRolledBack(transaction_id, to), value))
             }
             _ => unreachable!(),
         }
@@ -198,10 +257,14 @@ impl<S: Sequencer> LogRecord<S> {
     pub(super) fn write(&self, buffer: &mut [u8]) -> Option<usize> {
         let buffer_len = buffer.len();
         let buffer = match self {
-            LogRecord::EndOfLog => return None,
-            LogRecord::BufferCommitted => write_part::<u64>(BUFFER_COMMITTED, buffer)?,
-            LogRecord::BufferRolledBack => write_part::<u64>(BUFFER_ROLLED_BACK, buffer)?,
-            LogRecord::Created(transaction_id, journal_id, object_id) => {
+            LogRecord::EndOfLog => write_part::<u64>(0, buffer)?,
+            LogRecord::BufferSubmitted(transaction_instant) => {
+                let transaction_instant_with_extended_opcode =
+                    (u64::from(*transaction_instant) << 32) | BUFFER_COMMITTED;
+                write_part::<u64>(transaction_instant_with_extended_opcode, buffer)?
+            }
+            LogRecord::BufferDiscarded => write_part::<u64>(BUFFER_ROLLED_BACK, buffer)?,
+            LogRecord::JournalCreatedObject(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
@@ -210,7 +273,12 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
-            LogRecord::CreatedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
+            LogRecord::JournalCreatedTwoObjects(
+                transaction_id,
+                journal_id,
+                object_id_1,
+                object_id_2,
+            ) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
@@ -220,7 +288,7 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<u64>(*object_id_1, buffer)?;
                 write_part::<u64>(*object_id_2, buffer)?
             }
-            LogRecord::Deleted(transaction_id, journal_id, object_id) => {
+            LogRecord::JournalDeletedObject(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
@@ -229,7 +297,12 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
-            LogRecord::DeletedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
+            LogRecord::JournalDeletedTwoObjects(
+                transaction_id,
+                journal_id,
+                object_id_1,
+                object_id_2,
+            ) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
@@ -239,19 +312,36 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<u64>(*object_id_1, buffer)?;
                 write_part::<u64>(*object_id_2, buffer)?
             }
-            LogRecord::Prepared(transaction_id, instant) => {
+            LogRecord::JournalSubmitted(transaction_id, journal_id, transaction_instant) => {
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
+                let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
+                let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
+                let journal_id_with_opcode = journal_id | JOURNAL_SUBMITTED;
+                let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
+                write_part::<u32>(*transaction_instant, buffer)?
+            }
+            LogRecord::JournalDiscarded(transaction_id, journal_id) => {
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
+                let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
+                let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
+                let journal_id_with_opcode = journal_id | JOURNAL_DISCARDED;
+                write_part::<JournalID>(journal_id_with_opcode, buffer)?
+            }
+            LogRecord::TransactionPrepared(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_PREPARED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 write_part::<S::Instant>(*instant, buffer)?
             }
-            LogRecord::Committed(transaction_id, instant) => {
+            LogRecord::TransactionCommitted(transaction_id, instant) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_COMMITTED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 write_part::<S::Instant>(*instant, buffer)?
             }
-            LogRecord::RolledBack(transaction_id, to) => {
+            LogRecord::TransactionRolledBack(transaction_id, to) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_ROLLED_BACK;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
@@ -266,20 +356,35 @@ impl<S: Sequencer> PartialEq for LogRecord<S> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::EndOfLog, Self::EndOfLog)
-            | (Self::BufferCommitted, Self::BufferCommitted)
-            | (Self::BufferRolledBack, Self::BufferRolledBack) => true,
-            (Self::Created(l0, l1, l2), Self::Created(r0, r1, r2))
-            | (Self::Deleted(l0, l1, l2), Self::Deleted(r0, r1, r2)) => {
+            (Self::EndOfLog, Self::EndOfLog) | (Self::BufferDiscarded, Self::BufferDiscarded) => {
+                true
+            }
+            (Self::BufferSubmitted(l0), Self::BufferSubmitted(r0)) => l0 == r0,
+            (Self::JournalCreatedObject(l0, l1, l2), Self::JournalCreatedObject(r0, r1, r2))
+            | (Self::JournalDeletedObject(l0, l1, l2), Self::JournalDeletedObject(r0, r1, r2)) => {
                 l0 == r0 && l1 == r1 && l2 == r2
             }
-            (Self::CreatedTwo(l0, l1, l2, l3), Self::CreatedTwo(r0, r1, r2, r3))
-            | (Self::DeletedTwo(l0, l1, l2, l3), Self::DeletedTwo(r0, r1, r2, r3)) => {
-                l0 == r0 && l1 == r1 && ((l2 == r2 && l3 == r3) || (l2 == r3) && (l3 == r2))
+            (
+                Self::JournalCreatedTwoObjects(l0, l1, l2, l3),
+                Self::JournalCreatedTwoObjects(r0, r1, r2, r3),
+            )
+            | (
+                Self::JournalDeletedTwoObjects(l0, l1, l2, l3),
+                Self::JournalDeletedTwoObjects(r0, r1, r2, r3),
+            ) => l0 == r0 && l1 == r1 && ((l2 == r2 && l3 == r3) || (l2 == r3) && (l3 == r2)),
+            (Self::JournalSubmitted(l0, l1, l2), Self::JournalSubmitted(r0, r1, r2)) => {
+                l0 == r0 && l1 == r1 && l2 == r2
             }
-            (Self::Prepared(l0, l1), Self::Prepared(r0, r1))
-            | (Self::Committed(l0, l1), Self::Committed(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::RolledBack(l0, l1), Self::RolledBack(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::JournalDiscarded(l0, l1), Self::JournalDiscarded(r0, r1)) => {
+                l0 == r0 && l1 == r1
+            }
+            (Self::TransactionPrepared(l0, l1), Self::TransactionPrepared(r0, r1))
+            | (Self::TransactionCommitted(l0, l1), Self::TransactionCommitted(r0, r1)) => {
+                l0 == r0 && l1 == r1
+            }
+            (Self::TransactionRolledBack(l0, l1), Self::TransactionRolledBack(r0, r1)) => {
+                l0 == r0 && l1 == r1
+            }
             _ => false,
         }
     }
@@ -334,7 +439,62 @@ mod tests {
             let mut medium_buffer = [0; 12];
             let mut large_buffer = [0; 32];
 
-            let result = match transaction_opcode {
+            match transaction_opcode {
+                0 => {
+                    let extended_opcode = seed & EXTENDED_OPCODE_MASK;
+                    match extended_opcode {
+                        0 => {
+                            let eol = LogRecord::<MonotonicU64>::EndOfLog;
+                            assert!(eol.write(&mut small_buffer).is_none());
+                            assert!(eol.write(&mut medium_buffer).is_some());
+                            assert!(eol.write(&mut large_buffer).is_some());
+                            if let Some((recovered_from_medium, _)) = LogRecord::<MonotonicU64>::from_raw_data(&medium_buffer) {
+                                if let Some((recovered_from_large, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
+                                    assert_eq!(recovered_from_large, eol);
+                                    assert_eq!(recovered_from_medium, eol);
+                                } else {
+                                    unreachable!();
+                                }
+                            } else {
+                                unreachable!();
+                            }
+                        }
+                        BUFFER_COMMITTED => {
+                            let transaction_instant: u32 = (seed >> 32).try_into().ok().map_or(0, |v| v);
+                            let buffer_committed = LogRecord::<MonotonicU64>::BufferSubmitted(transaction_instant);
+                            assert!(buffer_committed.write(&mut small_buffer).is_none());
+                            assert!(buffer_committed.write(&mut medium_buffer).is_some());
+                            assert!(buffer_committed.write(&mut large_buffer).is_some());
+                            if let Some((recovered_from_medium, _)) = LogRecord::<MonotonicU64>::from_raw_data(&medium_buffer) {
+                                if let Some((recovered_from_large, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
+                                    assert_eq!(recovered_from_large, buffer_committed);
+                                    assert_eq!(recovered_from_medium, buffer_committed);
+                                } else {
+                                    unreachable!();
+                                }
+                            } else {
+                                unreachable!();
+                            }
+                        }
+                        BUFFER_ROLLED_BACK => {
+                            let buffer_rolled_back = LogRecord::<MonotonicU64>::BufferDiscarded;
+                            assert!(buffer_rolled_back.write(&mut small_buffer).is_none());
+                            assert!(buffer_rolled_back.write(&mut medium_buffer).is_some());
+                            assert!(buffer_rolled_back.write(&mut large_buffer).is_some());
+                            if let Some((recovered_from_medium, _)) = LogRecord::<MonotonicU64>::from_raw_data(&medium_buffer) {
+                                if let Some((recovered_from_large, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
+                                    assert_eq!(recovered_from_large, buffer_rolled_back);
+                                    assert_eq!(recovered_from_medium, buffer_rolled_back);
+                                } else {
+                                    unreachable!();
+                                }
+                            } else {
+                                unreachable!();
+                            }
+                        }
+                        _ => (),
+                    }
+                }
                 TRANSACTION_UPDATED => {
                     seed.hash(&mut hasher);
                     let hash = hasher.finish();
@@ -342,92 +502,114 @@ mod tests {
                     let opcode = hash & OPCODE_MASK;
                     match opcode {
                         JOURNAL_CREATED_ONE => {
-                            let created = LogRecord::<MonotonicU64>::Created(transaction_id, journal_id, hash);
+                            let created = LogRecord::<MonotonicU64>::JournalCreatedObject(transaction_id, journal_id, hash);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
                             if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                                recovered == created
+                                assert_eq!(recovered, created);
                             } else {
-                                false
+                                unreachable!();
                             }
                         }
                         JOURNAL_CREATED_TWO => {
-                            let created = LogRecord::<MonotonicU64>::CreatedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let created = LogRecord::<MonotonicU64>::JournalCreatedTwoObjects(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
                             if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                                recovered == created
+                                assert_eq!(recovered, created);
                             } else {
-                                false
+                                unreachable!();
                             }
                         }
                         JOURNAL_DELETED_ONE => {
-                            let deleted = LogRecord::<MonotonicU64>::Deleted(transaction_id, journal_id, hash);
+                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedObject(transaction_id, journal_id, hash);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());
                             if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                                recovered == deleted
+                                assert_eq!(recovered, deleted);
                             } else {
-                                false
+                                unreachable!();
                             }
                         }
                         JOURNAL_DELETED_TWO => {
-                            let deleted = LogRecord::<MonotonicU64>::DeletedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedTwoObjects(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());
                             if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                                recovered == deleted
+                                assert_eq!(recovered, deleted);
                             } else {
-                                false
+                                unreachable!();
                             }
                         }
-                        _ => true,
+                        JOURNAL_SUBMITTED => {
+                            let submitted = LogRecord::<MonotonicU64>::JournalSubmitted(transaction_id, journal_id, hash.try_into().ok().map_or(0, |v| v));
+                            assert!(submitted.write(&mut small_buffer).is_none());
+                            assert!(submitted.write(&mut medium_buffer).is_none());
+                            assert!(submitted.write(&mut large_buffer).is_some());
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
+                                assert_eq!(recovered, submitted);
+                            } else {
+                                unreachable!();
+                            }
+                        }
+                        JOURNAL_DISCARDED => {
+                            let discarded = LogRecord::<MonotonicU64>::JournalDiscarded(transaction_id, journal_id);
+                            assert!(discarded.write(&mut small_buffer).is_none());
+                            assert!(discarded.write(&mut medium_buffer).is_none());
+                            assert!(discarded.write(&mut large_buffer).is_some());
+                            if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
+                                assert_eq!(recovered, discarded);
+                            } else {
+                                unreachable!();
+                            }
+                        }
+                        _ => (),
                     }
                 }
                 TRANSACTION_PREPARED => {
-                    let prepared = LogRecord::<MonotonicU64>::Prepared(transaction_id, instant);
+                    let prepared = LogRecord::<MonotonicU64>::TransactionPrepared(transaction_id, instant);
                     assert!(prepared.write(&mut small_buffer).is_none());
                     assert!(prepared.write(&mut medium_buffer).is_none());
                     assert!(prepared.write(&mut large_buffer).is_some());
                     if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                        recovered == prepared
+                        assert_eq!(recovered, prepared);
                     } else {
-                        false
+                        unreachable!();
                     }
                 }
                 TRANSACTION_COMMITTED => {
-                    let committed = LogRecord::<MonotonicU64>::Committed(transaction_id, instant);
+                    let committed = LogRecord::<MonotonicU64>::TransactionCommitted(transaction_id, instant);
                     assert!(committed.write(&mut small_buffer).is_none());
                     assert!(committed.write(&mut medium_buffer).is_none());
                     assert!(committed.write(&mut large_buffer).is_some());
                     if let Some((recovered, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                        recovered == committed
+                        assert_eq!(recovered, committed);
                     } else {
-                        false
+                        unreachable!();
                     }
                 }
                 TRANSACTION_ROLLED_BACK => {
-                    let rolled_back = LogRecord::<MonotonicU64>::RolledBack(transaction_id, 1);
+                    let rolled_back = LogRecord::<MonotonicU64>::TransactionRolledBack(transaction_id, 1);
                     assert!(rolled_back.write(&mut small_buffer).is_none());
                     assert!(rolled_back.write(&mut medium_buffer).is_some());
                     assert!(rolled_back.write(&mut large_buffer).is_some());
                     if let Some((recovered_from_medium, _)) = LogRecord::<MonotonicU64>::from_raw_data(&medium_buffer) {
                         if let Some((recovered_from_large, _)) = LogRecord::<MonotonicU64>::from_raw_data(&large_buffer) {
-                            recovered_from_large == rolled_back && recovered_from_medium == rolled_back
+                            assert_eq!(recovered_from_large, rolled_back);
+                            assert_eq!(recovered_from_medium, rolled_back);
                         } else {
-                            false
+                            unreachable!();
                         }
                     } else {
-                        false
+                        unreachable!();
                     }
                 }
-                _ => true,
-            };
-            assert!(result);
+                _ => (),
+            }
         }
     }
 }
