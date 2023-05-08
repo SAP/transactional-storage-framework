@@ -5,7 +5,7 @@
 mod file_io;
 pub use file_io::FileIO;
 
-use super::{Database, Error, Sequencer, TransactionID};
+use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -29,7 +29,7 @@ use std::time::Instant;
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
     /// [`PersistenceLayer::LogBuffer`] is kept in a transaction journal to store own log records
     /// until the transaction or journal is ended.
-    type LogBuffer: BufferredLogger<S, Self>;
+    type LogBuffer: Debug + Default + Send + Sized;
 
     /// Recovers the database before serving any other requests.
     ///
@@ -88,6 +88,32 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         xid: &[u8],
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error>;
+
+    /// Submits the content of the log buffer.
+    ///
+    /// This method is invoked when the associated journal is submitted or a log buffer is full.
+    ///
+    /// `transaction_instant` is given `None` if the journal is still usable.
+    fn submit(
+        &self,
+        log_buffer: Box<Self::LogBuffer>,
+        id: TransactionID,
+        journal_id: JournalID,
+        transaction_instant: Option<NonZeroU32>,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self>;
+
+    /// Discards the content of the log buffer.
+    ///
+    /// This method is invoked when the associated journal is discarded without being submitted to
+    /// the transaction.
+    fn discard(
+        &self,
+        log_buffer: Box<Self::LogBuffer>,
+        id: TransactionID,
+        journal_id: JournalID,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self>;
 
     /// A transaction is being rewound.
     ///
@@ -164,23 +190,6 @@ pub enum RecoveryResult<S: Sequencer, P: PersistenceLayer<S>> {
 
     /// The database has been recovered.
     Recovered(Database<S, P>),
-}
-
-/// [`BufferredLogger`] keeps log records until an explicit call to [`BufferredLogger::flush`] is
-/// made.
-pub trait BufferredLogger<S: Sequencer, P: PersistenceLayer<S>>:
-    Debug + Default + Send + Sized
-{
-    /// Flushes the content.
-    ///
-    /// This method is invoked when the associated journal is submitted or a log record is created
-    /// and immediately submitted.
-    fn flush(
-        self: Box<Self>,
-        persistence_layer: &P,
-        submit_instant: Option<NonZeroU32>,
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, P>;
 }
 
 /// [`AwaitIO`] is returned by a [`PersistenceLayer`] if the content of a log record was

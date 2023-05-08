@@ -10,23 +10,25 @@ use std::ptr::addr_of;
 
 /// Individual log record.
 ///
-/// The maximum size of a log record is 32-byte.
+/// The maximum size of a log record is limited to 32-byte when the size of `S::Instant` is not
+/// larger than 24-byte.
 ///
 /// The byte representation of [`LogRecord`] is as follows.
-/// - 61-bit transaction ID, 1-bit transaction control flag and 2-bit opcode follow.
-/// - If transaction control flag = 0,
-/// -- 0x0000000FF0000000: the buffer was committed.
-/// -- 0x000000FFFF000000: the buffer was rolled back.
+/// - 61-bit transaction ID, and 3-bit transaction control opcode follows.
+/// - If `transaction opcode = 0b000`, the event is unrelated to a transaction.
+/// -- `0x0000000000000000`: the end of log file.
+/// -- `0x0000000FF0000000`: the buffer was committed.
+/// -- `0x000000FFFF000000`: the buffer was rolled back.
 /// -- TODO: page reorganization.
-/// - Else if opcode = 00,
+/// - If `transaction opcode = 0b100`, the event happened in a transaction.
 /// -- 61-bit journal ID, 3-bit opcode.
-/// -- If opcode == 000, the journal created data identified as the `u64` value that follows.
-/// -- If opcode == 001, the journal created data identified as the two `u64` values that follow.
-/// -- If opcode == 010, the journal deleted data identified as the `u64` value that follows.
-/// -- If opcode == 011, the journal deleted data identified as the two `u64` values that follow.
-/// - Else if opcode = 01, the transaction is being prepared for commit, and `S::Instant` follows.
-/// - Else if opcode = 10, the transaction is being committed, and `S::Instant` follows.
-/// - Else if opcode = 11, the transaction is being rolled back.
+/// -- If `opcode = 0b000`, the journal created data identified as the `u64` value that follows.
+/// -- If `opcode = 0b001`, the journal created data identified as the two `u64` values that follow.
+/// -- If `opcode = 0b010`, the journal deleted data identified as the `u64` value that follows.
+/// -- If `opcode = 0b011`, the journal deleted data identified as the two `u64` values that follow.
+/// - If `transaction opcode = 0b101`, the transaction is being prepared for commit, and `S::Instant` follows.
+/// - If `transaction opcode = 0b110`, the transaction is being committed, and `S::Instant` follows.
+/// - If `transaction opcode = 0b111`, the transaction is being rolled back.
 #[derive(Copy, Clone, Debug, Eq)]
 pub(super) enum LogRecord<S: Sequencer> {
     /// End-of-log marker.
@@ -68,10 +70,25 @@ pub const BUFFER_COMMITTED: u64 = 0x0000_00FF_FF00_0000;
 /// The log buffer was rolled back.
 pub const BUFFER_ROLLED_BACK: u64 = 0x0000_FFFF_FFFF_0000;
 
+/// Opcode bit mask.
+pub const OPCODE_MASK: u64 = 0b111;
+
+/// The journal created a database object.
+pub const JOURNAL_CREATED_ONE: u64 = 0b000;
+
+/// The journal created two database objects.
+pub const JOURNAL_CREATED_TWO: u64 = 0b001;
+
+/// The journal deleted a database object.
+pub const JOURNAL_DELETED_ONE: u64 = 0b010;
+
+/// The journal deleted two database objects.
+pub const JOURNAL_DELETED_TWO: u64 = 0b011;
+
 /// The transaction updated the database.
 pub const TRANSACTION_UPDATED: u64 = 0b100;
 
-/// The transaction was committed.
+/// The transaction was prepared for commit.
 pub const TRANSACTION_PREPARED: u64 = 0b101;
 
 /// The transaction was committed.
@@ -83,14 +100,14 @@ pub const TRANSACTION_ROLLED_BACK: u64 = 0b111;
 impl<S: Sequencer> LogRecord<S> {
     /// Tries to parse the supplied `u8` slice as a [`LogRecord`].
     pub(super) fn from_raw_data(value: &[u8]) -> Option<(Self, &[u8])> {
-        let (transaction_id_with_mark, value) = read_part::<TransactionID>(value)?;
+        let (transaction_id_with_opcode, value) = read_part::<TransactionID>(value)?;
 
-        if transaction_id_with_mark == 0 {
-            return Some((Self::EndOfLog, value));
-        }
-
-        if transaction_id_with_mark & 0b100 == 0 {
-            match transaction_id_with_mark {
+        let transaction_opcode = transaction_id_with_opcode & OPCODE_MASK;
+        if transaction_opcode == 0 {
+            match transaction_id_with_opcode {
+                0 => {
+                    return Some((Self::EndOfLog, value));
+                }
                 BUFFER_COMMITTED => {
                     return Some((LogRecord::BufferCommitted, value));
                 }
@@ -101,15 +118,14 @@ impl<S: Sequencer> LogRecord<S> {
             }
         }
 
-        let transaction_opcode = transaction_id_with_mark & 0b111;
-        let transaction_id = transaction_id_with_mark & (!0b111);
+        let transaction_id = transaction_id_with_opcode & (!OPCODE_MASK);
         match transaction_opcode {
             TRANSACTION_UPDATED => {
                 let (journal_id_with_opcode, value) = read_part::<JournalID>(value)?;
-                let journal_id = journal_id_with_opcode & (!0b111);
-                let opcode = journal_id_with_opcode & 0b111;
+                let journal_id = journal_id_with_opcode & (!OPCODE_MASK);
+                let opcode = journal_id_with_opcode & OPCODE_MASK;
                 match opcode {
-                    0b000 => {
+                    JOURNAL_CREATED_ONE => {
                         // Created.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
@@ -117,7 +133,7 @@ impl<S: Sequencer> LogRecord<S> {
                             value,
                         ))
                     }
-                    0b001 => {
+                    JOURNAL_CREATED_TWO => {
                         // Created two.
                         let (object_id_1, value) = read_part::<u64>(value)?;
                         let (object_id_2, value) = read_part::<u64>(value)?;
@@ -131,7 +147,7 @@ impl<S: Sequencer> LogRecord<S> {
                             value,
                         ))
                     }
-                    0b010 => {
+                    JOURNAL_DELETED_ONE => {
                         // Deleted.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
@@ -139,7 +155,7 @@ impl<S: Sequencer> LogRecord<S> {
                             value,
                         ))
                     }
-                    0b011 => {
+                    JOURNAL_DELETED_TWO => {
                         // Deleted two.
                         let (object_id_1, value) = read_part::<u64>(value)?;
                         let (object_id_2, value) = read_part::<u64>(value)?;
@@ -186,56 +202,57 @@ impl<S: Sequencer> LogRecord<S> {
             LogRecord::BufferCommitted => write_part::<u64>(BUFFER_COMMITTED, buffer)?,
             LogRecord::BufferRolledBack => write_part::<u64>(BUFFER_ROLLED_BACK, buffer)?,
             LogRecord::Created(transaction_id, journal_id, object_id) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
-                debug_assert_eq!(journal_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let buffer = write_part::<JournalID>(*journal_id, buffer)?;
+                let journal_id_with_opcode = journal_id | JOURNAL_CREATED_ONE;
+                let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
             LogRecord::CreatedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
-                debug_assert_eq!(journal_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let journal_id_with_opcode = journal_id | 0b001;
+                let journal_id_with_opcode = journal_id | JOURNAL_CREATED_TWO;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 let buffer = write_part::<u64>(*object_id_1, buffer)?;
                 write_part::<u64>(*object_id_2, buffer)?
             }
             LogRecord::Deleted(transaction_id, journal_id, object_id) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
-                debug_assert_eq!(journal_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let journal_id_with_opcode = journal_id | 0b010;
+                let journal_id_with_opcode = journal_id | JOURNAL_DELETED_ONE;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
             LogRecord::DeletedTwo(transaction_id, journal_id, object_id_1, object_id_2) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
-                debug_assert_eq!(journal_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
+                debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let journal_id_with_opcode = journal_id | 0b011;
+                let journal_id_with_opcode = journal_id | JOURNAL_DELETED_TWO;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 let buffer = write_part::<u64>(*object_id_1, buffer)?;
                 write_part::<u64>(*object_id_2, buffer)?
             }
             LogRecord::Prepared(transaction_id, instant) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_PREPARED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 write_part::<S::Instant>(*instant, buffer)?
             }
             LogRecord::Committed(transaction_id, instant) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_COMMITTED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 write_part::<S::Instant>(*instant, buffer)?
             }
             LogRecord::RolledBack(transaction_id, to) => {
-                debug_assert_eq!(transaction_id & 0b111, 0);
+                debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_ROLLED_BACK;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 write_part::<u32>(*to, buffer)?
@@ -309,8 +326,8 @@ mod tests {
         #[test]
         fn read_write(seed in 0_u64..u64::MAX) {
             let mut hasher = IntHasher::default();
-            let transaction_opcode = seed & 0b111;
-            let transaction_id = seed & (!0b111);
+            let transaction_opcode = seed & OPCODE_MASK;
+            let transaction_id = seed & (!OPCODE_MASK);
             (seed.rotate_left(32)).hash(&mut hasher);
             let instant = hasher.finish();
             let mut small_buffer = [0; 5];
@@ -321,10 +338,10 @@ mod tests {
                 TRANSACTION_UPDATED => {
                     seed.hash(&mut hasher);
                     let hash = hasher.finish();
-                    let journal_id = hash & (!0b111);
-                    let opcode = hash & 0b111;
+                    let journal_id = hash & (!OPCODE_MASK);
+                    let opcode = hash & OPCODE_MASK;
                     match opcode {
-                        0b000 => {
+                        JOURNAL_CREATED_ONE => {
                             let created = LogRecord::<MonotonicU64>::Created(transaction_id, journal_id, hash);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
@@ -335,7 +352,7 @@ mod tests {
                                 false
                             }
                         }
-                        0b001 => {
+                        JOURNAL_CREATED_TWO => {
                             let created = LogRecord::<MonotonicU64>::CreatedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
@@ -346,7 +363,7 @@ mod tests {
                                 false
                             }
                         }
-                        0b010 => {
+                        JOURNAL_DELETED_ONE => {
                             let deleted = LogRecord::<MonotonicU64>::Deleted(transaction_id, journal_id, hash);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
@@ -357,7 +374,7 @@ mod tests {
                                 false
                             }
                         }
-                        0b011 => {
+                        JOURNAL_DELETED_TWO => {
                             let deleted = LogRecord::<MonotonicU64>::DeletedTwo(transaction_id, journal_id, hash, hash.rotate_left(32));
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());

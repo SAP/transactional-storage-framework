@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::persistence_layer::BufferredLogger;
-
 use super::access_controller::ObjectState;
 use super::snapshot::{JournalSnapshot, TransactionSnapshot};
 use super::task_processor::{Task, TaskProcessor};
@@ -200,11 +198,17 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     pub fn submit(mut self) -> NonZeroU32 {
         let submit_instant = self.transaction.record(&self.anchor);
         if let Some(log_buffer) = self.log_buffer.take() {
-            log_buffer.flush(
-                self.transaction.database().persistence_layer(),
-                Some(submit_instant),
-                None,
-            );
+            self.transaction
+                .database()
+                .persistence_layer()
+                .submit(
+                    log_buffer,
+                    self.transaction.id(),
+                    self.id(),
+                    Some(submit_instant),
+                    None,
+                )
+                .forget();
         }
         submit_instant
     }
@@ -264,6 +268,13 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
         if self.anchor.submit_instant().is_none() {
             self.anchor
                 .rollback(self.transaction.database().task_processor());
+            if let Some(log_buffer) = self.log_buffer.take() {
+                self.transaction
+                    .database()
+                    .persistence_layer()
+                    .discard(log_buffer, self.transaction.id(), self.id(), None)
+                    .forget();
+            }
         }
     }
 }

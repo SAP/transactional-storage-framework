@@ -15,9 +15,8 @@ mod recovery;
 
 pub use random_access_file::RandomAccessFile;
 
-use crate::persistence_layer::{AwaitIO, AwaitRecovery, BufferredLogger, RecoveryResult};
-use crate::transaction::ID as TransactionID;
-use crate::{utils, Database, Error, PersistenceLayer, Sequencer};
+use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
+use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use io_task_processor::{FlusherData, IOTask};
 use log_record::LogRecord;
 use recovery::RecoveryData;
@@ -57,11 +56,17 @@ pub struct FileIO<S: Sequencer<Instant = u64>> {
     _phantom: PhantomData<S>,
 }
 
-/// [`FileLogBuffer`] implements [`BufferredLogger`].
+/// [`FileLogBuffer`] is the log buffer type for [`FileIO`].
 #[derive(Debug, Default)]
 pub struct FileLogBuffer {
     /// The associated log record.
     buffer: [u8; 32],
+
+    /// Indicates whether the associated journal was discarded.
+    discarded: bool,
+
+    /// The submit instant of the journal.
+    submit_instant: Option<NonZeroU32>,
 
     /// The number of byes written to the buffer.
     bytes_written: u8,
@@ -197,6 +202,15 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             }
         }
     }
+
+    /// Flushes a log buffer.
+    fn flush(&self, log_buffer: Box<FileLogBuffer>, deadline: Option<Instant>) -> AwaitIO<S, Self> {
+        let file_log_buffer_ptr = Box::into_raw(log_buffer);
+        let eob_offset =
+            Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
+        drop(self.sender.try_send(IOTask::Flush));
+        AwaitIO::with_eob_offset(self, eob_offset).set_deadline(deadline)
+    }
 }
 
 impl<S: Sequencer<Instant = u64>> Drop for FileIO<S> {
@@ -274,6 +288,39 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
+    fn submit(
+        &self,
+        mut log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        transaction_instant: Option<NonZeroU32>,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, FileIO<S>> {
+        if log_buffer.bytes_written == 0 {
+            todo!();
+        } else {
+            log_buffer.submit_instant = transaction_instant;
+        }
+        self.flush(log_buffer, deadline)
+    }
+
+    #[inline]
+    fn discard(
+        &self,
+        mut log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self> {
+        if log_buffer.bytes_written == 0 {
+            todo!();
+        } else {
+            log_buffer.discarded = true;
+        }
+        self.flush(log_buffer, deadline)
+    }
+
+    #[inline]
     fn rewind(
         &self,
         _id: TransactionID,
@@ -306,7 +353,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
-        log_buffer.flush(self, None, deadline)
+        self.flush(log_buffer, deadline)
     }
 
     #[inline]
@@ -386,28 +433,6 @@ impl FileLogBuffer {
     }
 }
 
-impl<S: Sequencer<Instant = u64>> BufferredLogger<S, FileIO<S>> for FileLogBuffer {
-    #[inline]
-    fn flush(
-        self: Box<Self>,
-        persistence_layer: &FileIO<S>,
-        _submit_instant: Option<NonZeroU32>,
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, FileIO<S>> {
-        if self.bytes_written == 0 {
-            // It is an empty log buffer.
-            return AwaitIO::with_eob_offset(persistence_layer, 0);
-        }
-        let file_log_buffer_ptr = Box::into_raw(self);
-        let eob_offset = FileIO::<S>::push_log_buffer(
-            &persistence_layer.file_io_data.log_buffer_link,
-            file_log_buffer_ptr,
-        );
-        drop(persistence_layer.sender.try_send(IOTask::Flush));
-        AwaitIO::with_eob_offset(persistence_layer, eob_offset).set_deadline(deadline)
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -454,10 +479,10 @@ mod test {
         log_buffer_4.set_buffer_position(pos);
 
         let (result_3, result_1, result_4, result_2) = futures::join!(
-            log_buffer_3.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_1.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_4.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
-            log_buffer_2.flush(&file_io, None, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            file_io.flush(log_buffer_3, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            file_io.flush(log_buffer_1, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            file_io.flush(log_buffer_4, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
+            file_io.flush(log_buffer_2, Some(Instant::now() + TIMEOUT_UNEXPECTED)),
         );
 
         assert!(result_1.is_ok());
