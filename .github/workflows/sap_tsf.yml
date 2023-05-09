@@ -21,6 +21,11 @@ jobs:
     - uses: actions/checkout@v3
     - name: Compliance
       uses: fsfe/reuse-action@v1.1
+    - name: Spell-check
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-spellcheck
+      run: cargo spellcheck
     - name: Format
       run: cargo fmt --all
     - name: Lint
@@ -31,8 +36,6 @@ jobs:
       run: cargo test --release --verbose
     - name: Doc
       run: cargo doc --document-private-items
-    - name: Spell-check
-      run: cargo spellcheck
   basic-windows:
     runs-on: windows-latest
     timeout-minutes: 15
