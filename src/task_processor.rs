@@ -56,7 +56,7 @@ pub enum Task {
     /// [`TaskProcessor`] periodically checks the associated
     /// [`AccessController`](super::AccessController) if the corresponding access data can be
     /// removed, or ownership of it can be transferred.
-    MonitorObject(usize),
+    MonitorObject(u64),
 
     /// The [`TaskProcessor`] should check the [`AccessController`](super::AccessController)
     /// entries corresponding to monitored database objects.
@@ -86,7 +86,7 @@ struct ThreadLocalData<S: Sequencer, P: PersistenceLayer<S>> {
     monitored_containers: BTreeSet<String>,
 
     /// A set containing the object identifiers of monitored database objects.
-    monitored_object_ids: BTreeSet<usize>,
+    monitored_object_ids: BTreeSet<u64>,
 
     /// Wait duration to receive a new [`Task`].
     wait_duration: Duration,

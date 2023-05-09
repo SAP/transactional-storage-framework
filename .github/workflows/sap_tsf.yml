@@ -31,6 +31,8 @@ jobs:
       run: cargo test --release --verbose
     - name: Doc
       run: cargo doc --document-private-items
+    - name: Spell-check
+      run: cargo spellcheck
   basic-windows:
     runs-on: windows-latest
     timeout-minutes: 15

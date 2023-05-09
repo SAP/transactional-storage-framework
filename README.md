@@ -113,12 +113,12 @@ use std::num::NonZeroU32;
 use std::path::Path;
 
 // `O` represents a database object type.
-struct O(usize);
+struct O(u64);
 
 
 // `ToObjectID` is implemented for `O`.
 impl ToObjectID for O {
-    fn to_object_id(&self) -> usize {
+    fn to_object_id(&self) -> u64 {
         self.0
     }
 }

@@ -81,6 +81,38 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
+    /// Writes the fact that the supplied database objects have been created.
+    ///
+    /// Returns a log buffer if the last log buffer used in the method is not full. Full buffers
+    /// used in the method are automatically submitted to the persistence layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it fails to write the data to the log buffer.
+    fn create(
+        &self,
+        log_buffer: Box<Self::LogBuffer>,
+        id: TransactionID,
+        journal_id: JournalID,
+        object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
+
+    /// Writes the fact that the supplied database objects have been deleted.
+    ///
+    /// Returns a log buffer if the last log buffer used in the method is not full. Full buffers
+    /// used in the method are automatically submitted to the persistence layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it fails to write the data to the log buffer.
+    fn delete(
+        &self,
+        log_buffer: Box<Self::LogBuffer>,
+        id: TransactionID,
+        journal_id: JournalID,
+        object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
+
     /// Submits the content of the log buffer.
     ///
     /// This method is invoked when the associated journal is submitted or a log buffer is full.

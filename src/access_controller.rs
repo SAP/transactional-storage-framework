@@ -41,11 +41,11 @@ use std::time::Instant;
 /// use std::path::Path;
 ///
 /// // `O` represents a database object type.
-/// struct O(usize);
+/// struct O(u64);
 ///
 /// // `ToObjectID` is implemented for `O`.
 /// impl ToObjectID for O {
-///     fn to_object_id(&self) -> usize {
+///     fn to_object_id(&self) -> u64 {
 ///         self.0
 ///    }
 /// }
@@ -99,14 +99,14 @@ use std::time::Instant;
 /// ```
 #[derive(Debug, Default)]
 pub struct AccessController<S: Sequencer> {
-    table: HashMap<usize, ObjectState<S>>,
+    table: HashMap<u64, ObjectState<S>>,
 }
 
-/// [`ToObjectID`] derives a fixed [`usize`] value for the instance.
+/// [`ToObjectID`] derives a fixed [`u64`] value for the instance.
 pub trait ToObjectID {
     /// It must always return the same value for the same `self`, and the value has to be unique in
     /// the process during the lifetime of `self`.
-    fn to_object_id(&self) -> usize;
+    fn to_object_id(&self) -> u64;
 }
 
 /// An owner of a database object.
@@ -248,10 +248,10 @@ impl<S: Sequencer> AccessController<S> {
     /// use sap_tsf::{Database, ToObjectID};
     /// use std::path::Path;
     ///
-    /// struct O(usize);
+    /// struct O(u64);
     ///
     /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> usize {
+    ///     fn to_object_id(&self) -> u64 {
     ///         self.0
     ///    }
     /// }
@@ -384,10 +384,10 @@ impl<S: Sequencer> AccessController<S> {
     /// use sap_tsf::{Database, ToObjectID};
     /// use std::path::Path;
     ///
-    /// struct O(usize);
+    /// struct O(u64);
     ///
     /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> usize {
+    ///     fn to_object_id(&self) -> u64 {
     ///         self.0
     ///    }
     /// }
@@ -454,10 +454,10 @@ impl<S: Sequencer> AccessController<S> {
     /// use sap_tsf::{Database, ToObjectID};
     /// use std::path::Path;
     ///
-    /// struct O(usize);
+    /// struct O(u64);
     ///
     /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> usize {
+    ///     fn to_object_id(&self) -> u64 {
     ///         self.0
     ///    }
     /// }
@@ -562,10 +562,10 @@ impl<S: Sequencer> AccessController<S> {
     /// use sap_tsf::{Database, ToObjectID};
     /// use std::path::Path;
     ///
-    /// struct O(usize);
+    /// struct O(u64);
     ///
     /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> usize {
+    ///     fn to_object_id(&self) -> u64 {
     ///         self.0
     ///    }
     /// }
@@ -671,10 +671,10 @@ impl<S: Sequencer> AccessController<S> {
     /// use sap_tsf::{Database, ToObjectID};
     /// use std::path::Path;
     ///
-    /// struct O(usize);
+    /// struct O(u64);
     ///
     /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> usize {
+    ///     fn to_object_id(&self) -> u64 {
     ///         self.0
     ///    }
     /// }
@@ -766,7 +766,7 @@ impl<S: Sequencer> AccessController<S> {
     ///
     /// If the database object still need to be monitored, it returns `true`. It is a blocking and
     /// synchronous method, therefore this must be invoked in the background.
-    pub(super) fn transfer_ownership_sync(&self, object_id: usize) -> bool {
+    pub(super) fn transfer_ownership_sync(&self, object_id: u64) -> bool {
         self.table
             .update(&object_id, |_, object_state| {
                 object_state.prepare_ownership_transfer();
@@ -801,7 +801,7 @@ impl<S: Sequencer> AccessController<S> {
     /// blocking and synchronous method, therefore this must be invoked in the background.
     pub(super) fn try_remove_access_data_sync<C: Fn(&S::Instant) -> bool, D: FnMut(&S::Instant)>(
         &self,
-        object_id: usize,
+        object_id: u64,
         condition: &C,
         deletion_notifier: &mut D,
     ) -> bool {
@@ -2240,8 +2240,8 @@ mod tests {
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
     const TIMEOUT_EXPECTED: Duration = Duration::from_millis(1);
 
-    impl ToObjectID for usize {
-        fn to_object_id(&self) -> usize {
+    impl ToObjectID for u64 {
+        fn to_object_id(&self) -> u64 {
             *self
         }
     }

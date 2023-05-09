@@ -288,6 +288,28 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
+    fn create(
+        &self,
+        _log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        _object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
+        unimplemented!()
+    }
+
+    #[inline]
+    fn delete(
+        &self,
+        _log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        _object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
+        unimplemented!()
+    }
+
+    #[inline]
     fn submit(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
