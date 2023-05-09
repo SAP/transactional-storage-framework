@@ -10,14 +10,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-struct O(usize);
+struct O(u64);
 impl ToObjectID for O {
-    fn to_object_id(&self) -> usize {
+    fn to_object_id(&self) -> u64 {
         self.0
     }
 }
 
-async fn create_check(size: usize, iters: u64) -> Duration {
+async fn create_check(size: u64, iters: u64) -> Duration {
     let path = Path::new("bench_access_controller_create");
     let database = Arc::new(Database::with_path(path).await.unwrap());
     let access_controller = database.access_controller();
@@ -41,7 +41,7 @@ async fn create_check(size: usize, iters: u64) -> Duration {
 }
 
 fn create(c: &mut Criterion) {
-    let size: usize = 64;
+    let size: u64 = 64;
     c.bench_with_input(
         BenchmarkId::new("AccessController: create", size),
         &size,

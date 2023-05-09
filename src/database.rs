@@ -118,7 +118,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// failed, or the deadline was reached.
     #[inline]
     pub async fn checkpoint(&self, deadline: Option<Instant>) -> Result<S::Instant, Error> {
-        let io_completion = self.kernel.persistence_layer.checkpoint(self, deadline)?;
+        let io_completion = self.kernel.persistence_layer.checkpoint(self, deadline);
         io_completion.await
     }
 

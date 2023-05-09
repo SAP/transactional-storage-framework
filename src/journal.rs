@@ -85,7 +85,7 @@ pub(super) type ResultWakerPair = (Option<Result<bool, Error>>, Option<Waker>);
 #[derive(Debug)]
 pub(super) struct AwaitResponse<'d> {
     /// The object identifier of the desired resource.
-    object_id: usize,
+    object_id: u64,
 
     /// Indicates that the object identifier was sent to the [`TaskProcessor`].
     object_id_registered: bool,
@@ -499,7 +499,7 @@ impl AccessRequestResult {
 impl<'d> AwaitResponse<'d> {
     /// Creates a new [`AwaitResponse`].
     pub(super) fn new<S: Sequencer>(
-        entry: OccupiedEntry<usize, ObjectState<S>>,
+        entry: OccupiedEntry<u64, ObjectState<S>>,
         task_processor: &'d TaskProcessor,
         deadline: Instant,
         result_placeholder: Arc<AccessRequestResult>,

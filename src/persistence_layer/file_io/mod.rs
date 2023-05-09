@@ -273,8 +273,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         &self,
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
+    ) -> AwaitIO<S, Self> {
+        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -283,23 +283,51 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _id: TransactionID,
         _xid: &[u8],
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
+    ) -> AwaitIO<S, Self> {
+        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
+    }
+
+    #[inline]
+    fn create(
+        &self,
+        _log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        _object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
+        unimplemented!()
+    }
+
+    #[inline]
+    fn delete(
+        &self,
+        _log_buffer: Box<Self::LogBuffer>,
+        _id: TransactionID,
+        _journal_id: JournalID,
+        _object_ids: &[u64],
+    ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
+        unimplemented!()
     }
 
     #[inline]
     fn submit(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
-        _id: TransactionID,
-        _journal_id: JournalID,
+        id: TransactionID,
+        journal_id: JournalID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, FileIO<S>> {
-        if log_buffer.bytes_written == 0 {
-            todo!();
-        } else {
-            log_buffer.submit_instant = transaction_instant;
+        if let Some(transaction_instant) = transaction_instant {
+            if log_buffer.bytes_written == 0 {
+                // The buffer is empty, therefore it needs to write its identification information.
+                let discard_log_record =
+                    LogRecord::<S>::JournalSubmitted(id, journal_id, transaction_instant.get());
+                let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
+                log_buffer.set_buffer_position(bytes_written);
+            } else {
+                log_buffer.submit_instant.replace(transaction_instant);
+            }
         }
         self.flush(log_buffer, deadline)
     }
@@ -308,12 +336,15 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn discard(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
-        _id: TransactionID,
-        _journal_id: JournalID,
+        id: TransactionID,
+        journal_id: JournalID,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         if log_buffer.bytes_written == 0 {
-            todo!();
+            // The buffer is empty, therefore it needs to write its identification information.
+            let discard_log_record = LogRecord::<S>::JournalDiscarded(id, journal_id);
+            let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
+            log_buffer.set_buffer_position(bytes_written);
         } else {
             log_buffer.discarded = true;
         }
@@ -326,8 +357,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _id: TransactionID,
         _transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
+    ) -> AwaitIO<S, Self> {
+        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -336,9 +367,9 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _id: TransactionID,
         _prepare_instant: u64,
         deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
+    ) -> AwaitIO<S, Self> {
         // TODO: implement it.
-        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
+        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
     }
 
     #[inline]

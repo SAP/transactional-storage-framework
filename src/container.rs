@@ -37,7 +37,7 @@ pub(super) struct VersionedRecordVisitor<'c, S: Sequencer, P: PersistenceLayer<S
 }
 
 impl<'c, S: Sequencer, P: PersistenceLayer<S>> Iterator for VersionedRecordVisitor<'c, S, P> {
-    type Item = usize;
+    type Item = u64;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
