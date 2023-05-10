@@ -131,9 +131,9 @@ fn apply_to_database<S: Sequencer<Instant = u64>>(
                 }
                 LogRecord::BufferSubmitted(_) => todo!(),
                 LogRecord::BufferDiscarded => todo!(),
-                LogRecord::JournalCreatedOneObject(_, _, _) => todo!(),
+                LogRecord::JournalCreatedObjectSingle(_, _, _) => todo!(),
                 LogRecord::JournalCreatedObjectRange(_, _, _, _) => todo!(),
-                LogRecord::JournalDeletedOneObject(_, _, _) => todo!(),
+                LogRecord::JournalDeletedObjectSingle(_, _, _) => todo!(),
                 LogRecord::JournalDeletedObjectRange(_, _, _, _) => todo!(),
                 LogRecord::JournalSubmitted(_, _, _) => todo!(),
                 LogRecord::JournalDiscarded(_, _) => todo!(),

@@ -290,30 +290,162 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn create(
         &self,
-        _log_buffer: Box<Self::LogBuffer>,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _object_ids: &[u64],
+        log_buffer: Box<Self::LogBuffer>,
+        transaction_id: TransactionID,
+        journal_id: JournalID,
+        object_ids: &[u64],
     ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
-        unimplemented!()
+        let mut log_buffer = Some(log_buffer);
+        let mut current_log: Option<LogRecord<S>> = None;
+        for id in object_ids {
+            let new_log = if let Some(log) = current_log.take() {
+                let new_log = match log {
+                    LogRecord::JournalCreatedObjectSingle(_, _, prev_id) => {
+                        if *id == prev_id.wrapping_add(1) {
+                            Some(LogRecord::JournalCreatedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                prev_id,
+                                *id,
+                            ))
+                        } else if id.wrapping_add(1) == prev_id {
+                            Some(LogRecord::JournalCreatedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                *id,
+                                prev_id,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    LogRecord::JournalCreatedObjectRange(_, _, start_id, end_id) => {
+                        if *id == end_id.wrapping_add(1) {
+                            Some(LogRecord::JournalCreatedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                start_id,
+                                *id,
+                            ))
+                        } else if id.wrapping_add(1) == *id {
+                            Some(LogRecord::JournalCreatedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                *id,
+                                end_id,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                new_log.map_or_else(
+                    || {
+                        let mut current_log_buffer =
+                            log_buffer.take().map_or_else(Box::default, |b| b);
+                        if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                            current_log_buffer
+                                .set_buffer_position(current_log_buffer.pos() + bytes_written);
+                            log_buffer.replace(current_log_buffer);
+                        } else {
+                            // The log buffer is full, therefore flush it.
+                            self.flush(current_log_buffer, None).forget();
+                        }
+                        LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, *id)
+                    },
+                    |l| l,
+                )
+            } else {
+                LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, *id)
+            };
+            current_log.replace(new_log);
+        }
+        Ok(log_buffer)
     }
 
     #[inline]
     fn delete(
         &self,
-        _log_buffer: Box<Self::LogBuffer>,
-        _id: TransactionID,
-        _journal_id: JournalID,
-        _object_ids: &[u64],
+        log_buffer: Box<Self::LogBuffer>,
+        transaction_id: TransactionID,
+        journal_id: JournalID,
+        object_ids: &[u64],
     ) -> Result<Option<Box<Self::LogBuffer>>, Error> {
-        unimplemented!()
+        let mut log_buffer = Some(log_buffer);
+        let mut current_log: Option<LogRecord<S>> = None;
+        for id in object_ids {
+            let new_log = if let Some(log) = current_log.take() {
+                let new_log = match log {
+                    LogRecord::JournalDeletedObjectSingle(_, _, prev_id) => {
+                        if *id == prev_id.wrapping_add(1) {
+                            Some(LogRecord::JournalDeletedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                prev_id,
+                                *id,
+                            ))
+                        } else if id.wrapping_add(1) == prev_id {
+                            Some(LogRecord::JournalDeletedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                *id,
+                                prev_id,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    LogRecord::JournalDeletedObjectRange(_, _, start_id, end_id) => {
+                        if *id == end_id.wrapping_add(1) {
+                            Some(LogRecord::JournalDeletedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                start_id,
+                                *id,
+                            ))
+                        } else if id.wrapping_add(1) == *id {
+                            Some(LogRecord::JournalDeletedObjectRange(
+                                transaction_id,
+                                journal_id,
+                                *id,
+                                end_id,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                new_log.map_or_else(
+                    || {
+                        let mut current_log_buffer =
+                            log_buffer.take().map_or_else(Box::default, |b| b);
+                        if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                            current_log_buffer
+                                .set_buffer_position(current_log_buffer.pos() + bytes_written);
+                            log_buffer.replace(current_log_buffer);
+                        } else {
+                            // The log buffer is full, therefore flush it.
+                            self.flush(current_log_buffer, None).forget();
+                        }
+                        LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, *id)
+                    },
+                    |l| l,
+                )
+            } else {
+                LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, *id)
+            };
+            current_log.replace(new_log);
+        }
+        Ok(log_buffer)
     }
 
     #[inline]
     fn submit(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
@@ -321,8 +453,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         if let Some(transaction_instant) = transaction_instant {
             if log_buffer.bytes_written == 0 {
                 // The buffer is empty, therefore it needs to write its identification information.
-                let discard_log_record =
-                    LogRecord::<S>::JournalSubmitted(id, journal_id, transaction_instant.get());
+                let discard_log_record = LogRecord::<S>::JournalSubmitted(
+                    transaction_id,
+                    journal_id,
+                    transaction_instant.get(),
+                );
                 let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
                 log_buffer.set_buffer_position(bytes_written);
             } else {
@@ -336,13 +471,13 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn discard(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         if log_buffer.bytes_written == 0 {
             // The buffer is empty, therefore it needs to write its identification information.
-            let discard_log_record = LogRecord::<S>::JournalDiscarded(id, journal_id);
+            let discard_log_record = LogRecord::<S>::JournalDiscarded(transaction_id, journal_id);
             let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
             log_buffer.set_buffer_position(bytes_written);
         } else {
@@ -376,11 +511,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn commit(
         &self,
         mut log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         commit_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        let Some(new_pos) = LogRecord::<S>::TransactionCommitted(id, commit_instant).write(&mut log_buffer.buffer) else {
+        let Some(new_pos) = LogRecord::<S>::TransactionCommitted(transaction_id, commit_instant).write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
@@ -434,6 +569,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
 }
 
 impl FileLogBuffer {
+    /// Returns the current remaining buffer size.
+    fn buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[self.bytes_written as usize..]
+    }
+
     /// Returns the current buffer starting position.
     fn pos(&self) -> usize {
         self.bytes_written as usize

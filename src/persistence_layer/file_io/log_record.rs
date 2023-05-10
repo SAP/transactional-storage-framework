@@ -52,16 +52,16 @@ pub(super) enum LogRecord<S: Sequencer> {
     /// from the log buffer state.
     BufferDiscarded,
 
-    /// The transaction created a database object identified as the `u64` value.
-    JournalCreatedOneObject(TransactionID, JournalID, u64),
+    /// The transaction created a single database object identified as the `u64` value.
+    JournalCreatedObjectSingle(TransactionID, JournalID, u64),
 
     /// The transaction created a range of database objects identified as the `u64` range.
     JournalCreatedObjectRange(TransactionID, JournalID, u64, u64),
 
-    /// The transaction deleted a database object identified as the `u64` value.
-    JournalDeletedOneObject(TransactionID, JournalID, u64),
+    /// The transaction deleted a single database object identified as the `u64` value.
+    JournalDeletedObjectSingle(TransactionID, JournalID, u64),
 
-    /// The transaction deleted two database objects identified as the two `u64` values.
+    /// The transaction deleted a range of database objects identified as the `u64` range.
     JournalDeletedObjectRange(TransactionID, JournalID, u64, u64),
 
     /// The journal was submitted.
@@ -96,14 +96,14 @@ pub const BUFFER_COMMITTED: u64 = 0b0000_1000;
 /// The log buffer was rolled back.
 pub const BUFFER_ROLLED_BACK: u64 = 0b0001_0000;
 
-/// The journal created a database object.
-pub const JOURNAL_CREATED_ONE: u64 = 0b000;
+/// The journal created a single database object.
+pub const JOURNAL_CREATED_SINGLE: u64 = 0b000;
 
 /// The journal created a range of database objects.
 pub const JOURNAL_CREATED_RANGE: u64 = 0b001;
 
-/// The journal deleted a database object.
-pub const JOURNAL_DELETED_ONE: u64 = 0b010;
+/// The journal deleted a single database object.
+pub const JOURNAL_DELETED_SINGLE: u64 = 0b010;
 
 /// The journal deleted a range of database objects.
 pub const JOURNAL_DELETED_RANGE: u64 = 0b011;
@@ -161,11 +161,15 @@ impl<S: Sequencer> LogRecord<S> {
                 let journal_id = journal_id_with_opcode & (!OPCODE_MASK);
                 let opcode = journal_id_with_opcode & OPCODE_MASK;
                 match opcode {
-                    JOURNAL_CREATED_ONE => {
+                    JOURNAL_CREATED_SINGLE => {
                         // Created.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::JournalCreatedOneObject(transaction_id, journal_id, object_id),
+                            LogRecord::JournalCreatedObjectSingle(
+                                transaction_id,
+                                journal_id,
+                                object_id,
+                            ),
                             value,
                         ))
                     }
@@ -183,11 +187,15 @@ impl<S: Sequencer> LogRecord<S> {
                             value,
                         ))
                     }
-                    JOURNAL_DELETED_ONE => {
+                    JOURNAL_DELETED_SINGLE => {
                         // Deleted.
                         let (object_id, value) = read_part::<u64>(value)?;
                         Some((
-                            LogRecord::JournalDeletedOneObject(transaction_id, journal_id, object_id),
+                            LogRecord::JournalDeletedObjectSingle(
+                                transaction_id,
+                                journal_id,
+                                object_id,
+                            ),
                             value,
                         ))
                     }
@@ -262,12 +270,12 @@ impl<S: Sequencer> LogRecord<S> {
                 write_part::<u64>(transaction_instant_with_extended_opcode, buffer)?
             }
             LogRecord::BufferDiscarded => write_part::<u64>(BUFFER_ROLLED_BACK, buffer)?,
-            LogRecord::JournalCreatedOneObject(transaction_id, journal_id, object_id) => {
+            LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let journal_id_with_opcode = journal_id | JOURNAL_CREATED_ONE;
+                let journal_id_with_opcode = journal_id | JOURNAL_CREATED_SINGLE;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
@@ -286,12 +294,12 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<u64>(*object_id_1, buffer)?;
                 write_part::<u64>(*object_id_2, buffer)?
             }
-            LogRecord::JournalDeletedOneObject(transaction_id, journal_id, object_id) => {
+            LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
                 let transaction_id_with_mark = transaction_id | TRANSACTION_UPDATED;
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
-                let journal_id_with_opcode = journal_id | JOURNAL_DELETED_ONE;
+                let journal_id_with_opcode = journal_id | JOURNAL_DELETED_SINGLE;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
                 write_part::<u64>(*object_id, buffer)?
             }
@@ -358,10 +366,14 @@ impl<S: Sequencer> PartialEq for LogRecord<S> {
                 true
             }
             (Self::BufferSubmitted(l0), Self::BufferSubmitted(r0)) => l0 == r0,
-            (Self::JournalCreatedOneObject(l0, l1, l2), Self::JournalCreatedOneObject(r0, r1, r2))
-            | (Self::JournalDeletedOneObject(l0, l1, l2), Self::JournalDeletedOneObject(r0, r1, r2)) => {
-                l0 == r0 && l1 == r1 && l2 == r2
-            }
+            (
+                Self::JournalCreatedObjectSingle(l0, l1, l2),
+                Self::JournalCreatedObjectSingle(r0, r1, r2),
+            )
+            | (
+                Self::JournalDeletedObjectSingle(l0, l1, l2),
+                Self::JournalDeletedObjectSingle(r0, r1, r2),
+            ) => l0 == r0 && l1 == r1 && l2 == r2,
             (
                 Self::JournalCreatedObjectRange(l0, l1, l2, l3),
                 Self::JournalCreatedObjectRange(r0, r1, r2, r3),
@@ -499,8 +511,8 @@ mod tests {
                     let journal_id = hash & (!OPCODE_MASK);
                     let opcode = hash & OPCODE_MASK;
                     match opcode {
-                        JOURNAL_CREATED_ONE => {
-                            let created = LogRecord::<MonotonicU64>::JournalCreatedOneObject(transaction_id, journal_id, hash);
+                        JOURNAL_CREATED_SINGLE => {
+                            let created = LogRecord::<MonotonicU64>::JournalCreatedObjectSingle(transaction_id, journal_id, hash);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
@@ -521,8 +533,8 @@ mod tests {
                                 unreachable!();
                             }
                         }
-                        JOURNAL_DELETED_ONE => {
-                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedOneObject(transaction_id, journal_id, hash);
+                        JOURNAL_DELETED_SINGLE => {
+                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedObjectSingle(transaction_id, journal_id, hash);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());

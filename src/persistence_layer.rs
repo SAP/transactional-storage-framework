@@ -76,7 +76,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// The transaction is participating in a distributed transaction.
     fn participate(
         &self,
-        id: TransactionID,
+        transaction_id: TransactionID,
         xid: &[u8],
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
@@ -92,7 +92,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn create(
         &self,
         log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
     ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
@@ -108,7 +108,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn delete(
         &self,
         log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
     ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
@@ -121,7 +121,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn submit(
         &self,
         log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
@@ -134,7 +134,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn discard(
         &self,
         log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         journal_id: JournalID,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
@@ -146,7 +146,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// back, and the corresponding unreachable database objects are cleaned up in the background.
     fn rewind(
         &self,
-        id: TransactionID,
+        transaction_id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
@@ -158,7 +158,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Returns an [`Error`] if the content of the log record could not be passed to the device.
     fn prepare(
         &self,
-        id: TransactionID,
+        transaction_id: TransactionID,
         prepare_instant: S::Instant,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
@@ -171,7 +171,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn commit(
         &self,
         log_buffer: Box<Self::LogBuffer>,
-        id: TransactionID,
+        transaction_id: TransactionID,
         commit_instant: S::Instant,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
