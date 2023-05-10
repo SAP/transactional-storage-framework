@@ -26,8 +26,8 @@ use std::io;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering::{AcqRel, Acquire};
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
@@ -84,6 +84,9 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// The database to recover.
     recovery_data: Mutex<Option<Box<RecoveryData<S>>>>,
 
+    /// Recovery cancelled.
+    recovery_cancelled: AtomicBool,
+
     /// The first log file.
     log0: RandomAccessFile,
 
@@ -132,6 +135,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
+            recovery_cancelled: AtomicBool::new(false),
             log0,
             log1,
             db,
@@ -562,6 +566,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
 
     #[inline]
     fn cancel_recovery(&self) {
+        self.file_io_data.recovery_cancelled.store(true, Release);
         if let Ok(mut guard) = self.file_io_data.recovery_data.try_lock() {
             guard.as_mut().unwrap().cancel();
         }

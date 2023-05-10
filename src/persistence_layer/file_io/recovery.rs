@@ -7,7 +7,7 @@ use super::FileIOData;
 use crate::transaction::Playback;
 use crate::{Database, Error, FileIO, Sequencer, TransactionID};
 use std::num::NonZeroU32;
-use std::sync::atomic::Ordering::Acquire;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::task::Waker;
 
 /// Collection of data for database recovery.
@@ -59,10 +59,6 @@ impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
 
 pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileIOData<S>) {
     let mut guard = file_io_data.recovery_data.lock().unwrap();
-    if guard.as_ref().unwrap().result.is_some() {
-        // Canceled.
-        return;
-    }
     let database = guard.as_mut().unwrap().database.take().unwrap();
     let playback_container: scc::HashMap<TransactionID, Playback<S, FileIO<S>>> =
         scc::HashMap::default();
@@ -72,12 +68,10 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
-        let guard = file_io_data.recovery_data.lock().unwrap();
-        if guard.as_ref().unwrap().result.is_some() {
+        if file_io_data.recovery_cancelled.load(Relaxed) {
             // Canceled.
             return;
         }
-        drop(guard);
         if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
             read_offset += bytes_read;
         } else {
@@ -90,12 +84,10 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
         #[allow(clippy::cast_possible_truncation)]
         let buffer_piece = &mut buffer[0..(file_len - read_offset) as usize];
         if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
-            let guard = file_io_data.recovery_data.lock().unwrap();
-            if guard.as_ref().unwrap().result.is_some() {
+            if file_io_data.recovery_cancelled.load(Relaxed) {
                 // Canceled.
                 return;
             }
-            drop(guard);
             if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
                 read_offset += bytes_read;
             } else {
