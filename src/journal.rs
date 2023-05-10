@@ -461,7 +461,7 @@ impl<S: Sequencer> Anchor<S> {
     }
 
     /// Creates a new [`Anchor`].
-    fn new(
+    pub(super) fn new(
         transaction_anchor: ebr::Arc<TransactionAnchor<S>>,
         creation_instant: Option<NonZeroU32>,
     ) -> Anchor<S> {

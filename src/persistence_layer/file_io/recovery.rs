@@ -2,16 +2,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{log_record::LogRecord, FileIOData};
-use crate::{Database, Error, FileIO, Sequencer};
-use std::sync::atomic::Ordering::{Acquire, Release};
+use super::log_record::LogRecord;
+use super::FileIOData;
+use crate::transaction::Playback;
+use crate::{Database, Error, FileIO, Sequencer, TransactionID};
+use std::num::NonZeroU32;
+use std::sync::atomic::Ordering::Acquire;
 use std::task::Waker;
 
 /// Collection of data for database recovery.
 #[derive(Debug)]
 pub(super) struct RecoveryData<S: Sequencer<Instant = u64>> {
     /// Database to recover.
-    database: Database<S, FileIO<S>>,
+    database: Option<Database<S, FileIO<S>>>,
 
     /// Recover until the logical time point.
     #[allow(dead_code)]
@@ -20,8 +23,8 @@ pub(super) struct RecoveryData<S: Sequencer<Instant = u64>> {
     /// [`Waker`] associated with the database owner.
     waker: Option<Waker>,
 
-    /// Completion flag.
-    result: Option<Result<(), Error>>,
+    /// Fully recovered database is sent through `result`.
+    result: Option<Result<Database<S, FileIO<S>>, Error>>,
 }
 
 // No log entries are wider than 32 bytes.
@@ -31,7 +34,7 @@ impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
     /// Creates a new [`RecoveryData`].
     pub(super) fn new(database: Database<S, FileIO<S>>, until: Option<u64>) -> Self {
         Self {
-            database,
+            database: Some(database),
             until,
             waker: None,
             result: None,
@@ -39,7 +42,7 @@ impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
     }
 
     /// Returns the result of recovery.
-    pub(super) fn get_result(&mut self) -> Option<Result<(), Error>> {
+    pub(super) fn get_result(&mut self) -> Option<Result<Database<S, FileIO<S>>, Error>> {
         self.result.take()
     }
 
@@ -52,25 +55,30 @@ impl<S: Sequencer<Instant = u64>> RecoveryData<S> {
     pub(super) fn cancel(&mut self) {
         self.result.replace(Err(Error::Timeout));
     }
-
-    /// Takes [`Database`] by consuming `self`.
-    pub(super) fn take(self) -> Database<S, FileIO<S>> {
-        self.database
-    }
 }
 
 pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileIOData<S>) {
+    let mut guard = file_io_data.recovery_data.lock().unwrap();
+    if guard.as_ref().unwrap().result.is_some() {
+        // Canceled.
+        return;
+    }
+    let database = guard.as_mut().unwrap().database.take().unwrap();
+    let playback_container: scc::HashMap<TransactionID, Playback<S, FileIO<S>>> =
+        scc::HashMap::default();
+    drop(guard);
+
     let file_len = file_io_data.log0.len(Acquire);
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
-        let mut guard = file_io_data.recovery_data.lock().unwrap();
+        let guard = file_io_data.recovery_data.lock().unwrap();
         if guard.as_ref().unwrap().result.is_some() {
             // Canceled.
             return;
         }
-        let database = &guard.as_mut().unwrap().database;
-        if let Some(bytes_read) = apply_to_database(&buffer, database) {
+        drop(guard);
+        if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
             read_offset += bytes_read;
         } else {
             read_offset = file_len;
@@ -82,19 +90,25 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
         #[allow(clippy::cast_possible_truncation)]
         let buffer_piece = &mut buffer[0..(file_len - read_offset) as usize];
         if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
-            let mut guard = file_io_data.recovery_data.lock().unwrap();
+            let guard = file_io_data.recovery_data.lock().unwrap();
             if guard.as_ref().unwrap().result.is_some() {
                 // Canceled.
                 return;
             }
-            let database = &guard.as_mut().unwrap().database;
-            if let Some(bytes_read) = apply_to_database(&buffer, database) {
+            drop(guard);
+            if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
                 read_offset += bytes_read;
             } else {
                 read_offset = file_len;
             }
         }
     }
+
+    if !playback_container.is_empty() {
+        // TODO: cleanup open transactions.
+        playback_container.clear();
+    }
+    drop(playback_container);
 
     let mut guard = file_io_data.recovery_data.lock().unwrap();
     if guard.as_ref().unwrap().result.is_some() {
@@ -103,7 +117,7 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
     }
     let recovery_data = guard.as_mut().unwrap();
     if read_offset == file_len {
-        recovery_data.result.replace(Ok(()));
+        recovery_data.result.replace(Ok(database));
     } else {
         recovery_data
             .result
@@ -117,10 +131,12 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
 /// Applies log records in the buffer to the database.
 ///
 /// Returns `None` if it read the end of the log file.
-fn apply_to_database<S: Sequencer<Instant = u64>>(
+fn apply_to_database<'d, S: Sequencer<Instant = u64>>(
     mut buffer: &[u8],
-    database: &Database<S, FileIO<S>>,
+    database: &'d Database<S, FileIO<S>>,
+    playback_container: &scc::HashMap<TransactionID, Playback<'d, S, FileIO<S>>>,
 ) -> Option<u64> {
+    // TODO: parallelize.
     let buffer_len = buffer.len();
     while !buffer.is_empty() {
         if let Some((log_record, remaining)) = LogRecord::<S>::from_raw_data(buffer) {
@@ -137,12 +153,24 @@ fn apply_to_database<S: Sequencer<Instant = u64>>(
                 LogRecord::JournalDeletedObjectRange(_, _, _, _) => todo!(),
                 LogRecord::JournalSubmitted(_, _, _) => todo!(),
                 LogRecord::JournalDiscarded(_, _) => todo!(),
-                LogRecord::TransactionPrepared(_, instant)
-                | LogRecord::TransactionCommitted(_, instant) => {
-                    // TODO: instantiate recovery transactions.
-                    let _: Result<u64, u64> = database.sequencer().update(instant, Release);
+                LogRecord::TransactionPrepared(_, _) => todo!(),
+                LogRecord::TransactionCommitted(transaction_id, commit_instant) => {
+                    let playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    playback_entry.remove().commit(commit_instant);
                 }
-                LogRecord::TransactionRolledBack(_, _rollback_to) => todo!(),
+                LogRecord::TransactionRolledBack(transaction_id, rollback_to) => {
+                    if let Some(mut playback_entry) = playback_container.get(&transaction_id) {
+                        if rollback_to == 0 {
+                            playback_entry.remove().rollback();
+                        } else {
+                            playback_entry
+                                .get_mut()
+                                .rewind(NonZeroU32::new(rollback_to));
+                        }
+                    }
+                }
             }
         } else {
             // The length of the buffer piece was insufficient.
