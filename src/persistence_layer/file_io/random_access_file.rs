@@ -79,8 +79,7 @@ pub use unix::RandomAccessFile;
 #[cfg(windows)]
 mod windows {
     use std::fs::{File, Metadata};
-    use std::io::Result;
-    use std::io::{Error, ErrorKind};
+    use std::io::{Error, ErrorKind, Result};
     use std::os::windows::fs::FileExt;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::{self, Relaxed, Release};
