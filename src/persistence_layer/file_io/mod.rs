@@ -545,10 +545,10 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn check_recovery(&self, waker: &Waker) -> Result<RecoveryResult<S, Self>, Error> {
         if let Ok(mut guard) = self.file_io_data.recovery_data.try_lock() {
             if let Some(mut recovery_data) = guard.take() {
-                if let Some(result) = recovery_data.get_result() {
+                if let Some(database) = recovery_data.get_result() {
+                    let database = database?;
                     // Recovery completed.
-                    result?;
-                    return Ok(RecoveryResult::Recovered(recovery_data.take()));
+                    return Ok(RecoveryResult::Recovered(database));
                 }
                 recovery_data.set_waker(waker.clone());
                 guard.replace(recovery_data);

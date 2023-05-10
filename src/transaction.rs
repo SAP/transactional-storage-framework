@@ -49,32 +49,6 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     anchor: ebr::Arc<Anchor<S>>,
 }
 
-/// [`Playback`] is a type of transaction during [`Database`] recovery.
-///
-/// [`Playback`] is almost the same with [`Transaction`] except that it never generates log
-/// records, and the sole purpose of the type is to apply the database change history stored in the
-/// log file to the [`Database`].
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Playback<'d, S: Sequencer, P: PersistenceLayer<S>> {
-    /// The transaction refers to the corresponding [`Database`] to persist pending changes at
-    /// commit.
-    database: &'d Database<S, P>,
-
-    /// The changes made by the transaction to play back.
-    journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
-
-    /// The identifier of the [`Transaction`] as part of a distributed transaction.
-    ///
-    /// It is `None` if the transaction is not part of a distributed transaction.
-    xid: Option<Box<[u8]>>,
-
-    /// A piece of data that is shared between [`Journal`] and [`Transaction`].
-    ///
-    /// It outlives the [`Transaction`], and it is dropped when no database objects refer to it.
-    anchor: ebr::Arc<Anchor<S>>,
-}
-
 /// The type of transaction identifiers.
 ///
 /// The identifier of a transaction is only valid during the lifetime of the transaction. The same
@@ -122,6 +96,32 @@ pub struct Committable<'d, S: Sequencer, P: PersistenceLayer<S>> {
 /// transaction.
 #[allow(clippy::undocumented_unsafe_blocks)]
 pub const MAX_TRANSACTION_INSTANT: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX - 1) };
+
+/// [`Playback`] is a type of transaction during [`Database`] recovery.
+///
+/// [`Playback`] is almost the same with [`Transaction`] except that it never generates log
+/// records, and the sole purpose of the type is to apply the database change history stored in the
+/// log file to the [`Database`].
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Playback<'d, S: Sequencer, P: PersistenceLayer<S>> {
+    /// The transaction refers to the corresponding [`Database`] to persist pending changes at
+    /// commit.
+    database: &'d Database<S, P>,
+
+    /// The changes made by the transaction to play back.
+    journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
+
+    /// The identifier of the [`Transaction`] as part of a distributed transaction.
+    ///
+    /// It is `None` if the transaction is not part of a distributed transaction.
+    xid: Option<Box<[u8]>>,
+
+    /// A piece of data that is shared between [`Journal`] and [`Transaction`].
+    ///
+    /// It outlives the [`Transaction`], and it is dropped when no database objects refer to it.
+    anchor: ebr::Arc<Anchor<S>>,
+}
 
 /// [Anchor] contains data that is required to outlive the [Transaction] instance.
 #[derive(Debug)]
@@ -455,7 +455,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.database
     }
 
-    /// Takes [`Anchor`].
+    /// Takes a [`JournalAnchor`].
     pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> NonZeroU32 {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
@@ -508,7 +508,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
-        debug_assert_eq!(self.anchor.state.load(Relaxed), 2);
 
         let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
         while let Some(record) = current {
@@ -597,6 +596,128 @@ impl From<State> for usize {
             State::RollingBack => 3,
             State::RolledBack => 4,
         }
+    }
+}
+
+impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
+    /// Creates a new [`Playback`].
+    pub(crate) fn new(database: &'d Database<S, P>) -> Playback<'d, S, P> {
+        Self {
+            database,
+            journal_strand: ebr::AtomicArc::null(),
+            xid: None,
+            anchor: ebr::Arc::new(Anchor::new()),
+        }
+    }
+
+    /// Creates a new [`JournalAnchor`].
+    #[allow(dead_code)]
+    pub(crate) fn journal_anchor(&self) -> ebr::Arc<JournalAnchor<S>> {
+        let now = self
+            .journal_strand
+            .load(Acquire, &ebr::Barrier::new())
+            .as_ref()
+            .and_then(|j| j.submit_instant().map(|i| i.min(MAX_TRANSACTION_INSTANT)));
+        ebr::Arc::new(JournalAnchor::new(self.anchor.clone(), now))
+    }
+
+    /// Participates in a distributed transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the transaction is currently participating in a distributed
+    /// transaction, or persisting the supplied identifier failed.
+    #[allow(dead_code)]
+    pub(crate) fn participate(&mut self, xid: &[u8]) {
+        debug_assert!(self.xid.is_none());
+        self.xid.replace(xid.into());
+    }
+
+    /// Takes a [`JournalAnchor`].
+    #[allow(dead_code)]
+    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) {
+        let barrier = ebr::Barrier::new();
+        let mut current = self.journal_strand.load(Relaxed, &barrier);
+        while let Err((_, actual)) = self.journal_strand.compare_exchange(
+            current,
+            (Some(record.clone()), ebr::Tag::None),
+            Release,
+            Relaxed,
+            &barrier,
+        ) {
+            current = actual;
+        }
+    }
+
+    /// Rewinds the [`Playback`] to the given point of time.
+    #[allow(dead_code)]
+    pub(crate) fn rewind(&mut self, instant: Option<NonZeroU32>) {
+        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
+        while let Some(record) = current {
+            if record.submit_instant() <= instant {
+                current = Some(record);
+                break;
+            }
+            record.rollback(self.database.task_processor());
+            current = record.set_next(None, Relaxed).0;
+        }
+        self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
+    }
+
+    /// Prepares the [`Playback`] for commit.
+    #[allow(dead_code)]
+    pub(crate) fn prepare(&mut self, prepare_instant: S::Instant) {
+        debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
+
+        let _: Result<S::Instant, S::Instant> =
+            self.database.sequencer().update(prepare_instant, Release);
+
+        // Safety: it is the sole writer of its own `anchor`.
+        unsafe {
+            let anchor_mut_ref = &mut *(addr_of!(*self.anchor) as *mut Anchor<S>);
+            anchor_mut_ref.prepare_instant = prepare_instant;
+            anchor_mut_ref
+                .state
+                .store(State::Committing.into(), Release);
+        }
+    }
+
+    /// Commits the [`Playback`].
+    pub(crate) fn commit(self, commit_instant: S::Instant) {
+        debug_assert_ne!(commit_instant, S::Instant::default());
+        debug_assert!(
+            self.anchor.state.load(Relaxed) == State::Active.into()
+                || self.anchor.state.load(Relaxed) == State::Committing.into()
+        );
+
+        let _: Result<S::Instant, S::Instant> =
+            self.database.sequencer().update(commit_instant, Release);
+
+        // Safety: it is the sole writer of its own `anchor`.
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
+        anchor_mut_ref.commit_instant = commit_instant;
+        anchor_mut_ref.state.store(State::Committed.into(), Release);
+        self.anchor.wake_up();
+
+        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
+        while let Some(record) = current {
+            record.commit(self.database.task_processor());
+            current = record.set_next(None, Relaxed).0;
+        }
+    }
+
+    /// Rolls back the changes made by the [`Playback`].
+    pub(crate) fn rollback(mut self) {
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::Committed.into());
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::RollingBack.into());
+        debug_assert_ne!(self.anchor.state.load(Relaxed), State::RolledBack.into());
+
+        self.anchor.state.store(State::RollingBack.into(), Release);
+        self.anchor.wake_up();
+
+        self.rewind(None);
+
+        self.anchor.state.store(State::RolledBack.into(), Release);
     }
 }
 
