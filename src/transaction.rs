@@ -7,6 +7,8 @@ use super::snapshot::TransactionSnapshot;
 use super::{AwaitIO, Database, Error, Journal, PersistenceLayer, Sequencer, Snapshot};
 use scc::ebr;
 use scc::Bag;
+use std::collections::hash_map;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -109,8 +111,14 @@ pub struct Playback<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// commit.
     database: &'d Database<S, P>,
 
+    /// Journal anchor map.
+    journal_anchor_map: HashMap<u64, ebr::Arc<JournalAnchor<S>>>,
+
     /// The changes made by the transaction to play back.
-    journal_strand: ebr::AtomicArc<JournalAnchor<S>>,
+    submitted_journal_anchors: BTreeMap<u32, ebr::Arc<JournalAnchor<S>>>,
+
+    /// Journal anchors beyond `u32::MAX`.
+    submitted_unbounded_journal_anchors: Vec<ebr::Arc<JournalAnchor<S>>>,
 
     /// The identifier of the [`Transaction`] as part of a distributed transaction.
     ///
@@ -604,69 +612,101 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     pub(crate) fn new(database: &'d Database<S, P>) -> Playback<'d, S, P> {
         Self {
             database,
-            journal_strand: ebr::AtomicArc::null(),
+            journal_anchor_map: HashMap::default(),
+            submitted_journal_anchors: BTreeMap::default(),
+            submitted_unbounded_journal_anchors: Vec::default(),
             xid: None,
             anchor: ebr::Arc::new(Anchor::new()),
         }
     }
 
-    /// Creates a new [`JournalAnchor`].
+    /// Gets or create a [`JournalAnchor`] associated with the specified identifier.
     #[allow(dead_code)]
-    pub(crate) fn journal_anchor(&self) -> ebr::Arc<JournalAnchor<S>> {
-        let now = self
-            .journal_strand
-            .load(Acquire, &ebr::Barrier::new())
-            .as_ref()
-            .and_then(|j| j.submit_instant().map(|i| i.min(MAX_TRANSACTION_INSTANT)));
-        ebr::Arc::new(JournalAnchor::new(self.anchor.clone(), now))
+    pub(crate) fn get_or_create_journal_anchor(&mut self, id: u64) -> ebr::Arc<JournalAnchor<S>> {
+        match self.journal_anchor_map.entry(id) {
+            hash_map::Entry::Occupied(o) => o.get().clone(),
+            hash_map::Entry::Vacant(v) => {
+                let now = if self.submitted_unbounded_journal_anchors.is_empty() {
+                    self.submitted_journal_anchors
+                        .len()
+                        .try_into()
+                        .ok()
+                        .and_then(NonZeroU32::new)
+                        .map(|i| i.min(MAX_TRANSACTION_INSTANT))
+                } else {
+                    Some(MAX_TRANSACTION_INSTANT)
+                };
+                v.insert(ebr::Arc::new(JournalAnchor::new(self.anchor.clone(), now)))
+                    .clone()
+            }
+        }
     }
 
     /// Participates in a distributed transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the transaction is currently participating in a distributed
-    /// transaction, or persisting the supplied identifier failed.
     #[allow(dead_code)]
     pub(crate) fn participate(&mut self, xid: &[u8]) {
         debug_assert!(self.xid.is_none());
         self.xid.replace(xid.into());
     }
 
-    /// Takes a [`JournalAnchor`].
+    /// Submits a [`JournalAnchor`].
     #[allow(dead_code)]
-    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) {
-        let barrier = ebr::Barrier::new();
-        let mut current = self.journal_strand.load(Relaxed, &barrier);
-        while let Err((_, actual)) = self.journal_strand.compare_exchange(
-            current,
-            (Some(record.clone()), ebr::Tag::None),
-            Release,
-            Relaxed,
-            &barrier,
-        ) {
-            current = actual;
-        }
+    pub(super) fn submit_journal_anchor(&mut self, id: u64, transaction_instant: u32) {
+        debug_assert_ne!(transaction_instant, 0);
+        match self.journal_anchor_map.entry(id) {
+            hash_map::Entry::Occupied(o) => {
+                let journal_anchor = o.remove();
+                journal_anchor.set_submit_instant(transaction_instant);
+                if transaction_instant == u32::MAX {
+                    self.submitted_unbounded_journal_anchors
+                        .push(journal_anchor);
+                } else {
+                    let result = self
+                        .submitted_journal_anchors
+                        .insert(transaction_instant, journal_anchor);
+                    debug_assert!(result.is_none());
+                }
+            }
+            hash_map::Entry::Vacant(_) => return,
+        };
+    }
+
+    /// Discards a [`JournalAnchor`].
+    #[allow(dead_code)]
+    pub(super) fn discard_journal_anchor(&mut self, id: u64) {
+        let result = self.journal_anchor_map.remove(&id);
+        debug_assert!(result.is_some());
     }
 
     /// Rewinds the [`Playback`] to the given point of time.
     #[allow(dead_code)]
     pub(crate) fn rewind(&mut self, instant: Option<NonZeroU32>) {
-        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
-        while let Some(record) = current {
-            if record.submit_instant() <= instant {
-                current = Some(record);
+        debug_assert!(self.journal_anchor_map.is_empty());
+
+        let rewind_to = instant.map_or(0, |i| i.get());
+        if rewind_to == u32::MAX {
+            return;
+        }
+
+        // Roll back all the unbounded journals.
+        self.submitted_unbounded_journal_anchors
+            .drain(..)
+            .rev()
+            .for_each(|j| j.rollback(self.database.task_processor()));
+
+        // Roll back all the affected journals.
+        while let Some(o) = self.submitted_journal_anchors.last_entry() {
+            if o.get().submit_instant().map_or(0, |i| i.get()) <= rewind_to {
                 break;
             }
-            record.rollback(self.database.task_processor());
-            current = record.set_next(None, Relaxed).0;
+            o.remove().rollback(self.database.task_processor());
         }
-        self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
     }
 
     /// Prepares the [`Playback`] for commit.
     #[allow(dead_code)]
     pub(crate) fn prepare(&mut self, prepare_instant: S::Instant) {
+        debug_assert!(self.journal_anchor_map.is_empty());
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
 
         let _: Result<S::Instant, S::Instant> =
@@ -684,6 +724,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
 
     /// Commits the [`Playback`].
     pub(crate) fn commit(self, commit_instant: S::Instant) {
+        debug_assert!(self.journal_anchor_map.is_empty());
         debug_assert_ne!(commit_instant, S::Instant::default());
         debug_assert!(
             self.anchor.state.load(Relaxed) == State::Active.into()
@@ -699,15 +740,18 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
 
-        let mut current = self.journal_strand.swap((None, ebr::Tag::None), Acquire).0;
-        while let Some(record) = current {
-            record.commit(self.database.task_processor());
-            current = record.set_next(None, Relaxed).0;
-        }
+        // Commit journals.
+        self.submitted_journal_anchors
+            .into_iter()
+            .for_each(|(_, j)| j.commit(self.database.task_processor()));
+        self.submitted_unbounded_journal_anchors
+            .into_iter()
+            .for_each(|j| j.commit(self.database.task_processor()));
     }
 
     /// Rolls back the changes made by the [`Playback`].
     pub(crate) fn rollback(mut self) {
+        debug_assert!(self.journal_anchor_map.is_empty());
         debug_assert_ne!(self.anchor.state.load(Relaxed), State::Committed.into());
         debug_assert_ne!(self.anchor.state.load(Relaxed), State::RollingBack.into());
         debug_assert_ne!(self.anchor.state.load(Relaxed), State::RolledBack.into());
