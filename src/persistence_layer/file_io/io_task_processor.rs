@@ -5,7 +5,6 @@
 //! IO task processor.
 
 use super::recovery::recover_database;
-use super::LogRecord;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -87,26 +86,16 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 debug_assert_eq!(log0_offset, log_buffer.offset);
                 log0_offset += log_buffer.pos() as u64;
 
-                loop {
-                    let len = if let Some(submitted) = log_buffer.submit_instant.as_ref() {
-                        let submitted = LogRecord::<S>::BufferSubmitted(submitted.get());
-                        submitted.write(&mut log_buffer.buffer).unwrap()
-                    } else if log_buffer.discarded {
-                        let discarded = LogRecord::<S>::BufferDiscarded;
-                        discarded.write(&mut log_buffer.buffer).unwrap()
-                    } else {
-                        break;
-                    };
-                    if file_io_data
+                if log_buffer.eoj_buffer_used {
+                    while file_io_data
                         .log0
-                        .write(&log_buffer.buffer[0..len], log0_offset)
-                        .is_ok()
+                        .write(&log_buffer.eoj_buffer, log0_offset)
+                        .is_err()
                     {
-                        log0_offset += len as u64;
-                        break;
+                        // Retry after yielding.
+                        yield_now();
                     }
-                    // Retry after yielding.
-                    yield_now();
+                    log0_offset += log_buffer.eoj_buffer.len() as u64;
                 }
 
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
