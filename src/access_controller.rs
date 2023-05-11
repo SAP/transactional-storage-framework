@@ -762,6 +762,50 @@ impl<S: Sequencer> AccessController<S> {
         Err(Error::SerializationFailure)
     }
 
+    /// Creates a new database object during database recovery.
+    ///
+    /// It is an infallible method.
+    pub(crate) fn playback_create_sync(
+        &self,
+        object_id: u64,
+        journal_anchor: &ebr::Arc<JournalAnchor<S>>,
+    ) {
+        match self.table.entry(object_id) {
+            MapEntry::Occupied(mut o) => {
+                *o.get_mut() = ObjectState::Owned(Ownership::Created(Owner {
+                    anchor: journal_anchor.clone(),
+                }));
+            }
+            MapEntry::Vacant(v) => {
+                v.insert_entry(ObjectState::Owned(Ownership::Created(Owner {
+                    anchor: journal_anchor.clone(),
+                })));
+            }
+        };
+    }
+
+    /// Deletes a database object during database recovery.
+    ///
+    /// It is an infallible method.
+    pub(crate) fn playback_delete_sync(
+        &self,
+        object_id: u64,
+        journal_anchor: &ebr::Arc<JournalAnchor<S>>,
+    ) {
+        match self.table.entry(object_id) {
+            MapEntry::Occupied(mut o) => {
+                *o.get_mut() = ObjectState::Owned(Ownership::Deleted(Owner {
+                    anchor: journal_anchor.clone(),
+                }));
+            }
+            MapEntry::Vacant(v) => {
+                v.insert_entry(ObjectState::Owned(Ownership::Deleted(Owner {
+                    anchor: journal_anchor.clone(),
+                })));
+            }
+        };
+    }
+
     /// Transfers ownership to all the eligible waiting transactions.
     ///
     /// If the database object still need to be monitored, it returns `true`. It is a blocking and
