@@ -305,39 +305,37 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             let new_log = if let Some(log) = current_log.take() {
                 let new_log = match log {
                     LogRecord::JournalCreatedObjectSingle(_, _, prev_id) => {
-                        if *id == prev_id.wrapping_add(1) {
-                            Some(LogRecord::JournalCreatedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                prev_id,
-                                *id,
-                            ))
-                        } else if id.wrapping_add(1) == prev_id {
-                            Some(LogRecord::JournalCreatedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                *id,
-                                prev_id,
-                            ))
+                        if let Some(interval) = id.checked_sub(prev_id) {
+                            if let Ok(interval) = u32::try_from(interval) {
+                                Some(LogRecord::JournalCreatedObjectRange(
+                                    transaction_id,
+                                    journal_id,
+                                    prev_id,
+                                    interval,
+                                    2,
+                                ))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
                     }
-                    LogRecord::JournalCreatedObjectRange(_, _, start_id, end_id) => {
-                        if *id == end_id.wrapping_add(1) {
-                            Some(LogRecord::JournalCreatedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                start_id,
-                                *id,
-                            ))
-                        } else if id.wrapping_add(1) == *id {
-                            Some(LogRecord::JournalCreatedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                *id,
-                                end_id,
-                            ))
+                    LogRecord::JournalCreatedObjectRange(_, _, start_id, interval, num_objects) => {
+                        if let Some(diff) = id.checked_sub(start_id) {
+                            if num_objects != u32::MAX
+                                && diff == u64::from(interval) * u64::from(num_objects + 1)
+                            {
+                                Some(LogRecord::JournalCreatedObjectRange(
+                                    transaction_id,
+                                    journal_id,
+                                    start_id,
+                                    interval,
+                                    num_objects + 1,
+                                ))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -382,39 +380,37 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             let new_log = if let Some(log) = current_log.take() {
                 let new_log = match log {
                     LogRecord::JournalDeletedObjectSingle(_, _, prev_id) => {
-                        if *id == prev_id.wrapping_add(1) {
-                            Some(LogRecord::JournalDeletedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                prev_id,
-                                *id,
-                            ))
-                        } else if id.wrapping_add(1) == prev_id {
-                            Some(LogRecord::JournalDeletedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                *id,
-                                prev_id,
-                            ))
+                        if let Some(interval) = id.checked_sub(prev_id) {
+                            if let Ok(interval) = u32::try_from(interval) {
+                                Some(LogRecord::JournalDeletedObjectRange(
+                                    transaction_id,
+                                    journal_id,
+                                    prev_id,
+                                    interval,
+                                    2,
+                                ))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
                     }
-                    LogRecord::JournalDeletedObjectRange(_, _, start_id, end_id) => {
-                        if *id == end_id.wrapping_add(1) {
-                            Some(LogRecord::JournalDeletedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                start_id,
-                                *id,
-                            ))
-                        } else if id.wrapping_add(1) == *id {
-                            Some(LogRecord::JournalDeletedObjectRange(
-                                transaction_id,
-                                journal_id,
-                                *id,
-                                end_id,
-                            ))
+                    LogRecord::JournalDeletedObjectRange(_, _, start_id, interval, num_objects) => {
+                        if let Some(diff) = id.checked_sub(start_id) {
+                            if num_objects != u32::MAX
+                                && diff == u64::from(interval) * u64::from(num_objects + 1)
+                            {
+                                Some(LogRecord::JournalDeletedObjectRange(
+                                    transaction_id,
+                                    journal_id,
+                                    start_id,
+                                    interval,
+                                    num_objects + 1,
+                                ))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
