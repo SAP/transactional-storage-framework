@@ -92,11 +92,11 @@ pub const OPCODE_MASK: u64 = 0b111;
 /// Extended opcode bit mask.
 pub const EXTENDED_OPCODE_MASK: u64 = 0b1111_1000;
 
-/// The log buffer was committed.
-pub const BUFFER_COMMITTED: u64 = 0b0000_1000;
+/// The log buffer was submitted.
+pub const BUFFER_SUBITTED: u64 = 0b0000_1000;
 
-/// The log buffer was rolled back.
-pub const BUFFER_ROLLED_BACK: u64 = 0b0001_0000;
+/// The log buffer was discarded.
+pub const BUFFER_DISCARDED: u64 = 0b0001_0000;
 
 /// The journal created a single database object.
 pub const JOURNAL_CREATED_SINGLE: u64 = 0b000;
@@ -142,14 +142,14 @@ impl<S: Sequencer> LogRecord<S> {
         if transaction_opcode == 0 {
             let extended_opcode = transaction_id_with_opcode & EXTENDED_OPCODE_MASK;
             match extended_opcode {
-                BUFFER_COMMITTED => {
+                BUFFER_SUBITTED => {
                     let transaction_instant: u32 = (transaction_id_with_opcode >> 32)
                         .try_into()
                         .ok()
                         .map_or(0, |v| v);
                     return Some((LogRecord::BufferSubmitted(transaction_instant), value));
                 }
-                BUFFER_ROLLED_BACK => {
+                BUFFER_DISCARDED => {
                     return Some((LogRecord::BufferDiscarded, value));
                 }
                 _ => unimplemented!(),
@@ -272,10 +272,10 @@ impl<S: Sequencer> LogRecord<S> {
             LogRecord::EndOfLog => write_part::<u64>(0, buffer)?,
             LogRecord::BufferSubmitted(transaction_instant) => {
                 let transaction_instant_with_extended_opcode =
-                    (u64::from(*transaction_instant) << 32) | BUFFER_COMMITTED;
+                    (u64::from(*transaction_instant) << 32) | BUFFER_SUBITTED;
                 write_part::<u64>(transaction_instant_with_extended_opcode, buffer)?
             }
-            LogRecord::BufferDiscarded => write_part::<u64>(BUFFER_ROLLED_BACK, buffer)?,
+            LogRecord::BufferDiscarded => write_part::<u64>(BUFFER_DISCARDED, buffer)?,
             LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
@@ -479,7 +479,7 @@ mod tests {
                                 unreachable!();
                             }
                         }
-                        BUFFER_COMMITTED => {
+                        BUFFER_SUBITTED => {
                             let transaction_instant: u32 = (seed >> 32).try_into().ok().map_or(0, |v| v);
                             let buffer_committed = LogRecord::<MonotonicU64>::BufferSubmitted(transaction_instant);
                             assert!(buffer_committed.write(&mut small_buffer).is_none());
@@ -496,7 +496,7 @@ mod tests {
                                 unreachable!();
                             }
                         }
-                        BUFFER_ROLLED_BACK => {
+                        BUFFER_DISCARDED => {
                             let buffer_rolled_back = LogRecord::<MonotonicU64>::BufferDiscarded;
                             assert!(buffer_rolled_back.write(&mut small_buffer).is_none());
                             assert!(buffer_rolled_back.write(&mut medium_buffer).is_some());
@@ -533,6 +533,7 @@ mod tests {
                             }
                         }
                         JOURNAL_CREATED_RANGE => {
+                            #[allow(clippy::cast_possible_truncation)]
                             let created = LogRecord::<MonotonicU64>::JournalCreatedObjectRange(transaction_id, journal_id, hash, (hash >> 32) as u32, hash as u32);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
@@ -555,6 +556,7 @@ mod tests {
                             }
                         }
                         JOURNAL_DELETED_RANGE => {
+                            #[allow(clippy::cast_possible_truncation)]
                             let deleted = LogRecord::<MonotonicU64>::JournalDeletedObjectRange(transaction_id, journal_id, hash, (hash >> 32) as u32, hash as u32);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());

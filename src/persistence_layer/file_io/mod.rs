@@ -62,14 +62,14 @@ pub struct FileLogBuffer {
     /// The associated log record.
     buffer: [u8; 32],
 
-    /// Indicates whether the associated journal was discarded.
-    discarded: bool,
-
-    /// The submit instant of the journal.
-    submit_instant: Option<NonZeroU32>,
+    /// Extended buffer to accommodate a single end-of-journal log record.
+    eoj_buffer: [u8; 8],
 
     /// The number of byes written to the buffer.
     bytes_written: u8,
+
+    /// Flag indicating that the end-of-journal log record buffer was used.
+    eoj_buffer_used: bool,
 
     /// The offset in the log file of the log record.
     offset: u64,
@@ -191,7 +191,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log_buffer.offset = if let Some(head) = unsafe { head_ptr.as_ref() } {
                 // The offset of the last previously pushed log buffer is the starting offset
                 // of the supplied log buffer.
-                head.offset + u64::from(head.bytes_written)
+                head.offset + head.len() as u64
             } else {
                 // It is the first lob buffer.
                 0
@@ -363,6 +363,18 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             };
             current_log.replace(new_log);
         }
+
+        if let Some(log) = current_log {
+            let mut current_log_buffer = log_buffer.take().map_or_else(Box::default, |b| b);
+            if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                current_log_buffer.set_buffer_position(current_log_buffer.pos() + bytes_written);
+                log_buffer.replace(current_log_buffer);
+            } else {
+                // The log buffer is full, therefore flush it.
+                self.flush(current_log_buffer, None).forget();
+            }
+        }
+
         Ok(log_buffer)
     }
 
@@ -438,6 +450,18 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             };
             current_log.replace(new_log);
         }
+
+        if let Some(log) = current_log {
+            let mut current_log_buffer = log_buffer.take().map_or_else(Box::default, |b| b);
+            if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                current_log_buffer.set_buffer_position(current_log_buffer.pos() + bytes_written);
+                log_buffer.replace(current_log_buffer);
+            } else {
+                // The log buffer is full, therefore flush it.
+                self.flush(current_log_buffer, None).forget();
+            }
+        }
+
         Ok(log_buffer)
     }
 
@@ -450,18 +474,21 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, FileIO<S>> {
+        debug_assert!(!log_buffer.eoj_buffer_used);
         if let Some(transaction_instant) = transaction_instant {
             if log_buffer.bytes_written == 0 {
                 // The buffer is empty, therefore it needs to write its identification information.
-                let discard_log_record = LogRecord::<S>::JournalSubmitted(
+                let submit_log_record = LogRecord::<S>::JournalSubmitted(
                     transaction_id,
                     journal_id,
                     transaction_instant.get(),
                 );
-                let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
+                let bytes_written = submit_log_record.write(&mut log_buffer.buffer).unwrap();
                 log_buffer.set_buffer_position(bytes_written);
             } else {
-                log_buffer.submit_instant.replace(transaction_instant);
+                let submit_log_record = LogRecord::<S>::BufferSubmitted(transaction_instant.get());
+                submit_log_record.write(&mut log_buffer.eoj_buffer);
+                log_buffer.eoj_buffer_used = true;
             }
         }
         self.flush(log_buffer, deadline)
@@ -475,13 +502,16 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         journal_id: JournalID,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
+        debug_assert!(!log_buffer.eoj_buffer_used);
         if log_buffer.bytes_written == 0 {
             // The buffer is empty, therefore it needs to write its identification information.
             let discard_log_record = LogRecord::<S>::JournalDiscarded(transaction_id, journal_id);
             let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
             log_buffer.set_buffer_position(bytes_written);
         } else {
-            log_buffer.discarded = true;
+            let discard_log_record = LogRecord::<S>::BufferDiscarded;
+            discard_log_record.write(&mut log_buffer.eoj_buffer);
+            log_buffer.eoj_buffer_used = true;
         }
         self.flush(log_buffer, deadline)
     }
@@ -570,14 +600,23 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
 }
 
 impl FileLogBuffer {
+    /// Returns the current buffer starting position.
+    const fn pos(&self) -> usize {
+        self.bytes_written as usize
+    }
+
+    /// Returns the total length of all the log record in it.
+    const fn len(&self) -> usize {
+        if self.eoj_buffer_used {
+            self.pos() + self.eoj_buffer.len()
+        } else {
+            self.pos()
+        }
+    }
+
     /// Returns the current remaining buffer size.
     fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer[self.bytes_written as usize..]
-    }
-
-    /// Returns the current buffer starting position.
-    fn pos(&self) -> usize {
-        self.bytes_written as usize
     }
 
     /// Sets the new buffer starting position.

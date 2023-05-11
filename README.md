@@ -108,20 +108,12 @@ async {
 
 ```rust
 
-use sap_tsf::{Database, ToObjectID};
+use sap_tsf::Database;
 use std::num::NonZeroU32;
 use std::path::Path;
 
 // `O` represents a database object type.
 struct O(u64);
-
-
-// `ToObjectID` is implemented for `O`.
-impl ToObjectID for O {
-    fn to_object_id(&self) -> u64 {
-        self.0
-    }
-}
 
 async {
     let database = Database::with_path(Path::new("example")).await.unwrap();
@@ -131,7 +123,7 @@ async {
     let mut journal = transaction.journal();
 
     // Let the `Database` know that the database object will be created.
-    assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    assert!(access_controller.create(1, &mut journal, None).await.is_ok());
 
     journal.submit();
 
@@ -140,26 +132,26 @@ async {
     assert!(transaction.commit().await.is_ok());
 
     let snapshot = database.snapshot();
-    assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+    assert_eq!(access_controller.read(1, &snapshot, None).await, Ok(true));
 
     let transaction_succ = database.transaction();
     let mut journal_succ = transaction_succ.journal();
 
     // The transaction will own database object to prevent any other transactions from gaining
     // write access to it.
-    assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
+    assert!(access_controller.share(1, &mut journal_succ, None).await.is_ok());
     assert_eq!(Some(journal_succ.submit()), NonZeroU32::new(1));
 
     let transaction_fail = database.transaction();
     let mut journal_fail = transaction_fail.journal();
 
     // Another transaction fails to take ownership of the database object.
-    assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
+    assert!(access_controller.lock(1, &mut journal_fail, None).await.is_err());
 
     let mut journal_delete = transaction_succ.journal();
 
     // The transaction will delete the database object.
-    assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
+    assert!(access_controller.delete(1, &mut journal_delete, None).await.is_ok());
     assert_eq!(Some(journal_delete.submit()), NonZeroU32::new(2));
 
     // The transaction deletes the database object by writing its commit instant value onto
@@ -167,7 +159,7 @@ async {
     assert!(transaction_succ.commit().await.is_ok());
 
     // Further access to the database object is prohibited.
-    assert!(access_controller.share(&O(1), &mut journal_fail, None).await.is_err());
+    assert!(access_controller.share(1, &mut journal_fail, None).await.is_err());
 };
  ```
 

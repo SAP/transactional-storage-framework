@@ -234,6 +234,64 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
         Snapshot::from_journal(self.transaction.database(), self.journal_snapshot())
     }
 
+    /// Creates database objects with the [`Journal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the database objects could not be created.
+    #[inline]
+    pub async fn create(
+        &mut self,
+        object_ids: &[u64],
+        deadline: Option<Instant>,
+    ) -> Result<(), Error> {
+        for id in object_ids {
+            self.transaction
+                .database()
+                .access_controller()
+                .create(*id, self, deadline)
+                .await?;
+        }
+        let log_buffer = self.log_buffer.take().map_or_else(Box::default, |b| b);
+        let log_buffer = self.transaction.database().persistence_layer().create(
+            log_buffer,
+            self.transaction.id(),
+            self.id(),
+            object_ids,
+        )?;
+        self.log_buffer = log_buffer;
+        Ok(())
+    }
+
+    /// Deletes database objects with the [`Journal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the database objects could not be deleted.
+    #[inline]
+    pub async fn delete(
+        &mut self,
+        object_ids: &[u64],
+        deadline: Option<Instant>,
+    ) -> Result<(), Error> {
+        for id in object_ids {
+            self.transaction
+                .database()
+                .access_controller()
+                .delete(*id, self, deadline)
+                .await?;
+        }
+        let log_buffer = self.log_buffer.take().map_or_else(Box::default, |b| b);
+        let log_buffer = self.transaction.database().persistence_layer().create(
+            log_buffer,
+            self.transaction.id(),
+            self.id(),
+            object_ids,
+        )?;
+        self.log_buffer = log_buffer;
+        Ok(())
+    }
+
     /// Returns a reference to the [`TaskProcessor`].
     pub(super) fn task_processor(&self) -> &'d TaskProcessor {
         self.transaction.database().task_processor()

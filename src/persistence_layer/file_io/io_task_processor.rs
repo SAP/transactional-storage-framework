@@ -5,8 +5,7 @@
 //! IO task processor.
 
 use super::recovery::recover_database;
-use super::{FileIOData, FileLogBuffer, RandomAccessFile};
-use crate::Sequencer;
+use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
@@ -83,8 +82,22 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                     yield_now();
                     continue;
                 }
+
                 debug_assert_eq!(log0_offset, log_buffer.offset);
                 log0_offset += log_buffer.pos() as u64;
+
+                if log_buffer.eoj_buffer_used {
+                    while file_io_data
+                        .log0
+                        .write(&log_buffer.eoj_buffer, log0_offset)
+                        .is_err()
+                    {
+                        // Retry after yielding.
+                        yield_now();
+                    }
+                    log0_offset += log_buffer.eoj_buffer.len() as u64;
+                }
+
                 if let Some(next_log_buffer) = log_buffer.take_next_if_not(log_buffer_head_addr) {
                     log_buffer = next_log_buffer;
                 } else {
@@ -149,7 +162,7 @@ fn take_log_buffer_link(
         let current_head_ptr = current_head as *mut FileLogBuffer;
         log_buffer_head.offset =
             // Safety: `current_head_ptr` not being zero was checked.
-            unsafe { (*current_head_ptr).offset + (*current_head_ptr).pos() as u64 };
+            unsafe { (*current_head_ptr).offset + (*current_head_ptr).len() as u64 };
         if let Err(actual) =
             log_buffer_link.compare_exchange(current_head, log_buffer_head_addr, AcqRel, Acquire)
         {

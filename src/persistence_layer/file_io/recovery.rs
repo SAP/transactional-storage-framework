@@ -5,7 +5,7 @@
 use super::log_record::LogRecord;
 use super::FileIOData;
 use crate::transaction::Playback;
-use crate::{Database, Error, FileIO, Sequencer, TransactionID};
+use crate::{Database, Error, FileIO, JournalID, Sequencer, TransactionID};
 use std::num::NonZeroU32;
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::task::Waker;
@@ -25,6 +25,12 @@ pub(super) struct RecoveryData<S: Sequencer<Instant = u64>> {
 
     /// Fully recovered database is sent through `result`.
     result: Option<Result<Database<S, FileIO<S>>, Error>>,
+}
+
+/// Keeps identifiers of the most recently used journal.
+struct MostRecentJournal {
+    transaction_id: TransactionID,
+    journal_id: JournalID,
 }
 
 // No log entries are wider than 32 bytes.
@@ -65,6 +71,10 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
     drop(guard);
 
     let file_len = file_io_data.log0.len(Acquire);
+
+    // The variable is only updated when the journal creates or deletes a database objects.
+    let mut last_journal_anchor: Option<MostRecentJournal> = None;
+
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
@@ -72,7 +82,12 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
             // Canceled.
             return;
         }
-        if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
+        if let Some(bytes_read) = apply_to_database(
+            &buffer,
+            &database,
+            &playback_container,
+            &mut last_journal_anchor,
+        ) {
             read_offset += bytes_read;
         } else {
             read_offset = file_len;
@@ -88,7 +103,12 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
                 // Canceled.
                 return;
             }
-            if let Some(bytes_read) = apply_to_database(&buffer, &database, &playback_container) {
+            if let Some(bytes_read) = apply_to_database(
+                buffer_piece,
+                &database,
+                &playback_container,
+                &mut last_journal_anchor,
+            ) {
                 read_offset += bytes_read;
             } else {
                 read_offset = file_len;
@@ -123,10 +143,12 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
 /// Applies log records in the buffer to the database.
 ///
 /// Returns `None` if it read the end of the log file.
+#[allow(clippy::too_many_lines)]
 fn apply_to_database<'d, S: Sequencer<Instant = u64>>(
     mut buffer: &[u8],
     database: &'d Database<S, FileIO<S>>,
     playback_container: &scc::HashMap<TransactionID, Playback<'d, S, FileIO<S>>>,
+    last_journal_anchor: &mut Option<MostRecentJournal>,
 ) -> Option<u64> {
     // TODO: parallelize.
     let buffer_len = buffer.len();
@@ -137,15 +159,118 @@ fn apply_to_database<'d, S: Sequencer<Instant = u64>>(
                 LogRecord::EndOfLog => {
                     return None;
                 }
-                LogRecord::BufferSubmitted(_) => todo!(),
-                LogRecord::BufferDiscarded => todo!(),
-                LogRecord::JournalCreatedObjectSingle(_, _, _) => todo!(),
-                LogRecord::JournalCreatedObjectRange(_, _, _, _, _) => todo!(),
-                LogRecord::JournalDeletedObjectSingle(_, _, _) => todo!(),
-                LogRecord::JournalDeletedObjectRange(_, _, _, _, _) => todo!(),
-                LogRecord::JournalSubmitted(_, _, _) => todo!(),
-                LogRecord::JournalDiscarded(_, _) => todo!(),
-                LogRecord::TransactionPrepared(_, _) => todo!(),
+                LogRecord::BufferSubmitted(submit_instant) => {
+                    let last_journal_anchor = last_journal_anchor.take().unwrap();
+                    let mut playback_entry = playback_container
+                        .get(&last_journal_anchor.transaction_id)
+                        .unwrap();
+                    playback_entry
+                        .get_mut()
+                        .submit_journal_anchor(last_journal_anchor.journal_id, submit_instant);
+                }
+                LogRecord::BufferDiscarded => {
+                    let last_journal_anchor = last_journal_anchor.take().unwrap();
+                    let mut playback_entry = playback_container
+                        .get(&last_journal_anchor.transaction_id)
+                        .unwrap();
+                    playback_entry
+                        .get_mut()
+                        .discard_journal_anchor(last_journal_anchor.journal_id);
+                }
+                LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, object_id) => {
+                    let mut playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    let journal_anchor = playback_entry
+                        .get_mut()
+                        .get_or_create_journal_anchor(journal_id);
+                    database
+                        .access_controller()
+                        .playback_create_sync(object_id, &journal_anchor);
+                    last_journal_anchor.replace(MostRecentJournal {
+                        transaction_id,
+                        journal_id,
+                    });
+                }
+                LogRecord::JournalCreatedObjectRange(
+                    transaction_id,
+                    journal_id,
+                    start_object_id,
+                    interval,
+                    num_objects,
+                ) => {
+                    let mut playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    let journal_anchor = playback_entry
+                        .get_mut()
+                        .get_or_create_journal_anchor(journal_id);
+                    (0..num_objects).for_each(|i| {
+                        let object_id = start_object_id + u64::from(i) * u64::from(interval);
+                        database
+                            .access_controller()
+                            .playback_create_sync(object_id, &journal_anchor);
+                    });
+                    last_journal_anchor.replace(MostRecentJournal {
+                        transaction_id,
+                        journal_id,
+                    });
+                }
+                LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, object_id) => {
+                    let mut playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    let journal_anchor = playback_entry
+                        .get_mut()
+                        .get_or_create_journal_anchor(journal_id);
+                    database
+                        .access_controller()
+                        .playback_delete_sync(object_id, &journal_anchor);
+                    last_journal_anchor.replace(MostRecentJournal {
+                        transaction_id,
+                        journal_id,
+                    });
+                }
+                LogRecord::JournalDeletedObjectRange(
+                    transaction_id,
+                    journal_id,
+                    start_object_id,
+                    interval,
+                    num_objects,
+                ) => {
+                    let mut playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    let journal_anchor = playback_entry
+                        .get_mut()
+                        .get_or_create_journal_anchor(journal_id);
+                    (0..num_objects).for_each(|i| {
+                        let object_id = start_object_id + u64::from(i) * u64::from(interval);
+                        database
+                            .access_controller()
+                            .playback_delete_sync(object_id, &journal_anchor);
+                    });
+                    last_journal_anchor.replace(MostRecentJournal {
+                        transaction_id,
+                        journal_id,
+                    });
+                }
+                LogRecord::JournalSubmitted(transaction_id, journal_id, submit_instant) => {
+                    let mut playback_entry = playback_container.get(&transaction_id).unwrap();
+                    playback_entry
+                        .get_mut()
+                        .submit_journal_anchor(journal_id, submit_instant);
+                }
+                LogRecord::JournalDiscarded(transaction_id, journal_id) => {
+                    let mut playback_entry = playback_container.get(&transaction_id).unwrap();
+                    playback_entry.get_mut().discard_journal_anchor(journal_id);
+                }
+                LogRecord::TransactionPrepared(transaction_id, prepare_instant) => {
+                    let mut playback_entry = playback_container
+                        .entry(transaction_id)
+                        .or_insert_with(|| Playback::new(database));
+                    playback_entry.get_mut().prepare(prepare_instant);
+                }
                 LogRecord::TransactionCommitted(transaction_id, commit_instant) => {
                     let playback_entry = playback_container
                         .entry(transaction_id)
@@ -167,9 +292,45 @@ fn apply_to_database<'d, S: Sequencer<Instant = u64>>(
         } else {
             // The length of the buffer piece was insufficient.
             debug_assert_ne!(buffer.len(), BUFFER_SIZE);
-            debug_assert_eq!(buffer.len() / 8, 0);
+            debug_assert_eq!(buffer.len() % 4, 0);
             return Some((buffer_len - buffer.len()) as u64);
         }
     }
     Some(buffer_len as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+    use std::path::Path;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+    use tokio::fs::remove_dir_all;
+
+    #[tokio::test]
+    async fn basic() {
+        const DIR: &str = "recovery_basic_test";
+        let path = Path::new(DIR);
+        let database = Arc::new(Database::with_path(path).await.unwrap());
+
+        for o in 0..32 {
+            let transaction = database.transaction();
+            let mut journal = transaction.journal();
+            journal.create(&[o], None).await.unwrap();
+            assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
+            assert!(transaction.commit().await.is_ok());
+        }
+
+        let instant = database.sequencer().now(Relaxed);
+        drop(database);
+
+        let database_recovered = Arc::new(Database::with_path(path).await.unwrap());
+        let recovered_instant = database_recovered.sequencer().now(Relaxed);
+
+        assert_eq!(instant, recovered_instant);
+        drop(database_recovered);
+
+        assert!(remove_dir_all(path).await.is_ok());
+    }
 }

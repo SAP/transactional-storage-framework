@@ -20,8 +20,8 @@ use std::time::Instant;
 ///
 /// [`AccessController`] provides an essential database object access control method for database
 /// systems using multi-version concurrency control or read-write locks. As long as a database
-/// object can be uniquely identified through [`ToObjectID`], read or write access to the object
-/// can be fully transactionally controlled via [`AccessController`].
+/// object can be uniquely identified as a [`u64`] value, read or write access to the object can be
+/// fully transactionally controlled via [`AccessController`].
 ///
 /// [`AccessController`] exactly acts as a transactional [`std::sync::RwLock`] when only
 /// [`AccessController::share`] and [`AccessController::lock`] are used; those two methods are
@@ -36,19 +36,9 @@ use std::time::Instant;
 /// # Examples
 ///
 /// ```
-/// use sap_tsf::{Database, ToObjectID};
+/// use sap_tsf::Database;
 /// use std::num::NonZeroU32;
 /// use std::path::Path;
-///
-/// // `O` represents a database object type.
-/// struct O(u64);
-///
-/// // `ToObjectID` is implemented for `O`.
-/// impl ToObjectID for O {
-///     fn to_object_id(&self) -> u64 {
-///         self.0
-///    }
-/// }
 ///
 /// async {
 ///     let database = Database::with_path(Path::new("example")).await.unwrap();
@@ -59,7 +49,7 @@ use std::time::Instant;
 ///     let mut journal = transaction.journal();
 ///
 ///     // Let the `Database` know that the database object will be created.
-///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
 ///     journal.submit();
 ///
 ///     // The transaction writes its own commit instant value onto the access data of the database
@@ -67,26 +57,26 @@ use std::time::Instant;
 ///     assert!(transaction.commit().await.is_ok());
 ///
 ///     let snapshot = database.snapshot();
-///     assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+///     assert_eq!(access_controller.read(1, &snapshot, None).await, Ok(true));
 ///
 ///     let transaction_succ = database.transaction();
 ///     let mut journal_succ = transaction_succ.journal();
 ///
 ///     // The transaction will own the database object to prevent any other transactions from
 ///     // gaining write access to it.
-///     assert!(access_controller.share(&O(1), &mut journal_succ, None).await.is_ok());
+///     assert!(access_controller.share(1, &mut journal_succ, None).await.is_ok());
 ///     assert_eq!(Some(journal_succ.submit()), NonZeroU32::new(1));
 ///
 ///     let transaction_fail = database.transaction();
 ///     let mut journal_fail = transaction_fail.journal();
 
 ///     // Another transaction fails to take ownership of the database object.
-///     assert!(access_controller.lock(&O(1), &mut journal_fail, None).await.is_err());
+///     assert!(access_controller.lock(1, &mut journal_fail, None).await.is_err());
 ///
 ///     let mut journal_delete = transaction_succ.journal();
 //
 ///     // The transaction will delete the database object.
-///     assert!(access_controller.delete(&O(1), &mut journal_delete, None).await.is_ok());
+///     assert!(access_controller.delete(1, &mut journal_delete, None).await.is_ok());
 ///     assert_eq!(Some(journal_delete.submit()), NonZeroU32::new(2));
 ///
 ///     // The transaction deletes the database object by writing its commit instant value onto
@@ -94,19 +84,12 @@ use std::time::Instant;
 ///     assert!(transaction_succ.commit().await.is_ok());
 ///
 ///     // Further access to the database object is prohibited.
-///     assert!(access_controller.share(&O(1), &mut journal_fail, None).await.is_err());
+///     assert!(access_controller.share(1, &mut journal_fail, None).await.is_err());
 /// };
 /// ```
 #[derive(Debug, Default)]
 pub struct AccessController<S: Sequencer> {
     table: HashMap<u64, ObjectState<S>>,
-}
-
-/// [`ToObjectID`] derives a fixed [`u64`] value for the instance.
-pub trait ToObjectID {
-    /// It must always return the same value for the same `self`, and the value has to be unique in
-    /// the process during the lifetime of `self`.
-    fn to_object_id(&self) -> u64;
 }
 
 /// An owner of a database object.
@@ -245,42 +228,33 @@ impl<S: Sequencer> AccessController<S> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, ToObjectID};
+    /// use sap_tsf::Database;
     /// use std::path::Path;
-    ///
-    /// struct O(u64);
-    ///
-    /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> u64 {
-    ///         self.0
-    ///    }
-    /// }
-    ///
     ///
     /// async {
     ///     let database = Database::with_path(Path::new("read")).await.unwrap();
     ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    ///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
     ///     journal.submit();
     ///     assert!(transaction.commit().await.is_ok());
     ///
     ///     let snapshot = database.snapshot();
-    ///     assert_eq!(access_controller.read(&O(1), &snapshot, None).await, Ok(true));
+    ///     assert_eq!(access_controller.read(1, &snapshot, None).await, Ok(true));
     /// };
     /// ```
     #[inline]
-    pub async fn read<O: ToObjectID>(
+    pub async fn read(
         &self,
-        object: &O,
+        object_id: u64,
         snapshot: &Snapshot<'_, '_, '_, S>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
         loop {
             let await_eot = match self
                 .table
-                .read_async(&object.to_object_id(), |_, entry| match entry {
+                .read_async(&object_id, |_, entry| match entry {
                     ObjectState::Owned(ownership) => {
                         match ownership {
                             Ownership::Created(owner) => {
@@ -381,33 +355,25 @@ impl<S: Sequencer> AccessController<S> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, ToObjectID};
+    /// use sap_tsf::Database;
     /// use std::path::Path;
-    ///
-    /// struct O(u64);
-    ///
-    /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> u64 {
-    ///         self.0
-    ///    }
-    /// }
     ///
     /// async {
     ///     let database = Database::with_path(Path::new("create")).await.unwrap();
     ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    ///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
     /// };
     /// ```
     #[inline]
-    pub async fn create<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn create<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Created(Owner::from(journal))));
@@ -451,39 +417,31 @@ impl<S: Sequencer> AccessController<S> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, ToObjectID};
+    /// use sap_tsf::Database;
     /// use std::path::Path;
-    ///
-    /// struct O(u64);
-    ///
-    /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> u64 {
-    ///         self.0
-    ///    }
-    /// }
     ///
     /// async {
     ///     let database = Database::with_path(Path::new("share")).await.unwrap();
     ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    ///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
     ///     journal.submit();
     ///     assert!(transaction.commit().await.is_ok());
     ///
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert_eq!(access_controller.share(&O(1), &mut journal, None).await, Ok(true));
+    ///     assert_eq!(access_controller.share(1, &mut journal, None).await, Ok(true));
     /// };
     /// ```
     #[inline]
-    pub async fn share<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn share<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Protected(Owner::from(
@@ -559,39 +517,31 @@ impl<S: Sequencer> AccessController<S> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, ToObjectID};
+    /// use sap_tsf::Database;
     /// use std::path::Path;
-    ///
-    /// struct O(u64);
-    ///
-    /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> u64 {
-    ///         self.0
-    ///    }
-    /// }
     ///
     /// async {
     ///     let database = Database::with_path(Path::new("lock")).await.unwrap();
     ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    ///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
     ///     journal.submit();
     ///     assert!(transaction.commit().await.is_ok());
     ///
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert_eq!(access_controller.lock(&O(1), &mut journal, None).await, Ok(true));
+    ///     assert_eq!(access_controller.lock(1, &mut journal, None).await, Ok(true));
     /// };
     /// ```
     #[inline]
-    pub async fn lock<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn lock<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Locked(Owner::from(journal))));
@@ -668,39 +618,31 @@ impl<S: Sequencer> AccessController<S> {
     /// # Examples
     ///
     /// ```
-    /// use sap_tsf::{Database, ToObjectID};
+    /// use sap_tsf::Database;
     /// use std::path::Path;
-    ///
-    /// struct O(u64);
-    ///
-    /// impl ToObjectID for O {
-    ///     fn to_object_id(&self) -> u64 {
-    ///         self.0
-    ///    }
-    /// }
     ///
     /// async {
     ///     let database = Database::with_path(Path::new("delete")).await.unwrap();
     ///     let access_controller = database.access_controller();
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert!(access_controller.create(&O(1), &mut journal, None).await.is_ok());
+    ///     assert!(access_controller.create(1, &mut journal, None).await.is_ok());
     ///     journal.submit();
     ///     assert!(transaction.commit().await.is_ok());
     ///
     ///     let transaction = database.transaction();
     ///     let mut journal = transaction.journal();
-    ///     assert_eq!(access_controller.delete(&O(1), &mut journal, None).await, Ok(true));
+    ///     assert_eq!(access_controller.delete(1, &mut journal, None).await, Ok(true));
     /// };
     /// ```
     #[inline]
-    pub async fn delete<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn delete<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Deleted(Owner::from(journal))));
@@ -760,6 +702,50 @@ impl<S: Sequencer> AccessController<S> {
 
         // The database object has been deleted, or invisible.
         Err(Error::SerializationFailure)
+    }
+
+    /// Creates a new database object during database recovery.
+    ///
+    /// It is an infallible method.
+    pub(crate) fn playback_create_sync(
+        &self,
+        object_id: u64,
+        journal_anchor: &ebr::Arc<JournalAnchor<S>>,
+    ) {
+        match self.table.entry(object_id) {
+            MapEntry::Occupied(mut o) => {
+                *o.get_mut() = ObjectState::Owned(Ownership::Created(Owner {
+                    anchor: journal_anchor.clone(),
+                }));
+            }
+            MapEntry::Vacant(v) => {
+                v.insert_entry(ObjectState::Owned(Ownership::Created(Owner {
+                    anchor: journal_anchor.clone(),
+                })));
+            }
+        };
+    }
+
+    /// Deletes a database object during database recovery.
+    ///
+    /// It is an infallible method.
+    pub(crate) fn playback_delete_sync(
+        &self,
+        object_id: u64,
+        journal_anchor: &ebr::Arc<JournalAnchor<S>>,
+    ) {
+        match self.table.entry(object_id) {
+            MapEntry::Occupied(mut o) => {
+                *o.get_mut() = ObjectState::Owned(Ownership::Deleted(Owner {
+                    anchor: journal_anchor.clone(),
+                }));
+            }
+            MapEntry::Vacant(v) => {
+                v.insert_entry(ObjectState::Owned(Ownership::Deleted(Owner {
+                    anchor: journal_anchor.clone(),
+                })));
+            }
+        };
     }
 
     /// Transfers ownership to all the eligible waiting transactions.
@@ -2240,12 +2226,6 @@ mod tests {
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
     const TIMEOUT_EXPECTED: Duration = Duration::from_millis(1);
 
-    impl ToObjectID for u64 {
-        fn to_object_id(&self) -> u64 {
-            *self
-        }
-    }
-
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TransactionAction {
         Commit,
@@ -2268,10 +2248,10 @@ mod tests {
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
         match access_action {
-            AccessAction::Create => access_controller.create(&0, journal, deadline).await,
-            AccessAction::Share => access_controller.share(&0, journal, deadline).await,
-            AccessAction::Lock => access_controller.lock(&0, journal, deadline).await,
-            AccessAction::Delete => access_controller.delete(&0, journal, deadline).await,
+            AccessAction::Create => access_controller.create(0, journal, deadline).await,
+            AccessAction::Share => access_controller.share(0, journal, deadline).await,
+            AccessAction::Lock => access_controller.lock(0, journal, deadline).await,
+            AccessAction::Delete => access_controller.delete(0, journal, deadline).await,
         }
     }
 
@@ -2299,7 +2279,7 @@ mod tests {
             assert_eq!(
                 access_controller
                     .read(
-                        &0,
+                        0,
                         &journal_snapshot,
                         Some(Instant::now() + TIMEOUT_UNEXPECTED),
                     )
@@ -2311,7 +2291,7 @@ mod tests {
             assert_eq!(
                 access_controller
                     .read(
-                        &0,
+                        0,
                         &transaction_snapshot,
                         Some(Instant::now() + TIMEOUT_UNEXPECTED),
                     )
@@ -2323,7 +2303,7 @@ mod tests {
             assert_eq!(
                 access_controller
                     .read(
-                        &0,
+                        0,
                         &database_snapshot,
                         Some(Instant::now() + TIMEOUT_UNEXPECTED),
                     )
@@ -2337,7 +2317,7 @@ mod tests {
         assert_eq!(
             access_controller
                 .read(
-                    &0,
+                    0,
                     &database.snapshot(),
                     Some(Instant::now() + TIMEOUT_UNEXPECTED),
                 )
@@ -2347,7 +2327,7 @@ mod tests {
         assert_eq!(
             access_controller
                 .read(
-                    &0,
+                    0,
                     &snapshot.unwrap(),
                     Some(Instant::now() + TIMEOUT_UNEXPECTED),
                 )
@@ -2745,7 +2725,7 @@ mod tests {
                 let snapshot = database.snapshot();
                 assert_eq!(
                     access_controller
-                        .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED),)
+                        .read(0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED),)
                         .await,
                     Ok(access != AccessAction::Create),
                 );
@@ -2781,7 +2761,7 @@ mod tests {
                 }
                 let snapshot = database.snapshot();
                 let result = access_controller
-                    .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
+                    .read(0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                     .await;
                 if access == AccessAction::Create || access == AccessAction::Delete {
                     assert_eq!(result, Err(Error::Timeout), "{access:?}");
@@ -2793,14 +2773,14 @@ mod tests {
                     assert!(prepared.await.is_ok());
                     let snapshot = database.snapshot();
                     let result = access_controller
-                        .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
+                        .read(0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                         .await;
                     assert_eq!(result, Ok(access != AccessAction::Delete), "{access:?}");
                 } else {
                     drop(prepared);
                     let snapshot = database.snapshot();
                     let result = access_controller
-                        .read(&0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
+                        .read(0, &snapshot, Some(Instant::now() + TIMEOUT_EXPECTED))
                         .await;
                     assert_eq!(result, Ok(access != AccessAction::Create), "{access:?}");
                 }
@@ -2895,7 +2875,7 @@ mod tests {
                     assert_eq!(
                         database_clone
                             .access_controller()
-                            .lock(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                            .lock(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                             .await,
                         Ok(true)
                     );
@@ -2913,7 +2893,7 @@ mod tests {
                     assert_eq!(
                         database_clone
                             .access_controller()
-                            .share(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                            .share(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                             .await,
                         Ok(true)
                     );
@@ -2953,7 +2933,7 @@ mod tests {
                 let mut journal = transaction.journal();
                 match database_clone
                     .access_controller()
-                    .create(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .create(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                     .await
                 {
                     Ok(result) => {
@@ -2975,7 +2955,7 @@ mod tests {
                 assert_eq!(
                     database_clone
                         .access_controller()
-                        .lock(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                        .lock(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                         .await,
                     Ok(true)
                 );
@@ -2989,7 +2969,7 @@ mod tests {
                 let mut journal = transaction.journal();
                 match database_clone
                     .access_controller()
-                    .delete(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .delete(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                     .await
                 {
                     Ok(result) => {

@@ -621,7 +621,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     }
 
     /// Gets or create a [`JournalAnchor`] associated with the specified identifier.
-    #[allow(dead_code)]
     pub(crate) fn get_or_create_journal_anchor(&mut self, id: u64) -> ebr::Arc<JournalAnchor<S>> {
         match self.journal_anchor_map.entry(id) {
             hash_map::Entry::Occupied(o) => o.get().clone(),
@@ -650,7 +649,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     }
 
     /// Submits a [`JournalAnchor`].
-    #[allow(dead_code)]
     pub(super) fn submit_journal_anchor(&mut self, id: u64, transaction_instant: u32) {
         debug_assert_ne!(transaction_instant, 0);
         if let hash_map::Entry::Occupied(o) = self.journal_anchor_map.entry(id) {
@@ -669,14 +667,12 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     }
 
     /// Discards a [`JournalAnchor`].
-    #[allow(dead_code)]
     pub(super) fn discard_journal_anchor(&mut self, id: u64) {
         let result = self.journal_anchor_map.remove(&id);
         debug_assert!(result.is_some());
     }
 
     /// Rewinds the [`Playback`] to the given point of time.
-    #[allow(dead_code)]
     pub(crate) fn rewind(&mut self, instant: Option<NonZeroU32>) {
         debug_assert!(self.journal_anchor_map.is_empty());
 
@@ -701,7 +697,6 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     }
 
     /// Prepares the [`Playback`] for commit.
-    #[allow(dead_code)]
     pub(crate) fn prepare(&mut self, prepare_instant: S::Instant) {
         debug_assert!(self.journal_anchor_map.is_empty());
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Active.into());
