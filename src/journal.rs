@@ -444,6 +444,11 @@ impl<S: Sequencer> Anchor<S> {
         )
     }
 
+    /// Sets the specified submit instant.
+    pub(super) fn set_submit_instant(&self, submit_instant: u32) {
+        self.submit_instant.store(submit_instant, Release);
+    }
+
     /// Wakes up any waiting transactions.
     pub(super) fn commit(&self, task_processor: &TaskProcessor) {
         self.wake_up_others(task_processor);

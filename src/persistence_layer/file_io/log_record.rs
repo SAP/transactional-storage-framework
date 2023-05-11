@@ -55,14 +55,16 @@ pub(super) enum LogRecord<S: Sequencer> {
     /// The transaction created a single database object identified as the `u64` value.
     JournalCreatedObjectSingle(TransactionID, JournalID, u64),
 
-    /// The transaction created a range of database objects identified as the `u64` range.
-    JournalCreatedObjectRange(TransactionID, JournalID, u64, u64),
+    /// The transaction created a range of database objects identified as
+    /// `(starting database object identifier, interval, number of objects)`.
+    JournalCreatedObjectRange(TransactionID, JournalID, u64, u32, u32),
 
     /// The transaction deleted a single database object identified as the `u64` value.
     JournalDeletedObjectSingle(TransactionID, JournalID, u64),
 
-    /// The transaction deleted a range of database objects identified as the `u64` range.
-    JournalDeletedObjectRange(TransactionID, JournalID, u64, u64),
+    /// The transaction deleted a range of database objects identified as
+    /// `(starting database object identifier, interval, number of objects)`.
+    JournalDeletedObjectRange(TransactionID, JournalID, u64, u32, u32),
 
     /// The journal was submitted.
     ///
@@ -174,15 +176,17 @@ impl<S: Sequencer> LogRecord<S> {
                         ))
                     }
                     JOURNAL_CREATED_RANGE => {
-                        // Created two.
-                        let (object_id_1, value) = read_part::<u64>(value)?;
-                        let (object_id_2, value) = read_part::<u64>(value)?;
+                        // Created range.
+                        let (object_id, value) = read_part::<u64>(value)?;
+                        let (interval, value) = read_part::<u32>(value)?;
+                        let (num_objects, value) = read_part::<u32>(value)?;
                         Some((
                             LogRecord::JournalCreatedObjectRange(
                                 transaction_id,
                                 journal_id,
-                                object_id_1,
-                                object_id_2,
+                                object_id,
+                                interval,
+                                num_objects,
                             ),
                             value,
                         ))
@@ -200,15 +204,17 @@ impl<S: Sequencer> LogRecord<S> {
                         ))
                     }
                     JOURNAL_DELETED_RANGE => {
-                        // Deleted two.
-                        let (object_id_1, value) = read_part::<u64>(value)?;
-                        let (object_id_2, value) = read_part::<u64>(value)?;
+                        // Deleted range.
+                        let (object_id, value) = read_part::<u64>(value)?;
+                        let (interval, value) = read_part::<u32>(value)?;
+                        let (num_objects, value) = read_part::<u32>(value)?;
                         Some((
                             LogRecord::JournalDeletedObjectRange(
                                 transaction_id,
                                 journal_id,
-                                object_id_1,
-                                object_id_2,
+                                object_id,
+                                interval,
+                                num_objects,
                             ),
                             value,
                         ))
@@ -282,8 +288,9 @@ impl<S: Sequencer> LogRecord<S> {
             LogRecord::JournalCreatedObjectRange(
                 transaction_id,
                 journal_id,
-                object_id_1,
-                object_id_2,
+                object_id,
+                interval,
+                num_objects,
             ) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
@@ -291,8 +298,9 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 let journal_id_with_opcode = journal_id | JOURNAL_CREATED_RANGE;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
-                let buffer = write_part::<u64>(*object_id_1, buffer)?;
-                write_part::<u64>(*object_id_2, buffer)?
+                let buffer = write_part::<u64>(*object_id, buffer)?;
+                let buffer = write_part::<u32>(*interval, buffer)?;
+                write_part::<u32>(*num_objects, buffer)?
             }
             LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, object_id) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
@@ -306,8 +314,9 @@ impl<S: Sequencer> LogRecord<S> {
             LogRecord::JournalDeletedObjectRange(
                 transaction_id,
                 journal_id,
-                object_id_1,
-                object_id_2,
+                object_id,
+                interval,
+                num_objects,
             ) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
                 debug_assert_eq!(journal_id & OPCODE_MASK, 0);
@@ -315,8 +324,9 @@ impl<S: Sequencer> LogRecord<S> {
                 let buffer = write_part::<TransactionID>(transaction_id_with_mark, buffer)?;
                 let journal_id_with_opcode = journal_id | JOURNAL_DELETED_RANGE;
                 let buffer = write_part::<JournalID>(journal_id_with_opcode, buffer)?;
-                let buffer = write_part::<u64>(*object_id_1, buffer)?;
-                write_part::<u64>(*object_id_2, buffer)?
+                let buffer = write_part::<u64>(*object_id, buffer)?;
+                let buffer = write_part::<u32>(*interval, buffer)?;
+                write_part::<u32>(*num_objects, buffer)?
             }
             LogRecord::JournalSubmitted(transaction_id, journal_id, transaction_instant) => {
                 debug_assert_eq!(transaction_id & OPCODE_MASK, 0);
@@ -375,13 +385,13 @@ impl<S: Sequencer> PartialEq for LogRecord<S> {
                 Self::JournalDeletedObjectSingle(r0, r1, r2),
             ) => l0 == r0 && l1 == r1 && l2 == r2,
             (
-                Self::JournalCreatedObjectRange(l0, l1, l2, l3),
-                Self::JournalCreatedObjectRange(r0, r1, r2, r3),
+                Self::JournalCreatedObjectRange(l0, l1, l2, l3, l4),
+                Self::JournalCreatedObjectRange(r0, r1, r2, r3, r4),
             )
             | (
-                Self::JournalDeletedObjectRange(l0, l1, l2, l3),
-                Self::JournalDeletedObjectRange(r0, r1, r2, r3),
-            ) => l0 == r0 && l1 == r1 && ((l2 == r2 && l3 == r3) || (l2 == r3) && (l3 == r2)),
+                Self::JournalDeletedObjectRange(l0, l1, l2, l3, l4),
+                Self::JournalDeletedObjectRange(r0, r1, r2, r3, r4),
+            ) => l0 == r0 && l1 == r1 && l2 == r2 && l3 == r3 && l4 == r4,
             (Self::JournalSubmitted(l0, l1, l2), Self::JournalSubmitted(r0, r1, r2)) => {
                 l0 == r0 && l1 == r1 && l2 == r2
             }
@@ -523,7 +533,7 @@ mod tests {
                             }
                         }
                         JOURNAL_CREATED_RANGE => {
-                            let created = LogRecord::<MonotonicU64>::JournalCreatedObjectRange(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let created = LogRecord::<MonotonicU64>::JournalCreatedObjectRange(transaction_id, journal_id, hash, (hash >> 32) as u32, hash as u32);
                             assert!(created.write(&mut small_buffer).is_none());
                             assert!(created.write(&mut medium_buffer).is_none());
                             assert!(created.write(&mut large_buffer).is_some());
@@ -545,7 +555,7 @@ mod tests {
                             }
                         }
                         JOURNAL_DELETED_RANGE => {
-                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedObjectRange(transaction_id, journal_id, hash, hash.rotate_left(32));
+                            let deleted = LogRecord::<MonotonicU64>::JournalDeletedObjectRange(transaction_id, journal_id, hash, (hash >> 32) as u32, hash as u32);
                             assert!(deleted.write(&mut small_buffer).is_none());
                             assert!(deleted.write(&mut medium_buffer).is_none());
                             assert!(deleted.write(&mut large_buffer).is_some());
