@@ -104,7 +104,7 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
                 return;
             }
             if let Some(bytes_read) = apply_to_database(
-                &buffer,
+                buffer_piece,
                 &database,
                 &playback_container,
                 &mut last_journal_anchor,
@@ -292,9 +292,45 @@ fn apply_to_database<'d, S: Sequencer<Instant = u64>>(
         } else {
             // The length of the buffer piece was insufficient.
             debug_assert_ne!(buffer.len(), BUFFER_SIZE);
-            debug_assert_eq!(buffer.len() / 8, 0);
+            debug_assert_eq!(buffer.len() % 4, 0);
             return Some((buffer_len - buffer.len()) as u64);
         }
     }
     Some(buffer_len as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+    use std::path::Path;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+    use tokio::fs::remove_dir_all;
+
+    #[tokio::test]
+    async fn basic() {
+        const DIR: &str = "recovery_basic_test";
+        let path = Path::new(DIR);
+        let database = Arc::new(Database::with_path(path).await.unwrap());
+
+        for o in 0..32 {
+            let transaction = database.transaction();
+            let mut journal = transaction.journal();
+            journal.create(&[o], None).await.unwrap();
+            assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
+            assert!(transaction.commit().await.is_ok());
+        }
+
+        let instant = database.sequencer().now(Relaxed);
+        drop(database);
+
+        let database_recovered = Arc::new(Database::with_path(path).await.unwrap());
+        let recovered_instant = database_recovered.sequencer().now(Relaxed);
+
+        assert_eq!(instant, recovered_instant);
+        drop(database_recovered);
+
+        assert!(remove_dir_all(path).await.is_ok());
+    }
 }

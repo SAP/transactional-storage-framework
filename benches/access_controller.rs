@@ -27,7 +27,7 @@ async fn create_check(size: u64, iters: u64) -> Duration {
     for _ in 0..iters {
         for o in 0..size {
             assert!(access_controller
-                .create(&O(o), &mut journal, None)
+                .create(o, &mut journal, None)
                 .await
                 .is_ok());
         }

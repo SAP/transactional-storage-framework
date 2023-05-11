@@ -191,7 +191,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log_buffer.offset = if let Some(head) = unsafe { head_ptr.as_ref() } {
                 // The offset of the last previously pushed log buffer is the starting offset
                 // of the supplied log buffer.
-                head.offset + u64::from(head.bytes_written)
+                head.offset + head.len() as u64
             } else {
                 // It is the first lob buffer.
                 0
@@ -363,6 +363,18 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             };
             current_log.replace(new_log);
         }
+
+        if let Some(log) = current_log {
+            let mut current_log_buffer = log_buffer.take().map_or_else(Box::default, |b| b);
+            if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                current_log_buffer.set_buffer_position(current_log_buffer.pos() + bytes_written);
+                log_buffer.replace(current_log_buffer);
+            } else {
+                // The log buffer is full, therefore flush it.
+                self.flush(current_log_buffer, None).forget();
+            }
+        }
+
         Ok(log_buffer)
     }
 
@@ -438,6 +450,18 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             };
             current_log.replace(new_log);
         }
+
+        if let Some(log) = current_log {
+            let mut current_log_buffer = log_buffer.take().map_or_else(Box::default, |b| b);
+            if let Some(bytes_written) = log.write(current_log_buffer.buffer_mut()) {
+                current_log_buffer.set_buffer_position(current_log_buffer.pos() + bytes_written);
+                log_buffer.replace(current_log_buffer);
+            } else {
+                // The log buffer is full, therefore flush it.
+                self.flush(current_log_buffer, None).forget();
+            }
+        }
+
         Ok(log_buffer)
     }
 
@@ -573,6 +597,15 @@ impl FileLogBuffer {
     /// Returns the current remaining buffer size.
     fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer[self.bytes_written as usize..]
+    }
+
+    /// Returns the total length of the log record size.
+    fn len(&self) -> usize {
+        let mut len = self.pos();
+        if self.submit_instant.is_some() || self.discarded {
+            len += 8;
+        }
+        len
     }
 
     /// Returns the current buffer starting position.

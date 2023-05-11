@@ -401,13 +401,13 @@ impl<S: Sequencer> AccessController<S> {
     /// };
     /// ```
     #[inline]
-    pub async fn create<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn create<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Created(Owner::from(journal))));
@@ -694,13 +694,13 @@ impl<S: Sequencer> AccessController<S> {
     /// };
     /// ```
     #[inline]
-    pub async fn delete<O: ToObjectID, P: PersistenceLayer<S>>(
+    pub async fn delete<P: PersistenceLayer<S>>(
         &self,
-        object: &O,
+        object_id: u64,
         journal: &mut Journal<'_, '_, S, P>,
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
-        let mut entry = match self.table.entry_async(object.to_object_id()).await {
+        let mut entry = match self.table.entry_async(object_id).await {
             MapEntry::Occupied(entry) => entry,
             MapEntry::Vacant(entry) => {
                 entry.insert_entry(ObjectState::Owned(Ownership::Deleted(Owner::from(journal))));
@@ -2312,10 +2312,10 @@ mod tests {
         deadline: Option<Instant>,
     ) -> Result<bool, Error> {
         match access_action {
-            AccessAction::Create => access_controller.create(&0, journal, deadline).await,
+            AccessAction::Create => access_controller.create(0, journal, deadline).await,
             AccessAction::Share => access_controller.share(&0, journal, deadline).await,
             AccessAction::Lock => access_controller.lock(&0, journal, deadline).await,
-            AccessAction::Delete => access_controller.delete(&0, journal, deadline).await,
+            AccessAction::Delete => access_controller.delete(0, journal, deadline).await,
         }
     }
 
@@ -2997,7 +2997,7 @@ mod tests {
                 let mut journal = transaction.journal();
                 match database_clone
                     .access_controller()
-                    .create(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .create(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                     .await
                 {
                     Ok(result) => {
@@ -3033,7 +3033,7 @@ mod tests {
                 let mut journal = transaction.journal();
                 match database_clone
                     .access_controller()
-                    .delete(&0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
+                    .delete(0, &mut journal, Some(Instant::now() + TIMEOUT_UNEXPECTED))
                     .await
                 {
                     Ok(result) => {
