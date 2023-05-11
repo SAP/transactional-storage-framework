@@ -653,22 +653,19 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     #[allow(dead_code)]
     pub(super) fn submit_journal_anchor(&mut self, id: u64, transaction_instant: u32) {
         debug_assert_ne!(transaction_instant, 0);
-        match self.journal_anchor_map.entry(id) {
-            hash_map::Entry::Occupied(o) => {
-                let journal_anchor = o.remove();
-                journal_anchor.set_submit_instant(transaction_instant);
-                if transaction_instant == u32::MAX {
-                    self.submitted_unbounded_journal_anchors
-                        .push(journal_anchor);
-                } else {
-                    let result = self
-                        .submitted_journal_anchors
-                        .insert(transaction_instant, journal_anchor);
-                    debug_assert!(result.is_none());
-                }
+        if let hash_map::Entry::Occupied(o) = self.journal_anchor_map.entry(id) {
+            let journal_anchor = o.remove();
+            journal_anchor.set_submit_instant(transaction_instant);
+            if transaction_instant == u32::MAX {
+                self.submitted_unbounded_journal_anchors
+                    .push(journal_anchor);
+            } else {
+                let result = self
+                    .submitted_journal_anchors
+                    .insert(transaction_instant, journal_anchor);
+                debug_assert!(result.is_none());
             }
-            hash_map::Entry::Vacant(_) => return,
-        };
+        }
     }
 
     /// Discards a [`JournalAnchor`].
@@ -683,7 +680,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     pub(crate) fn rewind(&mut self, instant: Option<NonZeroU32>) {
         debug_assert!(self.journal_anchor_map.is_empty());
 
-        let rewind_to = instant.map_or(0, |i| i.get());
+        let rewind_to = instant.map_or(0, NonZeroU32::get);
         if rewind_to == u32::MAX {
             return;
         }
@@ -696,7 +693,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
 
         // Roll back all the affected journals.
         while let Some(o) = self.submitted_journal_anchors.last_entry() {
-            if o.get().submit_instant().map_or(0, |i| i.get()) <= rewind_to {
+            if o.get().submit_instant().map_or(0, NonZeroU32::get) <= rewind_to {
                 break;
             }
             o.remove().rollback(self.database.task_processor());
