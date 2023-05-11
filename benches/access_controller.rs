@@ -4,18 +4,11 @@
 
 use criterion::async_executor::FuturesExecutor;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use sap_tsf::{Database, ToObjectID};
+use sap_tsf::Database;
 use std::fs::remove_dir_all;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-struct O(u64);
-impl ToObjectID for O {
-    fn to_object_id(&self) -> u64 {
-        self.0
-    }
-}
 
 async fn create_check(size: u64, iters: u64) -> Duration {
     let path = Path::new("bench_access_controller_create");
