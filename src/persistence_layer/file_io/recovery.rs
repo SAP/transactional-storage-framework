@@ -350,8 +350,49 @@ mod tests {
 
         let database_recovered = Arc::new(Database::with_path(path).await.unwrap());
         let recovered_instant = database_recovered.sequencer().now(Relaxed);
-
         assert_eq!(instant, recovered_instant);
+
+        let snapshot = database_recovered.snapshot();
+        for o in 0..16 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(true)
+            );
+        }
+        for o in 16..64 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(false)
+            );
+        }
+        for o in 64..96 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(false)
+            );
+        }
+        for o in 96..128 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(true)
+            );
+        }
+
+        // TODO: check why it is not automatically dropped here.
+        drop(snapshot);
+
         drop(database_recovered);
 
         assert!(remove_dir_all(path).await.is_ok());

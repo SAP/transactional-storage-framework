@@ -287,7 +287,7 @@ mod test {
         assert!(combined_snapshot.transaction_snapshot().is_some());
         assert!(combined_snapshot.journal_snapshot().is_some());
 
-        // TODO: check why it is not dropped here.
+        // TODO: check why it is not automatically dropped here.
         drop(combined_snapshot);
 
         let transaction_snapshot = transaction.snapshot();
