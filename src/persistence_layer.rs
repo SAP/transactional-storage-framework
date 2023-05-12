@@ -83,8 +83,9 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 
     /// Writes the fact that the supplied database objects have been created.
     ///
-    /// Returns a log buffer if the last log buffer used in the method is not full. Full buffers
-    /// used in the method are automatically submitted to the persistence layer.
+    /// Full buffers used in the method are automatically submitted to the persistence layer, and a
+    /// new log buffer is allocated, therefore the supplied log buffer and the returned one may
+    /// differ.
     ///
     /// # Errors
     ///
@@ -95,12 +96,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
+    ) -> Result<Box<Self::LogBuffer>, Error>;
 
     /// Writes the fact that the supplied database objects have been deleted.
     ///
-    /// Returns a log buffer if the last log buffer used in the method is not full. Full buffers
-    /// used in the method are automatically submitted to the persistence layer.
+    /// Full buffers used in the method are automatically submitted to the persistence layer, and a
+    /// new log buffer is allocated, therefore the supplied log buffer and the returned one may
+    /// differ.
     ///
     /// # Errors
     ///
@@ -111,7 +113,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Option<Box<Self::LogBuffer>>, Error>;
+    ) -> Result<Box<Self::LogBuffer>, Error>;
 
     /// Submits the content of the log buffer.
     ///

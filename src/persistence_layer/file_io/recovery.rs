@@ -314,13 +314,36 @@ mod tests {
         let path = Path::new(DIR);
         let database = Arc::new(Database::with_path(path).await.unwrap());
 
-        for o in 0..32 {
-            let transaction = database.transaction();
-            let mut journal = transaction.journal();
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        for o in 0..16 {
             journal.create(&[o], None).await.unwrap();
-            assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
-            assert!(transaction.commit().await.is_ok());
         }
+        assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
+        let mut journal = transaction.journal();
+        for o in 16..32 {
+            journal.delete(&[o], None).await.unwrap();
+        }
+        assert_eq!(Some(journal.submit()), NonZeroU32::new(2));
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        journal
+            .delete((32..64).collect::<Vec<u64>>().as_slice(), None)
+            .await
+            .unwrap();
+        assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
+        assert!(transaction.commit().await.is_ok());
+
+        let transaction = database.transaction();
+        let mut journal = transaction.journal();
+        journal
+            .create((64..96).collect::<Vec<u64>>().as_slice(), None)
+            .await
+            .unwrap();
+        drop(journal);
+        transaction.rollback();
 
         let instant = database.sequencer().now(Relaxed);
         drop(database);

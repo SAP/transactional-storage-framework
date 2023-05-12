@@ -27,7 +27,7 @@ jobs:
     - name: Spell-check
       run: cargo spellcheck
     - name: Format
-      run: cargo fmt --all
+      run: cargo fmt --all --check
     - name: Lint
       run: cargo clippy --all
     - name: Debug

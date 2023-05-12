@@ -13,7 +13,7 @@
 //! SAP Transactional Storage Framework
 
 mod access_controller;
-pub use access_controller::{AccessController};
+pub use access_controller::AccessController;
 
 mod container;
 pub use container::Container;
