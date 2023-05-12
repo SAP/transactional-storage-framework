@@ -259,7 +259,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
             self.id(),
             object_ids,
         )?;
-        self.log_buffer = log_buffer;
+        self.log_buffer.replace(log_buffer);
         Ok(())
     }
 
@@ -288,7 +288,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
             self.id(),
             object_ids,
         )?;
-        self.log_buffer = log_buffer;
+        self.log_buffer.replace(log_buffer);
         Ok(())
     }
 

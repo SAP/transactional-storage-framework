@@ -651,8 +651,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
     /// Submits a [`JournalAnchor`].
     pub(super) fn submit_journal_anchor(&mut self, id: u64, transaction_instant: u32) {
         debug_assert_ne!(transaction_instant, 0);
-        if let hash_map::Entry::Occupied(o) = self.journal_anchor_map.entry(id) {
-            let journal_anchor = o.remove();
+        if let Some(journal_anchor) = self.journal_anchor_map.remove(&id) {
             journal_anchor.set_submit_instant(transaction_instant);
             if transaction_instant == u32::MAX {
                 self.submitted_unbounded_journal_anchors
@@ -716,7 +715,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
 
     /// Commits the [`Playback`].
     pub(crate) fn commit(self, commit_instant: S::Instant) {
-        debug_assert!(self.journal_anchor_map.is_empty());
+        debug_assert!(
+            self.journal_anchor_map.is_empty(),
+            "{:?}",
+            self.journal_anchor_map
+        );
         debug_assert_ne!(commit_instant, S::Instant::default());
         debug_assert!(
             self.anchor.state.load(Relaxed) == State::Active.into()
