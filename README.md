@@ -107,13 +107,9 @@ async {
 `AccessController` maps a database object onto the current state of it; using the information, `AccessController` can tell the transaction if it can read or modify the database object. In other words, `AccessController` controls locking and versioning of database objects.
 
 ```rust
-
 use sap_tsf::Database;
 use std::num::NonZeroU32;
 use std::path::Path;
-
-// `O` represents a database object type.
-struct O(u64);
 
 async {
     let database = Database::with_path(Path::new("example")).await.unwrap();

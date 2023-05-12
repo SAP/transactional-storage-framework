@@ -282,7 +282,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
                 .await?;
         }
         let log_buffer = self.log_buffer.take().map_or_else(Box::default, |b| b);
-        let log_buffer = self.transaction.database().persistence_layer().create(
+        let log_buffer = self.transaction.database().persistence_layer().delete(
             log_buffer,
             self.transaction.id(),
             self.id(),

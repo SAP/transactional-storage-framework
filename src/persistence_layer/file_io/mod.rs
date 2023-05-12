@@ -324,7 +324,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                     LogRecord::JournalCreatedObjectRange(_, _, start_id, interval, num_objects) => {
                         if let Some(diff) = id.checked_sub(start_id) {
                             if num_objects != u32::MAX
-                                && diff == u64::from(interval) * u64::from(num_objects + 1)
+                                && diff == u64::from(interval) * u64::from(num_objects)
                             {
                                 Some(LogRecord::JournalCreatedObjectRange(
                                     transaction_id,
@@ -344,12 +344,15 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 };
                 new_log.map_or_else(
                     || {
-                        if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
-                            log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
-                        } else {
-                            // The log buffer is full, therefore flush it.
-                            self.flush(take(&mut log_buffer), None).forget();
-                        }
+                        let bytes_written =
+                            if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
+                                bytes_written
+                            } else {
+                                // The log buffer is full, therefore flush it.
+                                self.flush(take(&mut log_buffer), None).forget();
+                                log.write(log_buffer.buffer_mut()).unwrap()
+                            };
+                        log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
                         LogRecord::JournalCreatedObjectSingle(transaction_id, journal_id, *id)
                     },
                     |l| l,
@@ -361,12 +364,14 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         }
 
         if let Some(log) = current_log {
-            if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
-                log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
+            let bytes_written = if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
+                bytes_written
             } else {
                 // The log buffer is full, therefore flush it.
                 self.flush(take(&mut log_buffer), None).forget();
-            }
+                log.write(log_buffer.buffer_mut()).unwrap()
+            };
+            log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
         }
 
         Ok(log_buffer)
@@ -404,7 +409,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                     LogRecord::JournalDeletedObjectRange(_, _, start_id, interval, num_objects) => {
                         if let Some(diff) = id.checked_sub(start_id) {
                             if num_objects != u32::MAX
-                                && diff == u64::from(interval) * u64::from(num_objects + 1)
+                                && diff == u64::from(interval) * u64::from(num_objects)
                             {
                                 Some(LogRecord::JournalDeletedObjectRange(
                                     transaction_id,
@@ -424,12 +429,15 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 };
                 new_log.map_or_else(
                     || {
-                        if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
-                            log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
-                        } else {
-                            // The log buffer is full, therefore flush it.
-                            self.flush(take(&mut log_buffer), None).forget();
-                        }
+                        let bytes_written =
+                            if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
+                                bytes_written
+                            } else {
+                                // The log buffer is full, therefore flush it.
+                                self.flush(take(&mut log_buffer), None).forget();
+                                log.write(log_buffer.buffer_mut()).unwrap()
+                            };
+                        log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
                         LogRecord::JournalDeletedObjectSingle(transaction_id, journal_id, *id)
                     },
                     |l| l,
@@ -441,12 +449,14 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         }
 
         if let Some(log) = current_log {
-            if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
-                log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
+            let bytes_written = if let Some(bytes_written) = log.write(log_buffer.buffer_mut()) {
+                bytes_written
             } else {
                 // The log buffer is full, therefore flush it.
                 self.flush(take(&mut log_buffer), None).forget();
-            }
+                log.write(log_buffer.buffer_mut()).unwrap()
+            };
+            log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
         }
 
         Ok(log_buffer)
