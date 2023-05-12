@@ -371,6 +371,28 @@ mod tests {
                 Ok(false)
             );
         }
+        for o in 64..96 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(false)
+            );
+        }
+        for o in 96..128 {
+            assert_eq!(
+                database_recovered
+                    .access_controller()
+                    .read(o, &snapshot, None)
+                    .await,
+                Ok(true)
+            );
+        }
+
+        // TODO: check why it is not automatically dropped here.
+        drop(snapshot);
+
         drop(database_recovered);
 
         assert!(remove_dir_all(path).await.is_ok());
