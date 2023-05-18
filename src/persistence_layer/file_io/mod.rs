@@ -14,6 +14,7 @@ mod random_access_file;
 mod recovery;
 
 pub use random_access_file::RandomAccessFile;
+use scc::Bag;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
@@ -27,7 +28,7 @@ use std::marker::PhantomData;
 use std::mem::take;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -63,17 +64,14 @@ pub struct FileLogBuffer {
     /// The associated log record.
     buffer: [u8; 32],
 
-    /// Extended buffer to accommodate a single end-of-journal log record.
-    eoj_buffer: [u8; 8],
-
     /// The number of byes written to the buffer.
     bytes_written: u8,
 
-    /// Flag indicating that the end-of-journal log record buffer was used.
-    eoj_buffer_used: bool,
+    /// Extended buffer to accommodate a single end-of-journal log record.
+    submit_instant: u32,
 
-    /// The offset in the log file of the log record.
-    offset: u64,
+    /// Flag indicating that the end-of-journal log record should be generated on-the-fly.
+    eoj_logging: bool,
 
     /// The address of the next [`FileLogBuffer`].
     next: usize,
@@ -102,11 +100,11 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
     log_buffer_link: AtomicUsize,
 
-    /// The first offset in the log file that has yet to be flushed.
-    next_offset_to_flush: AtomicU64,
+    /// The count of completed log flush operations.
+    flush_count: AtomicU64,
 
-    /// Log offset values and [`Waker`] map.
-    waker_map: Mutex<BTreeMap<u64, Waker>>,
+    /// Flush count values and [`Waker`] map.
+    waker_map: Mutex<BTreeMap<u64, Bag<Waker>>>,
 }
 
 impl<S: Sequencer<Instant = u64>> FileIO<S> {
@@ -138,7 +136,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log1,
             db,
             log_buffer_link: AtomicUsize::new(0),
-            next_offset_to_flush: AtomicU64::new(0),
+            flush_count: AtomicU64::new(0),
             waker_map: Mutex::default(),
         });
         let file_io_data_clone = file_io_data.clone();
@@ -173,33 +171,20 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         Ok(RandomAccessFile::from_file(file, &metadata))
     }
 
-    /// Pushes a [`FileLogBuffer`] into the log buffer linked list, and returns the end-of-buffer
-    /// offset.
-    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) -> u64 {
+    /// Pushes a [`FileLogBuffer`] into the log buffer linked list.
+    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) {
         let mut head = log_buffer_link.load(Acquire);
         loop {
-            let head_ptr = head as *const FileLogBuffer;
-
             // SAFETY: it assumes that the caller provided a valid pointer.
             let log_buffer = unsafe { &mut (*log_buffer_ptr) };
             debug_assert_ne!(log_buffer.bytes_written, 0);
-
-            // SAFETY: the value of the pointer is properly checked.
-            log_buffer.offset = if let Some(head) = unsafe { head_ptr.as_ref() } {
-                // The offset of the last previously pushed log buffer is the starting offset
-                // of the supplied log buffer.
-                head.offset + head.len() as u64
-            } else {
-                // It is the first lob buffer.
-                0
-            };
             log_buffer.next = head;
             if let Err(actual) =
                 log_buffer_link.compare_exchange(head, log_buffer_ptr as usize, AcqRel, Acquire)
             {
                 head = actual;
             } else {
-                return log_buffer.offset + u64::from(log_buffer.bytes_written);
+                return;
             }
         }
     }
@@ -207,10 +192,10 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
     /// Flushes a log buffer.
     fn flush(&self, log_buffer: Box<FileLogBuffer>, deadline: Option<Instant>) -> AwaitIO<S, Self> {
         let file_log_buffer_ptr = Box::into_raw(log_buffer);
-        let eob_offset =
-            Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
+        Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
+        let flush_count = self.file_io_data.flush_count.load(Relaxed);
         drop(self.sender.try_send(IOTask::Flush));
-        AwaitIO::with_eob_offset(self, eob_offset).set_deadline(deadline)
+        AwaitIO::with_flush_count(self, flush_count).set_deadline(deadline)
     }
 }
 
@@ -266,7 +251,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_eob_offset(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_flush_count(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -275,7 +260,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
+        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -285,7 +270,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _xid: &[u8],
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
+        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -467,7 +452,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, FileIO<S>> {
-        debug_assert!(!log_buffer.eoj_buffer_used);
+        debug_assert!(!log_buffer.eoj_logging);
+        debug_assert_eq!(log_buffer.submit_instant, 0);
         if let Some(transaction_instant) = transaction_instant {
             if log_buffer.bytes_written == 0 {
                 // The buffer is empty, therefore it needs to write its identification information.
@@ -479,9 +465,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 let bytes_written = submit_log_record.write(&mut log_buffer.buffer).unwrap();
                 log_buffer.set_buffer_position(bytes_written);
             } else {
-                let submit_log_record = LogRecord::<S>::BufferSubmitted(transaction_instant.get());
-                submit_log_record.write(&mut log_buffer.eoj_buffer);
-                log_buffer.eoj_buffer_used = true;
+                log_buffer.submit_instant = transaction_instant.get();
+                log_buffer.eoj_logging = true;
             }
         }
         self.flush(log_buffer, deadline)
@@ -495,16 +480,15 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         journal_id: JournalID,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        debug_assert!(!log_buffer.eoj_buffer_used);
+        debug_assert!(!log_buffer.eoj_logging);
+        debug_assert_eq!(log_buffer.submit_instant, 0);
         if log_buffer.bytes_written == 0 {
             // The buffer is empty, therefore it needs to write its identification information.
             let discard_log_record = LogRecord::<S>::JournalDiscarded(transaction_id, journal_id);
             let bytes_written = discard_log_record.write(&mut log_buffer.buffer).unwrap();
             log_buffer.set_buffer_position(bytes_written);
         } else {
-            let discard_log_record = LogRecord::<S>::BufferDiscarded;
-            discard_log_record.write(&mut log_buffer.eoj_buffer);
-            log_buffer.eoj_buffer_used = true;
+            log_buffer.eoj_logging = true;
         }
         self.flush(log_buffer, deadline)
     }
@@ -516,7 +500,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
+        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -527,7 +511,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         // TODO: implement it.
-        AwaitIO::with_eob_offset(self, 0).set_deadline(deadline)
+        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -546,14 +530,16 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<u64, Error>> {
-        if self.file_io_data.next_offset_to_flush.load(Acquire) >= offset {
+    fn check_io_completion(&self, flush_count: u64, waker: &Waker) -> Option<Result<u64, Error>> {
+        if self.file_io_data.flush_count.load(Acquire) > flush_count {
             Some(Ok(u64::default()))
         } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
             // Push the `Waker` into the bag, and check the value again.
-            waker_map.insert(offset, waker.clone());
-            if self.file_io_data.next_offset_to_flush.load(Acquire) >= offset {
-                waker_map.remove(&offset);
+            waker_map
+                .entry(flush_count)
+                .or_default()
+                .push(waker.clone());
+            if self.file_io_data.flush_count.load(Acquire) > flush_count {
                 Some(Ok(u64::default()))
             } else {
                 None
@@ -598,15 +584,6 @@ impl FileLogBuffer {
         self.bytes_written as usize
     }
 
-    /// Returns the total length of all the log record in it.
-    const fn len(&self) -> usize {
-        if self.eoj_buffer_used {
-            self.pos() + self.eoj_buffer.len()
-        } else {
-            self.pos()
-        }
-    }
-
     /// Returns the current remaining buffer size.
     fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer[self.bytes_written as usize..]
@@ -621,12 +598,9 @@ impl FileLogBuffer {
         }
     }
 
-    /// Takes the next [`FileLogBuffer`] if the address if not `nil` or `0`.
-    fn take_next_if_not(&mut self, nil: usize) -> Option<Box<FileLogBuffer>> {
+    /// Takes the next [`FileLogBuffer`].
+    fn take_next(&mut self) -> Option<Box<FileLogBuffer>> {
         if self.next == 0 {
-            return None;
-        } else if self.next == nil {
-            self.next = 0;
             return None;
         }
         let log_buffer_ptr = self.next as *mut FileLogBuffer;
@@ -641,8 +615,11 @@ impl FileLogBuffer {
 mod test {
     use super::*;
     use crate::MonotonicU64;
+    use static_assertions::assert_eq_size;
     use std::time::Duration;
     use tokio::fs::remove_dir_all;
+
+    assert_eq_size!(FileLogBuffer, [u64; 6]);
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
 
