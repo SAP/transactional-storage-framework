@@ -4,6 +4,7 @@
 
 //! IO task processor.
 
+use super::db_header::{DatabaseHeader, LogFile};
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
@@ -43,7 +44,8 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let _: &RandomAccessFile = &file_io_data.log1;
-    let _: &RandomAccessFile = &file_io_data.db;
+    let header = DatabaseHeader::from_file(&file_io_data.db);
+    assert_eq!(header.log_file, LogFile::Zero);
 
     let mut log0_offset = 0;
 

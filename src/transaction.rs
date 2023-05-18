@@ -882,6 +882,7 @@ mod tests {
             );
         }
         assert!(transaction.now().is_none());
+        drop(transaction);
         drop(database);
         assert!(remove_dir_all(path).await.is_ok());
     }
