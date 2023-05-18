@@ -66,7 +66,6 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                     .write(&log_buffer.buffer[0..log_buffer.pos()], log0_offset)
                     .is_err()
                 {
-                    // Retry after yielding.
                     yield_now();
                     continue;
                 }
@@ -80,7 +79,6 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                         .write(&log_buffer.eoj_buffer, log0_offset)
                         .is_err()
                     {
-                        // Retry after yielding.
                         yield_now();
                     }
                     log0_offset += log_buffer.eoj_buffer.len() as u64;
