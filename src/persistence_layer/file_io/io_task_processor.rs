@@ -4,6 +4,7 @@
 
 //! IO task processor.
 
+use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
 use std::mem::swap;
@@ -70,15 +71,20 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 }
                 log0_offset += log_buffer.pos() as u64;
 
-                if log_buffer.eoj_buffer_used {
-                    while file_io_data
-                        .log0
-                        .write(&log_buffer.eoj_buffer, log0_offset)
-                        .is_err()
-                    {
+                if log_buffer.eoj_logging {
+                    let mut eoj_buffer = [0_u8; 8];
+                    if log_buffer.submit_instant == 0 {
+                        let discard_log_record = LogRecord::<S>::BufferDiscarded;
+                        discard_log_record.write(&mut eoj_buffer);
+                    } else {
+                        let submit_log_record =
+                            LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
+                        submit_log_record.write(&mut eoj_buffer);
+                    }
+                    while file_io_data.log0.write(&eoj_buffer, log0_offset).is_err() {
                         yield_now();
                     }
-                    log0_offset += log_buffer.eoj_buffer.len() as u64;
+                    log0_offset += eoj_buffer.len() as u64;
                 }
 
                 if let Some(next_log_buffer) = log_buffer.take_next() {

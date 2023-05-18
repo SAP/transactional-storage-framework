@@ -178,13 +178,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
-    /// Checks if the IO operation associated with the log offset was completed.
+    /// Checks if the IO operation associated with the supplied `flush_count` has finished.
     ///
     /// If the IO operation is still in progress, the supplied [`Waker`] is kept in the
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check_io_completion(&self, flush_count: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
@@ -225,7 +225,7 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer by which the IO operation is performed.
     persistence_layer: &'p P,
 
-    /// The end-of-buffer offset in the log file.
+    /// The flush count value when the [`AwaitIO`] was created.
     flush_count: u64,
 
     /// The deadline of the IO operation.
@@ -251,9 +251,9 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
-    /// Creates an [`AwaitIO`] from the end-of-buffer offset in the log file.
+    /// Creates an [`AwaitIO`] from the current flush count.
     #[inline]
-    pub fn with_eob_offset(persistence_layer: &'p P, flush_count: u64) -> AwaitIO<'p, S, P> {
+    pub fn with_flush_count(persistence_layer: &'p P, flush_count: u64) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer,
             flush_count,
