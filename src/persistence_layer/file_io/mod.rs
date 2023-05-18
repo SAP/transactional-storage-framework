@@ -496,22 +496,35 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn rewind(
         &self,
-        _id: TransactionID,
-        _transaction_instant: Option<NonZeroU32>,
+        transaction_id: TransactionID,
+        transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
+        let mut log_buffer = Box::<Self::LogBuffer>::default();
+        let Some(new_pos) = LogRecord::<S>::TransactionRolledBack(
+            transaction_id,
+            transaction_instant.map_or(0, NonZeroU32::get))
+            .write(&mut log_buffer.buffer) else {
+            unreachable!("logic error");
+        };
+        log_buffer.set_buffer_position(new_pos);
+        self.flush(log_buffer, deadline)
     }
 
     #[inline]
     fn prepare(
         &self,
-        _id: TransactionID,
-        _prepare_instant: u64,
+        transaction_id: TransactionID,
+        prepare_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        // TODO: implement it.
-        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
+        let mut log_buffer = Box::<Self::LogBuffer>::default();
+        let Some(new_pos) = LogRecord::<S>::TransactionPrepared(transaction_id, prepare_instant)
+            .write(&mut log_buffer.buffer) else {
+            unreachable!("logic error");
+        };
+        log_buffer.set_buffer_position(new_pos);
+        self.flush(log_buffer, deadline)
     }
 
     #[inline]
@@ -522,7 +535,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         commit_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        let Some(new_pos) = LogRecord::<S>::TransactionCommitted(transaction_id, commit_instant).write(&mut log_buffer.buffer) else {
+        let Some(new_pos) = LogRecord::<S>::TransactionCommitted(transaction_id, commit_instant)
+            .write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
