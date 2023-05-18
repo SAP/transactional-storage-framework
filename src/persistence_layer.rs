@@ -226,7 +226,7 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     persistence_layer: &'p P,
 
     /// The end-of-buffer offset in the log file.
-    eob_offset: u64,
+    flush_count: u64,
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
@@ -253,10 +253,10 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
     /// Creates an [`AwaitIO`] from the end-of-buffer offset in the log file.
     #[inline]
-    pub fn with_eob_offset(persistence_layer: &'p P, eob_offset: u64) -> AwaitIO<'p, S, P> {
+    pub fn with_eob_offset(persistence_layer: &'p P, flush_count: u64) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer,
-            eob_offset,
+            flush_count,
             deadline: None,
             _phantom: PhantomData,
         }
@@ -268,7 +268,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
     pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer: self.persistence_layer,
-            eob_offset: self.eob_offset,
+            flush_count: self.flush_count,
             deadline,
             _phantom: PhantomData,
         }
@@ -288,7 +288,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(result) = self
             .persistence_layer
-            .check_io_completion(self.eob_offset, cx.waker())
+            .check_io_completion(self.flush_count, cx.waker())
         {
             Poll::Ready(result)
         } else if self
