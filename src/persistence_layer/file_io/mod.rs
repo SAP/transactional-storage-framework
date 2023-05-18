@@ -17,7 +17,7 @@ pub use random_access_file::RandomAccessFile;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
-use io_task_processor::{FlusherData, IOTask};
+use io_task_processor::IOTask;
 use log_record::LogRecord;
 use recovery::RecoveryData;
 use std::collections::BTreeMap;
@@ -103,13 +103,10 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     log_buffer_link: AtomicUsize,
 
     /// The first offset in the log file that has yet to be flushed.
-    first_offset_to_flush: AtomicU64,
+    next_offset_to_flush: AtomicU64,
 
     /// Log offset values and [`Waker`] map.
     waker_map: Mutex<BTreeMap<u64, Waker>>,
-
-    /// Flusher data.
-    flusher_data: utils::BinarySemaphore<FlusherData>,
 }
 
 impl<S: Sequencer<Instant = u64>> FileIO<S> {
@@ -141,9 +138,8 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log1,
             db,
             log_buffer_link: AtomicUsize::new(0),
-            first_offset_to_flush: AtomicU64::new(0),
+            next_offset_to_flush: AtomicU64::new(0),
             waker_map: Mutex::default(),
-            flusher_data: utils::BinarySemaphore::default(),
         });
         let file_io_data_clone = file_io_data.clone();
         let (sender, mut receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
@@ -551,12 +547,12 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
 
     #[inline]
     fn check_io_completion(&self, offset: u64, waker: &Waker) -> Option<Result<u64, Error>> {
-        if self.file_io_data.first_offset_to_flush.load(Acquire) >= offset {
+        if self.file_io_data.next_offset_to_flush.load(Acquire) >= offset {
             Some(Ok(u64::default()))
         } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
             // Push the `Waker` into the bag, and check the value again.
             waker_map.insert(offset, waker.clone());
-            if self.file_io_data.first_offset_to_flush.load(Acquire) >= offset {
+            if self.file_io_data.next_offset_to_flush.load(Acquire) >= offset {
                 waker_map.remove(&offset);
                 Some(Ok(u64::default()))
             } else {

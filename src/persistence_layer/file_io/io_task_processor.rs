@@ -6,10 +6,12 @@
 
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
+use std::mem::swap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
-use std::thread::{self, yield_now};
+use std::task::Waker;
+use std::thread::yield_now;
 use std::{ptr::addr_of_mut, sync::mpsc::Receiver};
 
 /// Types of IO related tasks.
@@ -25,16 +27,6 @@ pub(super) enum IOTask {
     Shutdown,
 }
 
-/// Data needed by the flusher of an IO task processor.
-#[derive(Debug, Default)]
-pub(super) struct FlusherData {
-    /// The flusher will shut down.
-    shutdown: bool,
-
-    /// The current offset in the log file to write.
-    write_offset: u64,
-}
-
 /// Processes IO tasks.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
@@ -42,10 +34,6 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     receiver: &mut Receiver<IOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
-    // `flusher` calls `sync_data` or `sync_all` in the background.
-    let file_io_data_clone = file_io_data.clone();
-    let flusher = thread::spawn(move || flush_sync(&file_io_data_clone));
-
     let _: &RandomAccessFile = &file_io_data.log1;
     let _: &RandomAccessFile = &file_io_data.db;
 
@@ -105,47 +93,16 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 }
             }
 
-            // Let the flusher know that data was written to files.
+            while file_io_data.log0.sync_all().is_err() {
+                yield_now();
+            }
             file_io_data
-                .flusher_data
-                .signal(|flusher_data| flusher_data.write_offset = log0_offset);
-        }
-    }
-
-    // Let the flusher know that the IO task processor is shutting down.
-    file_io_data
-        .flusher_data
-        .signal(|flusher_data| flusher_data.shutdown = true);
-
-    drop(flusher.join());
-}
-
-/// Flushes dirty pages and updates metadata of the file.
-///
-/// Synchronous calls are made in the function, therefore database workers must not invoke it.
-fn flush_sync<S: Sequencer<Instant = u64>>(file_io_data: &Arc<FileIOData<S>>) {
-    while file_io_data
-        .flusher_data
-        .try_lock()
-        .ok()
-        .map_or(true, |flusher_data| !flusher_data.shutdown)
-    {
-        let first_offset_to_flush = file_io_data.first_offset_to_flush.load(Relaxed);
-        let mut write_offset = 0;
-        file_io_data.flusher_data.wait_while(|flusher_data| {
-            write_offset = flusher_data.write_offset;
-            !flusher_data.shutdown && write_offset <= first_offset_to_flush
-        });
-        if write_offset > first_offset_to_flush && file_io_data.log0.sync_all().is_ok() {
-            file_io_data
-                .first_offset_to_flush
-                .store(write_offset, Release);
+                .next_offset_to_flush
+                .store(log0_offset, Release);
             if let Ok(mut waker_map) = file_io_data.waker_map.lock() {
-                for offset in first_offset_to_flush + 1..=write_offset {
-                    if let Some(waker) = waker_map.remove(&offset) {
-                        waker.wake();
-                    }
-                }
+                let mut new_waker_map = waker_map.split_off(&(log0_offset + 1));
+                swap(&mut *waker_map, &mut new_waker_map);
+                new_waker_map.into_values().for_each(Waker::wake);
             }
         }
     }
