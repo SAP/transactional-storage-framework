@@ -8,6 +8,7 @@
 //! The [`FileIO`] persistence layer only supports [`Sequencer`] types with the logical instant
 //! type fixed to `u64`.
 
+mod db_header;
 mod io_task_processor;
 mod log_record;
 mod random_access_file;
@@ -101,6 +102,8 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     log_buffer_link: AtomicUsize,
 
     /// The count of completed log flush operations.
+    ///
+    /// This assumes that `u64::MAX` will never be reached.
     flush_count: AtomicU64,
 
     /// Flush count values and [`Waker`] map.
