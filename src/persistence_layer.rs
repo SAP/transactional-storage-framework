@@ -184,7 +184,11 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// [`PersistenceLayer`] and notifies it when the operation is completed.
     ///
     /// It returns the latest known logical instant value of the database.
-    fn check_io_completion(&self, flush_count: u64, waker: &Waker) -> Option<Result<S::Instant, Error>>;
+    fn check_io_completion(
+        &self,
+        flush_count: u64,
+        waker: &Waker,
+    ) -> Option<Result<S::Instant, Error>>;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
