@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! IO task processor.
+//! Log IO task processor.
 
 use super::db_header::LogFile;
 use super::log_record::LogRecord;
@@ -16,7 +16,7 @@ use std::thread::yield_now;
 
 /// Types of IO related tasks.
 #[derive(Debug)]
-pub(super) enum IOTask {
+pub(super) enum LogIOTask {
     /// The [`FileIO`](super::FileIO) needs to flush log buffers.
     Flush,
 
@@ -35,11 +35,11 @@ pub(super) enum IOTask {
     Shutdown,
 }
 
-/// Processes IO tasks.
+/// Processes log IO tasks.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
 pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
-    receiver: &mut Receiver<IOTask>,
+    receiver: &mut Receiver<LogIOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let _: &RandomAccessFile = &file_io_data.db;
@@ -52,12 +52,12 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
 
     while let Ok(task) = receiver.recv() {
         match task {
-            IOTask::Flush => (),
-            IOTask::Recover => {
+            LogIOTask::Flush => (),
+            LogIOTask::Recover => {
                 recover_database(file_io_data);
                 log_offset = log_file.len(Relaxed);
             }
-            IOTask::Switch => {
+            LogIOTask::Switch => {
                 log_file = if file_io_data.db_header.log_file == LogFile::Zero {
                     &file_io_data.log0
                 } else {
@@ -65,7 +65,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 };
                 log_offset = log_file.len(Acquire);
             }
-            IOTask::Truncate => loop {
+            LogIOTask::Truncate => loop {
                 let result = if file_io_data.db_header.log_file == LogFile::Zero {
                     file_io_data.log1.set_len(0)
                 } else {
@@ -76,7 +76,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 }
                 yield_now();
             },
-            IOTask::Shutdown => {
+            LogIOTask::Shutdown => {
                 break;
             }
         }
