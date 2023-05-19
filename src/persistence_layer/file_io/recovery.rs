@@ -393,7 +393,21 @@ mod tests {
         // TODO: check why it is not automatically dropped here.
         drop(snapshot);
 
+        let transaction = database_recovered.transaction();
+        let mut journal = transaction.journal();
+        journal
+            .create((96..129).collect::<Vec<u64>>().as_slice(), None)
+            .await
+            .unwrap();
+        assert_eq!(Some(journal.submit()), NonZeroU32::new(1));
+        assert!(transaction.commit().await.is_ok());
+
+        let instant = database_recovered.sequencer().now(Relaxed);
         drop(database_recovered);
+
+        let database_recovered_again = Arc::new(Database::with_path(path).await.unwrap());
+        let recovered_instant = database_recovered_again.sequencer().now(Relaxed);
+        assert_eq!(instant, recovered_instant);
 
         assert!(remove_dir_all(path).await.is_ok());
     }
