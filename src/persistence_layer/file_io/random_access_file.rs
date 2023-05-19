@@ -39,6 +39,15 @@ mod unix {
             self.len.load(order)
         }
 
+        /// Truncates or extends the underlying file.
+        #[inline]
+        pub fn set_len(&self, len: u64) -> Result<()> {
+            self.file.set_len(len)?;
+            self.sync_all()?;
+            self.len.store(len, Release);
+            Ok(())
+        }
+
         /// Synchronizes the data and metadata with the device.
         #[inline]
         pub fn sync_all(&self) -> Result<()> {
@@ -109,6 +118,15 @@ mod windows {
         #[inline]
         pub fn len(&self, order: Ordering) -> u64 {
             self.len.load(order)
+        }
+
+        /// Truncates or extends the underlying file.
+        #[inline]
+        pub fn set_len(&self, len: u64) -> Result<()> {
+            self.file.set_len(len)?;
+            self.sync_all()?;
+            self.len.store(len, Release);
+            Ok(())
         }
 
         /// Synchronizes the data and metadata with the device.

@@ -9,7 +9,7 @@ use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::thread::yield_now;
@@ -43,21 +43,39 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let _: &RandomAccessFile = &file_io_data.db;
-    let log_file: &RandomAccessFile = if file_io_data.db_header.log_file == LogFile::Zero {
+    let mut log_file: &RandomAccessFile = if file_io_data.db_header.log_file == LogFile::Zero {
         &file_io_data.log0
     } else {
         &file_io_data.log1
     };
-    let mut log_offset = 0;
+    let mut log_offset = log_file.len(Acquire);
 
     while let Ok(task) = receiver.recv() {
         match task {
             IOTask::Flush => (),
             IOTask::Recover => {
                 recover_database(file_io_data);
+                log_offset = log_file.len(Relaxed);
             }
-            IOTask::Switch => todo!(),
-            IOTask::Truncate => todo!(),
+            IOTask::Switch => {
+                log_file = if file_io_data.db_header.log_file == LogFile::Zero {
+                    &file_io_data.log0
+                } else {
+                    &file_io_data.log1
+                };
+                log_offset = log_file.len(Acquire);
+            }
+            IOTask::Truncate => loop {
+                let result = if file_io_data.db_header.log_file == LogFile::Zero {
+                    file_io_data.log1.set_len(0)
+                } else {
+                    file_io_data.log0.set_len(0)
+                };
+                if result.is_ok() {
+                    break;
+                }
+                yield_now();
+            },
             IOTask::Shutdown => {
                 break;
             }
@@ -100,9 +118,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 yield_now();
             }
             file_io_data.flush_count.fetch_add(1, Release);
-            while let Some(waker) = file_io_data.waker_bag.pop() {
-                waker.wake();
-            }
+            file_io_data.waker_bag.pop_all((), |_, w| w.wake());
         }
     }
 }
