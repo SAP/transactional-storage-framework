@@ -15,14 +15,14 @@ mod random_access_file;
 mod recovery;
 
 pub use random_access_file::RandomAccessFile;
-use scc::Bag;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
+use db_header::DatabaseHeader;
 use io_task_processor::IOTask;
 use log_record::LogRecord;
 use recovery::RecoveryData;
-use std::collections::BTreeMap;
+use scc::Bag;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
@@ -96,18 +96,19 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// The database file.
     db: RandomAccessFile,
 
+    /// The database header.
+    db_header: DatabaseHeader,
+
     /// [`FileLogBuffer`] link.
     ///
     /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
     log_buffer_link: AtomicUsize,
 
-    /// The count of completed log flush operations.
-    ///
-    /// This assumes that `u64::MAX` will never be reached.
+    /// Increments every time a log file is flushed.
     flush_count: AtomicU64,
 
-    /// Flush count values and [`Waker`] map.
-    waker_map: Mutex<BTreeMap<u64, Bag<Waker>>>,
+    /// [`Waker`] bag.
+    waker_bag: Bag<Waker>,
 }
 
 impl<S: Sequencer<Instant = u64>> FileIO<S> {
@@ -132,15 +133,17 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let log0 = Self::open_file(&mut path_buffer, "0.log")?;
         let log1 = Self::open_file(&mut path_buffer, "1.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
+        let db_header = DatabaseHeader::from_file(&db)?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
             recovery_cancelled: AtomicBool::new(false),
             log0,
             log1,
             db,
+            db_header,
             log_buffer_link: AtomicUsize::new(0),
             flush_count: AtomicU64::new(0),
-            waker_map: Mutex::default(),
+            waker_bag: Bag::default(),
         });
         let file_io_data_clone = file_io_data.clone();
         let (sender, mut receiver) = mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
@@ -550,20 +553,14 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     fn check_io_completion(&self, flush_count: u64, waker: &Waker) -> Option<Result<u64, Error>> {
         if self.file_io_data.flush_count.load(Acquire) > flush_count {
             Some(Ok(u64::default()))
-        } else if let Ok(mut waker_map) = self.file_io_data.waker_map.try_lock() {
+        } else {
             // Push the `Waker` into the bag, and check the value again.
-            waker_map
-                .entry(flush_count)
-                .or_default()
-                .push(waker.clone());
+            self.file_io_data.waker_bag.push(waker.clone());
             if self.file_io_data.flush_count.load(Acquire) > flush_count {
                 Some(Ok(u64::default()))
             } else {
                 None
             }
-        } else {
-            waker.wake_by_ref();
-            None
         }
     }
 

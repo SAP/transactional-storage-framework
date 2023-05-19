@@ -5,6 +5,7 @@
 //! The header of the database file.
 
 use super::RandomAccessFile;
+use crate::Error;
 use std::sync::atomic::Ordering::Relaxed;
 
 /// The header of the database file.
@@ -26,20 +27,20 @@ pub enum LogFile {
 
 impl DatabaseHeader {
     /// Reads the header from the database file.
-    pub fn from_file(db: &RandomAccessFile) -> Self {
+    pub fn from_file(db: &RandomAccessFile) -> Result<Self, Error> {
         let mut buffer = [0_u8; 8];
         if db.len(Relaxed) == 0 {
-            Self {
+            Ok(Self {
                 log_file: LogFile::default(),
-            }
+            })
         } else {
-            db.read(&mut buffer, 0).unwrap();
+            db.read(&mut buffer, 0).map_err(|e| Error::IO(e.kind()))?;
             let log_file = if buffer[0] == 0 {
                 LogFile::Zero
             } else {
                 LogFile::One
             };
-            Self { log_file }
+            Ok(Self { log_file })
         }
     }
 }

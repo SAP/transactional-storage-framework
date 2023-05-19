@@ -4,11 +4,10 @@
 
 //! IO task processor.
 
-use super::db_header::{DatabaseHeader, LogFile};
+use super::db_header::LogFile;
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
-use std::mem::swap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::mpsc::Receiver;
@@ -43,11 +42,13 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     receiver: &mut Receiver<IOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
-    let _: &RandomAccessFile = &file_io_data.log1;
-    let header = DatabaseHeader::from_file(&file_io_data.db);
-    assert_eq!(header.log_file, LogFile::Zero);
-
-    let mut log0_offset = 0;
+    let _: &RandomAccessFile = &file_io_data.db;
+    let log_file: &RandomAccessFile = if file_io_data.db_header.log_file == LogFile::Zero {
+        &file_io_data.log0
+    } else {
+        &file_io_data.log1
+    };
+    let mut log_offset = 0;
 
     while let Ok(task) = receiver.recv() {
         match task {
@@ -63,15 +64,14 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
         }
         if let Some(mut log_buffer) = take_log_buffer_link(&file_io_data.log_buffer_link) {
             loop {
-                if file_io_data
-                    .log0
-                    .write(&log_buffer.buffer[0..log_buffer.pos()], log0_offset)
+                if log_file
+                    .write(&log_buffer.buffer[0..log_buffer.pos()], log_offset)
                     .is_err()
                 {
                     yield_now();
                     continue;
                 }
-                log0_offset += log_buffer.pos() as u64;
+                log_offset += log_buffer.pos() as u64;
 
                 if log_buffer.eoj_logging {
                     let mut eoj_buffer = [0_u8; 8];
@@ -83,10 +83,10 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                             LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
                         submit_log_record.write(&mut eoj_buffer);
                     }
-                    while file_io_data.log0.write(&eoj_buffer, log0_offset).is_err() {
+                    while log_file.write(&eoj_buffer, log_offset).is_err() {
                         yield_now();
                     }
-                    log0_offset += eoj_buffer.len() as u64;
+                    log_offset += eoj_buffer.len() as u64;
                 }
 
                 if let Some(next_log_buffer) = log_buffer.take_next() {
@@ -96,18 +96,12 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 }
             }
 
-            while file_io_data.log0.sync_all().is_err() {
+            while log_file.sync_all().is_err() {
                 yield_now();
             }
-            let flush_count = file_io_data.flush_count.fetch_add(1, Release) + 1;
-            if let Ok(mut waker_map) = file_io_data.waker_map.lock() {
-                let mut new_waker_map = waker_map.split_off(&flush_count);
-                swap(&mut *waker_map, &mut new_waker_map);
-                for b in new_waker_map.into_values() {
-                    while let Some(w) = b.pop() {
-                        w.wake();
-                    }
-                }
+            file_io_data.flush_count.fetch_add(1, Release);
+            while let Some(waker) = file_io_data.waker_bag.pop() {
+                waker.wake();
             }
         }
     }
