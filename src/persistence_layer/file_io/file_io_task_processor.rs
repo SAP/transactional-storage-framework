@@ -13,9 +13,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::thread::yield_now;
 
-/// Types of IO related tasks.
+/// Types of file IO related tasks.
 #[derive(Debug)]
-pub(super) enum LogIOTask {
+pub enum FileIOTask {
     /// The [`FileIO`](super::FileIO) needs to flush log buffers.
     Flush,
 
@@ -26,23 +26,23 @@ pub(super) enum LogIOTask {
     Shutdown,
 }
 
-/// Processes log IO tasks.
+/// Processes file IO tasks.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
 pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
-    receiver: &mut Receiver<LogIOTask>,
+    receiver: &mut Receiver<FileIOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let mut log_offset = file_io_data.log.len(Acquire);
 
     while let Ok(task) = receiver.recv() {
         match task {
-            LogIOTask::Flush => (),
-            LogIOTask::Recover => {
+            FileIOTask::Flush => (),
+            FileIOTask::Recover => {
                 recover_database(file_io_data);
                 log_offset = file_io_data.log.len(Relaxed);
             }
-            LogIOTask::Shutdown => {
+            FileIOTask::Shutdown => {
                 break;
             }
         }
