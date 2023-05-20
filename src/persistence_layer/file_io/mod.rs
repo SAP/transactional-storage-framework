@@ -41,7 +41,7 @@ use self::page_manager::PageManager;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
-/// [`FileIO`] spawns two threads for file operations and synchronization with the device. Any
+/// [`FileIO`] spawns a thread for file operations and synchronization with the device. Any
 /// [`Sequencer`] implementations generating `u64` clock values can be used for [`FileIO`].
 ///
 /// [`FileIO`] spawns two additional threads that are dedicated to file IO operations.
