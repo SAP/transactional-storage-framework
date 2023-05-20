@@ -4,7 +4,6 @@
 
 //! Log IO task processor.
 
-use super::db_header::LogFile;
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
@@ -23,14 +22,6 @@ pub(super) enum LogIOTask {
     /// The [`FileIO`](super::FileIO) needs to recover the database.
     Recover,
 
-    /// The [`FileIO`](super::FileIO) needs to switch log files.
-    #[allow(dead_code)]
-    Switch,
-
-    /// The [`FileIO`](super::FileIO) needs to truncate the old log file.
-    #[allow(dead_code)]
-    Truncate,
-
     /// The [`FileIO`](super::FileIO) is shutting down.
     Shutdown,
 }
@@ -43,46 +34,23 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let _: &RandomAccessFile = &file_io_data.db;
-    let mut log_file: &RandomAccessFile = if file_io_data.db_header.log_file == LogFile::Zero {
-        &file_io_data.log0
-    } else {
-        &file_io_data.log1
-    };
-    let mut log_offset = log_file.len(Acquire);
+    let mut log_offset = file_io_data.log.len(Acquire);
 
     while let Ok(task) = receiver.recv() {
         match task {
             LogIOTask::Flush => (),
             LogIOTask::Recover => {
                 recover_database(file_io_data);
-                log_offset = log_file.len(Relaxed);
+                log_offset = file_io_data.log.len(Relaxed);
             }
-            LogIOTask::Switch => {
-                log_file = if file_io_data.db_header.log_file == LogFile::Zero {
-                    &file_io_data.log0
-                } else {
-                    &file_io_data.log1
-                };
-                log_offset = log_file.len(Acquire);
-            }
-            LogIOTask::Truncate => loop {
-                let result = if file_io_data.db_header.log_file == LogFile::Zero {
-                    file_io_data.log1.set_len(0)
-                } else {
-                    file_io_data.log0.set_len(0)
-                };
-                if result.is_ok() {
-                    break;
-                }
-                yield_now();
-            },
             LogIOTask::Shutdown => {
                 break;
             }
         }
         if let Some(mut log_buffer) = take_log_buffer_link(&file_io_data.log_buffer_link) {
             loop {
-                if log_file
+                if file_io_data
+                    .log
                     .write(&log_buffer.buffer[0..log_buffer.pos()], log_offset)
                     .is_err()
                 {
@@ -101,7 +69,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                             LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
                         submit_log_record.write(&mut eoj_buffer);
                     }
-                    while log_file.write(&eoj_buffer, log_offset).is_err() {
+                    while file_io_data.log.write(&eoj_buffer, log_offset).is_err() {
                         yield_now();
                     }
                     log_offset += eoj_buffer.len() as u64;
@@ -114,7 +82,7 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 }
             }
 
-            while log_file.sync_all().is_err() {
+            while file_io_data.log.sync_all().is_err() {
                 yield_now();
             }
             file_io_data.flush_count.fetch_add(1, Release);

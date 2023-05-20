@@ -70,14 +70,14 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
         scc::HashMap::default();
     drop(guard);
 
-    let file_len = file_io_data.log0.len(Acquire);
+    let file_len = file_io_data.log.len(Acquire);
 
     // The variable is only updated when the journal creates or deletes a database objects.
     let mut last_journal_anchor: Option<MostRecentJournal> = None;
 
     let mut read_offset = 0;
     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-    while file_io_data.log0.read(&mut buffer, read_offset).is_ok() {
+    while file_io_data.log.read(&mut buffer, read_offset).is_ok() {
         if file_io_data.recovery_cancelled.load(Relaxed) {
             // Canceled.
             return;
@@ -98,7 +98,7 @@ pub(super) fn recover_database<S: Sequencer<Instant = u64>>(file_io_data: &FileI
         // More to read in the log file.
         #[allow(clippy::cast_possible_truncation)]
         let buffer_piece = &mut buffer[0..(file_len - read_offset) as usize];
-        if file_io_data.log0.read(buffer_piece, read_offset).is_ok() {
+        if file_io_data.log.read(buffer_piece, read_offset).is_ok() {
             if file_io_data.recovery_cancelled.load(Relaxed) {
                 // Canceled.
                 return;
