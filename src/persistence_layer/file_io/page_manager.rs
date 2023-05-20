@@ -8,7 +8,7 @@
 
 use super::db_header::DatabaseHeader;
 use super::evictable_page::EvictablePage;
-use super::file_io_task_processor::FileIOTask;
+use super::io_task_processor::IOTask;
 use super::RandomAccessFile;
 use crate::Error;
 use scc::HashCache;
@@ -28,7 +28,7 @@ pub struct PageManager {
     page_cache: HashCache<u64, EvictablePage>,
 
     /// File IO task sender.
-    file_io_task_sender: SyncSender<FileIOTask>,
+    file_io_task_sender: SyncSender<IOTask>,
 }
 
 impl PageManager {
@@ -36,7 +36,7 @@ impl PageManager {
     #[inline]
     pub fn from_db(
         db: RandomAccessFile,
-        file_io_task_sender: SyncSender<FileIOTask>,
+        file_io_task_sender: SyncSender<IOTask>,
     ) -> Result<Self, Error> {
         let db_header = DatabaseHeader::from_file(&db)?;
         Ok(Self {

@@ -15,7 +15,7 @@ use std::thread::yield_now;
 
 /// Types of file IO related tasks.
 #[derive(Debug)]
-pub enum FileIOTask {
+pub enum IOTask {
     /// The [`FileIO`](super::FileIO) needs to flush log buffers.
     Flush,
 
@@ -30,64 +30,83 @@ pub enum FileIOTask {
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
 pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
-    receiver: &mut Receiver<FileIOTask>,
+    receiver: &mut Receiver<IOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
     let mut log_offset = file_io_data.log.len(Acquire);
 
     while let Ok(task) = receiver.recv() {
         match task {
-            FileIOTask::Flush => (),
-            FileIOTask::Recover => {
+            IOTask::Flush => {
+                process_log_buffer_batch(file_io_data, &mut log_offset);
+            }
+            IOTask::Recover => {
                 recover_database(file_io_data);
                 log_offset = file_io_data.log.len(Relaxed);
             }
-            FileIOTask::Shutdown => {
+            IOTask::Shutdown => {
+                process_log_buffer_batch(file_io_data, &mut log_offset);
                 break;
             }
         }
-        if let Some(mut log_buffer) = take_log_buffer_link(&file_io_data.log_buffer_link) {
-            loop {
-                if file_io_data
-                    .log
-                    .write(&log_buffer.buffer[0..log_buffer.pos()], log_offset)
-                    .is_err()
-                {
-                    yield_now();
-                    continue;
-                }
-                log_offset += log_buffer.pos() as u64;
+    }
+}
 
-                if log_buffer.eoj_logging {
-                    let mut eoj_buffer = [0_u8; 8];
-                    if log_buffer.submit_instant == 0 {
-                        let discard_log_record = LogRecord::<S>::BufferDiscarded;
-                        discard_log_record.write(&mut eoj_buffer);
-                    } else {
-                        let submit_log_record =
-                            LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
-                        submit_log_record.write(&mut eoj_buffer);
-                    }
-                    while file_io_data.log.write(&eoj_buffer, log_offset).is_err() {
-                        yield_now();
-                    }
-                    log_offset += eoj_buffer.len() as u64;
-                }
+/// Processes a batch of log buffers.
+fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
+    file_io_data: &Arc<FileIOData<S>>,
+    log_offset: &mut u64,
+) {
+    // TODO: `batch_sequence_number` is not optimal.
+    let batch_sequence_number = file_io_data.batch_sequence_number.load(Relaxed);
+    debug_assert_eq!(batch_sequence_number % 2, 0);
 
-                if let Some(next_log_buffer) = log_buffer.take_next() {
-                    log_buffer = next_log_buffer;
-                } else {
-                    break;
-                }
-            }
-
-            while file_io_data.log.sync_all().is_err() {
+    file_io_data
+        .batch_sequence_number
+        .swap(batch_sequence_number + 1, Release);
+    if let Some(mut log_buffer) = take_log_buffer_link(&file_io_data.log_buffer_link) {
+        loop {
+            if file_io_data
+                .log
+                .write(&log_buffer.buffer[0..log_buffer.pos()], *log_offset)
+                .is_err()
+            {
                 yield_now();
+                continue;
             }
-            file_io_data.flush_count.fetch_add(1, Release);
-            file_io_data.waker_bag.pop_all((), |_, w| w.wake());
+            *log_offset += log_buffer.pos() as u64;
+
+            if log_buffer.eoj_logging {
+                let mut eoj_buffer = [0_u8; 8];
+                if log_buffer.submit_instant == 0 {
+                    let discard_log_record = LogRecord::<S>::BufferDiscarded;
+                    discard_log_record.write(&mut eoj_buffer);
+                } else {
+                    let submit_log_record =
+                        LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
+                    submit_log_record.write(&mut eoj_buffer);
+                }
+                while file_io_data.log.write(&eoj_buffer, *log_offset).is_err() {
+                    yield_now();
+                }
+                *log_offset += eoj_buffer.len() as u64;
+            }
+
+            if let Some(next_log_buffer) = log_buffer.take_next() {
+                log_buffer = next_log_buffer;
+            } else {
+                break;
+            }
+        }
+        while file_io_data.log.sync_all().is_err() {
+            yield_now();
         }
     }
+
+    file_io_data
+        .batch_sequence_number
+        .swap(batch_sequence_number + 2, Release);
+    file_io_data.waker_bag.pop_all((), |_, w| w.wake());
 }
 
 /// Takes the specified [`FileLogBuffer`] linked list.

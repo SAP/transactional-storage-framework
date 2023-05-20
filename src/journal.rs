@@ -650,13 +650,14 @@ impl<'d, S: Sequencer> Future for AwaitEOT<'d, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Database;
+    use crate::{Database, MonotonicU64};
     use static_assertions::assert_eq_size;
     use std::num::NonZeroU32;
     use std::path::Path;
     use tokio::fs::remove_dir_all;
 
     assert_eq_size!(ID, [u8; 8]);
+    assert_eq_size!(Anchor<MonotonicU64>, [usize; 4]);
 
     #[tokio::test]
     async fn basic() {

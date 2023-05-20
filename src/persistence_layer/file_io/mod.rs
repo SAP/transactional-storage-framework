@@ -9,18 +9,18 @@
 
 mod db_header;
 mod evictable_page;
-mod file_io_task_processor;
+mod io_task_processor;
 mod log_record;
 mod page_manager;
 mod random_access_file;
 mod recovery;
 
-pub use random_access_file::RandomAccessFile;
-
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
-use file_io_task_processor::FileIOTask;
+use io_task_processor::IOTask;
 use log_record::LogRecord;
+use page_manager::PageManager;
+use random_access_file::RandomAccessFile;
 use recovery::RecoveryData;
 use scc::Bag;
 use std::fs::{create_dir_all, OpenOptions};
@@ -37,8 +37,6 @@ use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use self::page_manager::PageManager;
-
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
 /// [`FileIO`] spawns a thread for file operations and synchronization with the device. Any
@@ -54,7 +52,7 @@ pub struct FileIO<S: Sequencer<Instant = u64>> {
     file_io_worker: Option<JoinHandle<()>>,
 
     /// The file IO task sender.
-    file_io_task_sender: SyncSender<FileIOTask>,
+    file_io_task_sender: SyncSender<IOTask>,
 
     /// Shared data among the workers and database threads.
     file_io_data: Arc<FileIOData<S>>,
@@ -106,7 +104,7 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     page_manager: PageManager,
 
     /// Increments every time a log file is flushed.
-    flush_count: AtomicU64,
+    batch_sequence_number: AtomicU64,
 
     /// [`Waker`] bag.
     waker_bag: Bag<Waker>,
@@ -134,7 +132,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let log = Self::open_file(&mut path_buffer, "l.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
         let (file_io_task_sender, mut file_io_task_receiver) =
-            mpsc::sync_channel::<FileIOTask>(utils::advise_num_shards() * 4);
+            mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
         let page_manager = PageManager::from_db(db, file_io_task_sender.clone())?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
@@ -142,16 +140,13 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log,
             log_buffer_link: AtomicUsize::new(0),
             page_manager,
-            flush_count: AtomicU64::new(0),
+            batch_sequence_number: AtomicU64::new(0),
             waker_bag: Bag::default(),
         });
         let file_io_data_clone = file_io_data.clone();
         Ok(FileIO {
             file_io_worker: Some(thread::spawn(move || {
-                file_io_task_processor::process_sync(
-                    &mut file_io_task_receiver,
-                    &file_io_data_clone,
-                );
+                io_task_processor::process_sync(&mut file_io_task_receiver, &file_io_data_clone);
             })),
             file_io_task_sender,
             file_io_data,
@@ -187,6 +182,8 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             let log_buffer = unsafe { &mut (*log_buffer_ptr) };
             debug_assert_ne!(log_buffer.bytes_written, 0);
             log_buffer.next = head;
+
+            // `Acquire` is needed to correctly load `batch_sequence_number` afterwards.
             if let Err(actual) =
                 log_buffer_link.compare_exchange(head, log_buffer_ptr as usize, AcqRel, Acquire)
             {
@@ -201,9 +198,9 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
     fn flush(&self, log_buffer: Box<FileLogBuffer>, deadline: Option<Instant>) -> AwaitIO<S, Self> {
         let file_log_buffer_ptr = Box::into_raw(log_buffer);
         Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
-        let flush_count = self.file_io_data.flush_count.load(Relaxed);
-        drop(self.file_io_task_sender.try_send(FileIOTask::Flush));
-        AwaitIO::with_flush_count(self, flush_count).set_deadline(deadline)
+        let batch_sequence_number = self.file_io_data.batch_sequence_number.load(Relaxed);
+        drop(self.file_io_task_sender.try_send(IOTask::Flush));
+        AwaitIO::with_fingerprint(self, batch_sequence_number).set_deadline(deadline)
     }
 }
 
@@ -211,7 +208,7 @@ impl<S: Sequencer<Instant = u64>> Drop for FileIO<S> {
     #[inline]
     fn drop(&mut self) {
         loop {
-            match self.file_io_task_sender.try_send(FileIOTask::Shutdown) {
+            match self.file_io_task_sender.try_send(IOTask::Shutdown) {
                 Ok(_) | Err(TrySendError::Disconnected(_)) => break,
                 _ => (),
             }
@@ -239,11 +236,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             // Locking unexpectedly failed.
             return Err(Error::UnexpectedState);
         }
-        if self
-            .file_io_task_sender
-            .try_send(FileIOTask::Recover)
-            .is_err()
-        {
+        if self.file_io_task_sender.try_send(IOTask::Recover).is_err() {
             // `Recover` must be the first request.
             return Err(Error::UnexpectedState);
         }
@@ -263,7 +256,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _path: Option<&str>,
         deadline: Option<Instant>,
     ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_flush_count(self, 0).set_deadline(deadline))
+        Ok(AwaitIO::with_fingerprint(self, 0).set_deadline(deadline))
     }
 
     #[inline]
@@ -272,7 +265,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
+        AwaitIO::with_fingerprint(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -282,7 +275,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _xid: &[u8],
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_flush_count(self, 0).set_deadline(deadline)
+        AwaitIO::with_fingerprint(self, 0).set_deadline(deadline)
     }
 
     #[inline]
@@ -556,15 +549,30 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn check_io_completion(&self, flush_count: u64, waker: &Waker) -> Option<Result<u64, Error>> {
-        if self.file_io_data.flush_count.load(Acquire) > flush_count {
+    fn check_io_completion(
+        &self,
+        batch_sequence_number: u64,
+        waker: &Waker,
+    ) -> Option<Result<u64, Error>> {
+        let desired_batch_sequence_number = if batch_sequence_number % 2 == 0 {
+            // The IO task processor was idle.
+            batch_sequence_number + 2
+        } else {
+            // The file was working.
+            batch_sequence_number + 3
+        };
+        if self.file_io_data.batch_sequence_number.load(Acquire) >= desired_batch_sequence_number {
             Some(Ok(u64::default()))
         } else {
             // Push the `Waker` into the bag, and check the value again.
             self.file_io_data.waker_bag.push(waker.clone());
-            if self.file_io_data.flush_count.load(Acquire) > flush_count {
+            if self.file_io_data.batch_sequence_number.load(Acquire)
+                >= desired_batch_sequence_number
+            {
                 Some(Ok(u64::default()))
             } else {
+                // In order to make sure that a new batch is processed, send a message.
+                drop(self.file_io_task_sender.try_send(IOTask::Flush));
                 None
             }
         }
@@ -639,7 +647,7 @@ mod test {
     use std::time::Duration;
     use tokio::fs::remove_dir_all;
 
-    assert_eq_size!(FileLogBuffer, [u64; 6]);
+    assert_eq_size!(FileLogBuffer, ([u64; 5], usize));
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
 
