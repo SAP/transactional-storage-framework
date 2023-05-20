@@ -29,7 +29,7 @@ pub struct Snapshot<'d, 't, 'j, S: Sequencer> {
     ///
     /// This being `Some` allows the owner of the [`Snapshot`] to observe any committed changes to
     /// the database that are not newer than the instant.
-    tracker: Option<S::Tracker>,
+    tracker: Option<S::Tracker<'d>>,
 
     /// The logical instant of the transaction.
     ///
@@ -287,7 +287,6 @@ mod test {
         assert!(combined_snapshot.transaction_snapshot().is_some());
         assert!(combined_snapshot.journal_snapshot().is_some());
 
-        // TODO: check why it is not automatically dropped here.
         drop(combined_snapshot);
 
         let transaction_snapshot = transaction.snapshot();

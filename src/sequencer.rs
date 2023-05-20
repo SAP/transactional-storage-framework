@@ -11,6 +11,7 @@ mod monotonic_u64;
 pub use monotonic_u64::MonotonicU64;
 
 use std::fmt::Debug;
+use std::panic::UnwindSafe;
 use std::sync::atomic::Ordering;
 
 /// [`Sequencer`] acts as a logical clock for the storage system.
@@ -21,7 +22,7 @@ use std::sync::atomic::Ordering;
 /// Developers are able to implement their own sequencing mechanism other than a simple atomic
 /// counter by implementing the [`Sequencer`] trait, for instance, the system timestamp generator
 /// can directly be used, or an efficient hardware-aided counter can also be incorporated.
-pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
+pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin + UnwindSafe {
     /// [`Instant`](Sequencer::Instant) is a partially ordered type representing an instant in a
     /// database system.
     ///
@@ -34,13 +35,23 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
     ///
     /// The [`Default`] value is regarded as `⊥`, and the value is not allowed to be used by a
     /// transaction as its commit time point value.
-    type Instant: Clone + Copy + Debug + Default + PartialEq + PartialOrd + Send + Sync + Unpin;
+    type Instant: Clone
+        + Copy
+        + Debug
+        + Default
+        + PartialEq
+        + PartialOrd
+        + Send
+        + Sync
+        + Unpin
+        + UnwindSafe;
 
     /// [`Tracker`](Sequencer::Tracker) allows the sequencer to track every actively used
     /// [`Instant`](Sequencer::Instant) instance associated with a [`Snapshot`](super::Snapshot).
     ///
-    /// A [`Tracker`](Sequencer::Tracker) can be cloned.
-    type Tracker: Clone + Debug + ToInstant<Self>;
+    /// A [`Tracker`](Sequencer::Tracker) can be cloned and moved around threads and awaits,
+    /// however it cannot outlive the [`Sequencer`].
+    type Tracker<'s>: Clone + Debug + Send + Sync + ToInstant<Self> + UnwindSafe;
 
     /// Returns an [`Instant`](Sequencer::Instant) that represents a database snapshot being
     /// visible to all the current and future readers.
@@ -51,7 +62,7 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
 
     /// Tracks the current [`Instant`](Sequencer::Instant) value by wrapping it in a
     /// [`Tracker`](Sequencer::Tracker).
-    fn track(&self, order: Ordering) -> Self::Tracker;
+    fn track(&self, order: Ordering) -> Self::Tracker<'_>;
 
     /// Updates the current logical [`Instant`](Sequencer::Instant) value.
     ///
