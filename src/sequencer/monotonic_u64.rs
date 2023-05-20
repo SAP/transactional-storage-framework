@@ -27,8 +27,7 @@ pub struct MonotonicU64 {
     sharded_entry_list: Vec<EntryContainer>,
 }
 
-/// [`U64Tracker`] points to a tracking entry associated with its own
-/// [`Instant`](Sequencer::Instant).
+/// [`U64Tracker`] has a reference to a tracking entry.
 #[derive(Debug)]
 pub struct U64Tracker<'s> {
     /// A reference to the [`Entry`].
@@ -74,7 +73,6 @@ impl Sequencer for MonotonicU64 {
         loop {
             let candidate = self.now(order);
             let mut reuse: Option<&Entry> = None;
-            #[allow(clippy::transmute_ptr_to_ptr)]
             match self.sharded_entry_list[shard_id].0.push_if(
                 Entry {
                     instant: candidate,
