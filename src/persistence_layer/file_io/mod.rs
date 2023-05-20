@@ -9,9 +9,9 @@
 
 mod db_header;
 mod evictable_page;
-mod log_io_task_processor;
+mod file_io_task_processor;
 mod log_record;
-mod page_io_task_processor;
+mod page_manager;
 mod random_access_file;
 mod recovery;
 
@@ -19,10 +19,8 @@ pub use random_access_file::RandomAccessFile;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
-use db_header::DatabaseHeader;
-use log_io_task_processor::LogIOTask;
+use file_io_task_processor::FileIOTask;
 use log_record::LogRecord;
-use page_io_task_processor::PageIOTask;
 use recovery::RecoveryData;
 use scc::Bag;
 use std::fs::{create_dir_all, OpenOptions};
@@ -39,9 +37,11 @@ use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use self::page_manager::PageManager;
+
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
-/// [`FileIO`] spawns two threads for file operations and synchronization with the device. Any
+/// [`FileIO`] spawns a thread for file operations and synchronization with the device. Any
 /// [`Sequencer`] implementations generating `u64` clock values can be used for [`FileIO`].
 ///
 /// [`FileIO`] spawns two additional threads that are dedicated to file IO operations.
@@ -50,17 +50,11 @@ use std::time::Instant;
 /// TODO: implement checkpoint.
 #[derive(Debug)]
 pub struct FileIO<S: Sequencer<Instant = u64>> {
-    /// The log IO worker thread.
-    log_io_worker: Option<JoinHandle<()>>,
+    /// The file IO worker thread.
+    file_io_worker: Option<JoinHandle<()>>,
 
-    /// The IO task sender.
-    log_io_task_sender: SyncSender<LogIOTask>,
-
-    /// The page IO worker thread.
-    page_io_worker: Option<JoinHandle<()>>,
-
-    /// The page IO task sender.
-    page_io_task_sender: SyncSender<PageIOTask>,
+    /// The file IO task sender.
+    file_io_task_sender: SyncSender<FileIOTask>,
 
     /// Shared data among the workers and database threads.
     file_io_data: Arc<FileIOData<S>>,
@@ -102,17 +96,14 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// TODO: replace it with database pages.
     log: RandomAccessFile,
 
-    /// The database file.
-    db: RandomAccessFile,
-
-    /// The database header.
-    #[allow(dead_code)]
-    db_header: DatabaseHeader,
-
     /// [`FileLogBuffer`] link.
     ///
     /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
     log_buffer_link: AtomicUsize,
+
+    /// The page manager.
+    #[allow(dead_code)]
+    page_manager: PageManager,
 
     /// Increments every time a log file is flushed.
     flush_count: AtomicU64,
@@ -142,38 +133,27 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
 
         let log = Self::open_file(&mut path_buffer, "l.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
-        let db_header = DatabaseHeader::from_file(&db)?;
+        let (file_io_task_sender, mut file_io_task_receiver) =
+            mpsc::sync_channel::<FileIOTask>(utils::advise_num_shards() * 4);
+        let page_manager = PageManager::from_db(db, file_io_task_sender.clone())?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
             recovery_cancelled: AtomicBool::new(false),
             log,
-            db,
-            db_header,
             log_buffer_link: AtomicUsize::new(0),
+            page_manager,
             flush_count: AtomicU64::new(0),
             waker_bag: Bag::default(),
         });
-        let file_io_data_clone_for_log_io = file_io_data.clone();
-        let (log_io_task_sender, mut log_io_task_receiver) =
-            mpsc::sync_channel::<LogIOTask>(utils::advise_num_shards() * 4);
-        let file_io_data_clone_for_page_io = file_io_data.clone();
-        let (page_io_task_sender, mut page_io_task_receiver) =
-            mpsc::sync_channel::<PageIOTask>(utils::advise_num_shards() * 4);
+        let file_io_data_clone = file_io_data.clone();
         Ok(FileIO {
-            log_io_worker: Some(thread::spawn(move || {
-                log_io_task_processor::process_sync(
-                    &mut log_io_task_receiver,
-                    &file_io_data_clone_for_log_io,
+            file_io_worker: Some(thread::spawn(move || {
+                file_io_task_processor::process_sync(
+                    &mut file_io_task_receiver,
+                    &file_io_data_clone,
                 );
             })),
-            log_io_task_sender,
-            page_io_worker: Some(thread::spawn(move || {
-                page_io_task_processor::process_sync(
-                    &mut page_io_task_receiver,
-                    &file_io_data_clone_for_page_io,
-                );
-            })),
-            page_io_task_sender,
+            file_io_task_sender,
             file_io_data,
             _phantom: PhantomData,
         })
@@ -222,7 +202,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let file_log_buffer_ptr = Box::into_raw(log_buffer);
         Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
         let flush_count = self.file_io_data.flush_count.load(Relaxed);
-        drop(self.log_io_task_sender.try_send(LogIOTask::Flush));
+        drop(self.file_io_task_sender.try_send(FileIOTask::Flush));
         AwaitIO::with_flush_count(self, flush_count).set_deadline(deadline)
     }
 }
@@ -231,21 +211,12 @@ impl<S: Sequencer<Instant = u64>> Drop for FileIO<S> {
     #[inline]
     fn drop(&mut self) {
         loop {
-            match self.log_io_task_sender.try_send(LogIOTask::Shutdown) {
+            match self.file_io_task_sender.try_send(FileIOTask::Shutdown) {
                 Ok(_) | Err(TrySendError::Disconnected(_)) => break,
                 _ => (),
             }
         }
-        if let Some(worker) = self.log_io_worker.take() {
-            drop(worker.join());
-        }
-        loop {
-            match self.page_io_task_sender.try_send(PageIOTask::Shutdown) {
-                Ok(_) | Err(TrySendError::Disconnected(_)) => break,
-                _ => (),
-            }
-        }
-        if let Some(worker) = self.page_io_worker.take() {
+        if let Some(worker) = self.file_io_worker.take() {
             drop(worker.join());
         }
     }
@@ -269,8 +240,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             return Err(Error::UnexpectedState);
         }
         if self
-            .log_io_task_sender
-            .try_send(LogIOTask::Recover)
+            .file_io_task_sender
+            .try_send(FileIOTask::Recover)
             .is_err()
         {
             // `Recover` must be the first request.

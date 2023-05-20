@@ -6,15 +6,11 @@
 
 #![allow(dead_code)]
 
-use std::marker::PhantomData;
-
 /// The in-memory representation of a persistent page.
 #[derive(Debug)]
-pub struct EvictablePage<'d> {
+pub struct EvictablePage {
     /// The type of the page.
     pub page_type: PageType,
-
-    _phantom: PhantomData<&'d ()>,
 }
 
 /// The type of pages.
@@ -34,11 +30,15 @@ pub enum PageType {
 
     /// The page is used as raw data container.
     Raw,
+
+    /// The page is evicted from the page cache.
+    Evicted,
 }
 
-impl<'d> Drop for EvictablePage<'d> {
+impl Drop for EvictablePage {
     #[inline]
     fn drop(&mut self) {
-        // TODO: disk write.
+        // Dropping a page in use is illegal.
+        debug_assert!(matches!(self.page_type, PageType::Evicted));
     }
 }
