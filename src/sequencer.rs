@@ -40,7 +40,7 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
     /// [`Instant`](Sequencer::Instant) instance associated with a [`Snapshot`](super::Snapshot).
     ///
     /// A [`Tracker`](Sequencer::Tracker) can be cloned.
-    type Tracker: Clone + Debug + ToInstant<Self>;
+    type Tracker<'s>: Clone + Debug + ToInstant<Self>;
 
     /// Returns an [`Instant`](Sequencer::Instant) that represents a database snapshot being
     /// visible to all the current and future readers.
@@ -51,7 +51,7 @@ pub trait Sequencer: 'static + Debug + Default + Send + Sync + Unpin {
 
     /// Tracks the current [`Instant`](Sequencer::Instant) value by wrapping it in a
     /// [`Tracker`](Sequencer::Tracker).
-    fn track(&self, order: Ordering) -> Self::Tracker;
+    fn track(&self, order: Ordering) -> Self::Tracker<'_>;
 
     /// Updates the current logical [`Instant`](Sequencer::Instant) value.
     ///

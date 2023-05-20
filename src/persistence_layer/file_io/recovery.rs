@@ -390,9 +390,6 @@ mod tests {
             );
         }
 
-        // TODO: check why it is not automatically dropped here.
-        drop(snapshot);
-
         let transaction = database_recovered.transaction();
         let mut journal = transaction.journal();
         journal
@@ -403,6 +400,8 @@ mod tests {
         assert!(transaction.commit().await.is_ok());
 
         let instant = database_recovered.sequencer().now(Relaxed);
+
+        drop(snapshot);
         drop(database_recovered);
 
         let database_recovered_again = Arc::new(Database::with_path(path).await.unwrap());

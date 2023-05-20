@@ -7,6 +7,7 @@
 use super::{Sequencer, ToInstant};
 use crate::utils;
 use scc::Queue;
+use std::mem::transmute;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 
@@ -29,9 +30,9 @@ pub struct MonotonicU64 {
 /// [`U64Tracker`] points to a tracking entry associated with its own
 /// [`Instant`](Sequencer::Instant).
 #[derive(Debug)]
-pub struct U64Tracker {
-    /// A pointer to the [`Entry`].
-    ptr: *const Entry,
+pub struct U64Tracker<'s> {
+    /// A reference to the [`Entry`].
+    entry: &'s Entry,
 }
 
 #[derive(Debug)]
@@ -50,7 +51,7 @@ struct EntryContainer(Queue<Entry>);
 
 impl Sequencer for MonotonicU64 {
     type Instant = u64;
-    type Tracker = U64Tracker;
+    type Tracker<'s> = U64Tracker<'s>;
 
     #[inline]
     fn min(&self, _order: Ordering) -> u64 {
@@ -68,11 +69,12 @@ impl Sequencer for MonotonicU64 {
     }
 
     #[inline]
-    fn track(&self, order: Ordering) -> Self::Tracker {
+    fn track(&self, order: Ordering) -> Self::Tracker<'_> {
         let shard_id = utils::shard_id() % self.sharded_entry_list.len();
         loop {
             let candidate = self.now(order);
-            let mut reuse = None;
+            let mut reuse: Option<&Entry> = None;
+            #[allow(clippy::transmute_ptr_to_ptr)]
             match self.sharded_entry_list[shard_id].0.push_if(
                 Entry {
                     instant: candidate,
@@ -91,8 +93,9 @@ impl Sequencer for MonotonicU64 {
                                 })
                                 .is_ok()
                             {
-                                // Reuse the entry.
-                                reuse.replace(std::ptr::addr_of!((**e)));
+                                // Safety: the entry is ref-counted.
+                                let prolonged_entry_ref = unsafe { transmute::<&Entry, _>(&**e) };
+                                reuse.replace(prolonged_entry_ref);
                                 return false;
                             }
                             // Cannot push a new entry if the existing if larger.
@@ -104,13 +107,15 @@ impl Sequencer for MonotonicU64 {
             ) {
                 Ok(new_entry) => {
                     debug_assert!(reuse.is_none());
+                    // Safety: the entry is ref-counted.
+                    let prolonged_entry_ref = unsafe { transmute::<&Entry, _>(&**new_entry) };
                     return U64Tracker {
-                        ptr: std::ptr::addr_of!(**new_entry),
+                        entry: prolonged_entry_ref,
                     };
                 }
                 Err(_) => {
-                    if let Some(ptr) = reuse {
-                        return U64Tracker { ptr };
+                    if let Some(entry) = reuse {
+                        return U64Tracker { entry };
                     }
                 }
             }
@@ -158,24 +163,22 @@ impl Default for MonotonicU64 {
     }
 }
 
-impl U64Tracker {
+impl<'s> U64Tracker<'s> {
     fn entry(&self) -> &Entry {
-        // Safety: `self` is holding a strong reference to the entry, therefore the entry is
-        // guaranteed to be valid.
-        unsafe { self.ptr.as_ref().unwrap() }
+        self.entry
     }
 }
 
-impl Clone for U64Tracker {
+impl<'s> Clone for U64Tracker<'s> {
     #[inline]
     fn clone(&self) -> Self {
         let prev = self.entry().ref_cnt.fetch_add(1, Relaxed);
         debug_assert_ne!(prev, 0);
-        Self { ptr: self.ptr }
+        Self { entry: self.entry }
     }
 }
 
-impl Drop for U64Tracker {
+impl<'s> Drop for U64Tracker<'s> {
     #[inline]
     fn drop(&mut self) {
         let prev = self.entry().ref_cnt.fetch_sub(1, Relaxed);
@@ -183,13 +186,7 @@ impl Drop for U64Tracker {
     }
 }
 
-// Safety: the instance being pointed by `U64Tracker` is on the heap.
-unsafe impl Send for U64Tracker {}
-
-// Safety: the instance being pointed by `U64Tracker` can be accessed by other threads.
-unsafe impl Sync for U64Tracker {}
-
-impl ToInstant<MonotonicU64> for U64Tracker {
+impl<'s> ToInstant<MonotonicU64> for U64Tracker<'s> {
     #[inline]
     fn to_instant(&self) -> u64 {
         self.entry().instant
