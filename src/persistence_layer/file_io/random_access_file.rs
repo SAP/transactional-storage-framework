@@ -43,7 +43,6 @@ mod unix {
         #[inline]
         pub fn set_len(&self, len: u64) -> Result<()> {
             self.file.set_len(len)?;
-            self.sync_all()?;
             self.len.store(len, Release);
             Ok(())
         }
@@ -124,7 +123,6 @@ mod windows {
         #[inline]
         pub fn set_len(&self, len: u64) -> Result<()> {
             self.file.set_len(len)?;
-            self.sync_all()?;
             self.len.store(len, Release);
             Ok(())
         }

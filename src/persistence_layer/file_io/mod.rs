@@ -8,6 +8,7 @@
 //! The [`FileIO`] persistence layer only supports `u64` [`Sequencer`] types.
 
 mod db_header;
+mod evictable_page;
 mod log_io_task_processor;
 mod log_record;
 mod page_io_task_processor;
@@ -96,16 +97,16 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// Recovery cancelled.
     recovery_cancelled: AtomicBool,
 
-    /// The first log file.
-    log0: RandomAccessFile,
-
-    /// The second log file.
-    log1: RandomAccessFile,
+    /// The log file.
+    ///
+    /// TODO: replace it with database pages.
+    log: RandomAccessFile,
 
     /// The database file.
     db: RandomAccessFile,
 
     /// The database header.
+    #[allow(dead_code)]
     db_header: DatabaseHeader,
 
     /// [`FileLogBuffer`] link.
@@ -139,15 +140,13 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let mut path_buffer = PathBuf::with_capacity(path.as_os_str().len() + 6);
         path_buffer.push(path);
 
-        let log0 = Self::open_file(&mut path_buffer, "0.log")?;
-        let log1 = Self::open_file(&mut path_buffer, "1.log")?;
+        let log = Self::open_file(&mut path_buffer, "l.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
         let db_header = DatabaseHeader::from_file(&db)?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
             recovery_cancelled: AtomicBool::new(false),
-            log0,
-            log1,
+            log,
             db,
             db_header,
             log_buffer_link: AtomicUsize::new(0),
