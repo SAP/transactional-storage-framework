@@ -6,7 +6,7 @@
 
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
-use super::{FileIOData, FileLogBuffer, RandomAccessFile, Sequencer};
+use super::{FileIOData, FileLogBuffer, Sequencer};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::mpsc::Receiver;
@@ -33,7 +33,6 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
     receiver: &mut Receiver<LogIOTask>,
     file_io_data: &Arc<FileIOData<S>>,
 ) {
-    let _: &RandomAccessFile = &file_io_data.db;
     let mut log_offset = file_io_data.log.len(Acquire);
 
     while let Ok(task) = receiver.recv() {

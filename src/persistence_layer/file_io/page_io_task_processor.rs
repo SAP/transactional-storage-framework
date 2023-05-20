@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use super::{FileIOData, RandomAccessFile, Sequencer};
+use super::page_manager::PageManagerData;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -23,12 +23,10 @@ pub(super) enum PageIOTask {
 /// Processes IO tasks.
 ///
 /// Synchronous calls are made in the function, therefore database workers must not invoke it.
-pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
+pub(super) fn process_sync(
     receiver: &mut Receiver<PageIOTask>,
-    file_io_data: &Arc<FileIOData<S>>,
+    _page_manager_data: &Arc<PageManagerData>,
 ) {
-    let _: &RandomAccessFile = &file_io_data.db;
-
     while let Ok(task) = receiver.recv() {
         match task {
             PageIOTask::Flush => (),

@@ -12,6 +12,7 @@ mod evictable_page;
 mod log_io_task_processor;
 mod log_record;
 mod page_io_task_processor;
+mod page_manager;
 mod random_access_file;
 mod recovery;
 
@@ -19,10 +20,8 @@ pub use random_access_file::RandomAccessFile;
 
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
-use db_header::DatabaseHeader;
 use log_io_task_processor::LogIOTask;
 use log_record::LogRecord;
-use page_io_task_processor::PageIOTask;
 use recovery::RecoveryData;
 use scc::Bag;
 use std::fs::{create_dir_all, OpenOptions};
@@ -38,6 +37,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
+
+use self::page_manager::PageManager;
 
 /// [`FileIO`] abstracts the OS file system layer to implement [`PersistenceLayer`].
 ///
@@ -55,12 +56,6 @@ pub struct FileIO<S: Sequencer<Instant = u64>> {
 
     /// The IO task sender.
     log_io_task_sender: SyncSender<LogIOTask>,
-
-    /// The page IO worker thread.
-    page_io_worker: Option<JoinHandle<()>>,
-
-    /// The page IO task sender.
-    page_io_task_sender: SyncSender<PageIOTask>,
 
     /// Shared data among the workers and database threads.
     file_io_data: Arc<FileIOData<S>>,
@@ -102,17 +97,14 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     /// TODO: replace it with database pages.
     log: RandomAccessFile,
 
-    /// The database file.
-    db: RandomAccessFile,
-
-    /// The database header.
-    #[allow(dead_code)]
-    db_header: DatabaseHeader,
-
     /// [`FileLogBuffer`] link.
     ///
     /// The whole link must be consumed at once otherwise it is susceptible to ABA problems.
     log_buffer_link: AtomicUsize,
+
+    /// The page manager.
+    #[allow(dead_code)]
+    page_manager: PageManager,
 
     /// Increments every time a log file is flushed.
     flush_count: AtomicU64,
@@ -142,23 +134,19 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
 
         let log = Self::open_file(&mut path_buffer, "l.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
-        let db_header = DatabaseHeader::from_file(&db)?;
+        let page_manager = PageManager::from_db(db)?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),
             recovery_cancelled: AtomicBool::new(false),
             log,
-            db,
-            db_header,
             log_buffer_link: AtomicUsize::new(0),
+            page_manager,
             flush_count: AtomicU64::new(0),
             waker_bag: Bag::default(),
         });
         let file_io_data_clone_for_log_io = file_io_data.clone();
         let (log_io_task_sender, mut log_io_task_receiver) =
             mpsc::sync_channel::<LogIOTask>(utils::advise_num_shards() * 4);
-        let file_io_data_clone_for_page_io = file_io_data.clone();
-        let (page_io_task_sender, mut page_io_task_receiver) =
-            mpsc::sync_channel::<PageIOTask>(utils::advise_num_shards() * 4);
         Ok(FileIO {
             log_io_worker: Some(thread::spawn(move || {
                 log_io_task_processor::process_sync(
@@ -167,13 +155,6 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
                 );
             })),
             log_io_task_sender,
-            page_io_worker: Some(thread::spawn(move || {
-                page_io_task_processor::process_sync(
-                    &mut page_io_task_receiver,
-                    &file_io_data_clone_for_page_io,
-                );
-            })),
-            page_io_task_sender,
             file_io_data,
             _phantom: PhantomData,
         })
@@ -237,15 +218,6 @@ impl<S: Sequencer<Instant = u64>> Drop for FileIO<S> {
             }
         }
         if let Some(worker) = self.log_io_worker.take() {
-            drop(worker.join());
-        }
-        loop {
-            match self.page_io_task_sender.try_send(PageIOTask::Shutdown) {
-                Ok(_) | Err(TrySendError::Disconnected(_)) => break,
-                _ => (),
-            }
-        }
-        if let Some(worker) = self.page_io_worker.take() {
             drop(worker.join());
         }
     }
