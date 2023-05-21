@@ -52,7 +52,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     ) -> Result<AwaitRecovery<S, Self>, Error>;
 
     /// The transaction is participating in a distributed transaction.
-    fn participate(&self, transaction_id: TransactionID, xid: &[u8], deadline: Option<Instant>) -> AwaitIO<S, Self>;
+    fn participate(
+        &self,
+        transaction_id: TransactionID,
+        xid: &[u8],
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self>;
 
     /// Writes the fact that the supplied database objects have been created.
     ///
@@ -179,8 +184,11 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 
 /// The fingerprint interface of a log buffer type.
 pub trait Fingerprint: Debug + Default + Send + Sized {
-    /// The log buffer processor generates the fingerprint of a log buffer.
-    fn generate_fingerprint(&self, fingerprint: u64);
+    /// The log buffer processor sets the fingerprint of a log buffer.
+    ///
+    /// Fingerprints are set only one-time, and setting different fingerprints result in undefined
+    /// behavior.
+    fn set_fingerprint(&self, fingerprint: u64);
 
     /// The [`AwaitIO`] associated with the log buffer uses the fingerprint value assigned by the
     /// log buffer processor to check the status of the log buffer.

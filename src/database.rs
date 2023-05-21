@@ -96,6 +96,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// Returns an error if the persistence layer failed to back up the database, memory allocation
     /// failed, or the deadline was reached.
+    #[allow(clippy::missing_panics_doc, clippy::unused_async)]
     #[inline]
     pub async fn backup(
         &self,
@@ -112,6 +113,7 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// Returns an error if the persistence layer failed to make a checkpoint, memory allocation
     /// failed, or the deadline was reached.
+    #[allow(clippy::missing_panics_doc, clippy::unused_async)]
     #[inline]
     pub async fn checkpoint(&self, _deadline: Option<Instant>) -> Result<S::Instant, Error> {
         todo!();

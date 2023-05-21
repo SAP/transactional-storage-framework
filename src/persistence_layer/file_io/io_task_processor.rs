@@ -74,14 +74,14 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
             }
             *log_offset += log_buffer.pos() as u64;
 
-            if log_buffer.eoj_logging {
+            if log_buffer.eoj_logging.load(Relaxed) {
                 let mut eoj_buffer = [0_u8; 8];
-                if log_buffer.submit_instant == 0 {
+                if log_buffer.submit_instant.load(Relaxed) == 0 {
                     let discard_log_record = LogRecord::<S>::BufferDiscarded;
                     discard_log_record.write(&mut eoj_buffer);
                 } else {
                     let submit_log_record =
-                        LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
+                        LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant.load(Relaxed));
                     submit_log_record.write(&mut eoj_buffer);
                 }
                 while file_io_data.log.write(&eoj_buffer, *log_offset).is_err() {
@@ -117,9 +117,9 @@ fn take_log_buffer_link(
         let current_head_ptr = current_head as *mut FileLogBuffer;
         // Safety: the pointer was provided by `Box::into_raw`.
         let mut current_log_buffer = unsafe { Arc::from_raw(current_head_ptr) };
-        current_log_buffer.generate_fingerprint(batch_sequence_number);
+        current_log_buffer.set_fingerprint(batch_sequence_number);
         let mut next_log_buffer_opt = current_log_buffer.take_next();
-        while let Some(mut next_log_buffer) = next_log_buffer_opt.take() {
+        while let Some(next_log_buffer) = next_log_buffer_opt.take() {
             // Invert the direction of links to make it a FIFO queue.
             let next_after_next_log_buffer = next_log_buffer.take_next();
             next_log_buffer
@@ -129,7 +129,7 @@ fn take_log_buffer_link(
                 current_log_buffer = next_log_buffer;
                 next_log_buffer_opt.replace(next_after_next_log_buffer);
             } else {
-                next_log_buffer.generate_fingerprint(batch_sequence_number);
+                next_log_buffer.set_fingerprint(batch_sequence_number);
                 return Some(next_log_buffer);
             }
         }
