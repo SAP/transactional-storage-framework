@@ -58,7 +58,10 @@ pub(super) struct Anchor<S: Sequencer> {
     /// exposed since the [`Journal`] has yet to be submitted or has been rolled back.
     submit_instant: AtomicU32,
 
-    /// A flag indicating that the changes in the [`Journal`] are is being rolled back.
+    /// A flag indicating that the changes in the [`Journal`] have been submitted.
+    submitted: AtomicBool,
+
+    /// A flag indicating that the changes in the [`Journal`] have been submitted.
     rolled_back: AtomicBool,
 
     /// A flag indicating that there has been another transaction waiting for any resources this
@@ -196,17 +199,8 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     #[inline]
     #[must_use]
     pub fn submit(mut self) -> NonZeroU32 {
-        let submit_instant = self.transaction.record(&self.anchor);
-        if let Some(log_buffer) = self.log_buffer.take() {
-            self.transaction.database().persistence_layer().submit(
-                log_buffer,
-                self.transaction.id(),
-                self.id(),
-                Some(submit_instant),
-                None,
-            );
-        }
-        submit_instant
+        self.transaction
+            .submit_journal(&self.anchor, self.log_buffer.take())
     }
 
     /// Captures the current state of the [`Journal`] as a [`Snapshot`].
@@ -388,6 +382,8 @@ impl<S: Sequencer> Anchor<S> {
         }
 
         if let Some(transaction_snapshot) = snapshot.transaction_snapshot() {
+            // Read access is granted without the log records in the journal have yet to be
+            // submitted, e.g., `self.submitted == false`.
             let submit_instant = self.submit_instant();
             if submit_instant.is_some()
                 && TransactionSnapshot::new(self.transaction_id(), submit_instant)
@@ -446,8 +442,13 @@ impl<S: Sequencer> Anchor<S> {
             // They are from the same transaction.
             let submit_instant = self.submit_instant();
             if submit_instant.map_or(false, |i| anchor.creation_instant.map_or(false, |a| i <= a)) {
-                // The requester is a newer journal in the transaction, or the same with the owner.
-                Relationship::Linearizable
+                if self.submitted.load(Relaxed) {
+                    // The requester is a newer journal in the transaction, or the same with the owner.
+                    Relationship::Linearizable
+                } else {
+                    // The log records in the journal have yet to be flushed to the disk.
+                    Relationship::Unknown
+                }
             } else if self.is_rolled_back() {
                 // The owner which belongs to the same transaction was rolled back.
                 Relationship::RolledBack
@@ -504,6 +505,14 @@ impl<S: Sequencer> Anchor<S> {
         self.submit_instant.store(submit_instant, Release);
     }
 
+    /// Submits the changes contained in the associated [`Journal`].
+    pub(super) fn submit(&self, task_processor: &TaskProcessor) {
+        debug_assert!(!self.submitted.load(Relaxed));
+        debug_assert!(!self.rolled_back.load(Relaxed));
+        self.submitted.store(true, Release);
+        self.wake_up_others(task_processor);
+    }
+
     /// Wakes up any waiting transactions.
     pub(super) fn commit(&self, task_processor: &TaskProcessor) {
         self.wake_up_others(task_processor);
@@ -529,6 +538,7 @@ impl<S: Sequencer> Anchor<S> {
             transaction_anchor,
             creation_instant,
             submit_instant: AtomicU32::new(0),
+            submitted: AtomicBool::new(false),
             rolled_back: AtomicBool::new(false),
             wake_up_others: AtomicBool::new(false),
             next: ebr::AtomicArc::null(),

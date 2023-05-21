@@ -458,20 +458,39 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.database
     }
 
-    /// Takes a [`JournalAnchor`].
-    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> NonZeroU32 {
+    /// Submits a [`JournalAnchor`].
+    pub(super) fn submit_journal(
+        &self,
+        anchor: &ebr::Arc<JournalAnchor<S>>,
+        log_buffer: Option<Arc<P::LogBuffer>>,
+    ) -> NonZeroU32 {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
-            let submit_instant = record.set_next(current.get_arc(), Relaxed).1;
+            let submit_instant = anchor.set_next(current.get_arc(), Relaxed).1;
             match self.journal_strand.compare_exchange(
                 current,
-                (Some(record.clone()), ebr::Tag::None),
+                (Some(anchor.clone()), ebr::Tag::None),
                 Release,
                 Relaxed,
                 &barrier,
             ) {
-                Ok(_) => return submit_instant,
+                Ok(_) => {
+                    if let Some(log_buffer) = log_buffer {
+                        self.database().persistence_layer().submit(
+                            log_buffer,
+                            self.id(),
+                            anchor.id(),
+                            Some(submit_instant),
+                            None,
+                        );
+                    }
+
+                    // Write access to any changes made in the journal can be granted after the
+                    // anchor is marked `submitted`.
+                    anchor.submit(self.database().task_processor());
+                    return submit_instant;
+                }
                 Err((_, actual)) => current = actual,
             }
         }
