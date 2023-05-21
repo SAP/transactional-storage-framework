@@ -58,7 +58,6 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
     log_offset: &mut u64,
 ) {
-    // TODO: `batch_sequence_number` is not optimal.
     let batch_sequence_number = file_io_data.batch_sequence_number.load(Relaxed);
     if let Some(mut log_buffer) =
         take_log_buffer_link(&file_io_data.log_buffer_link, batch_sequence_number + 1)
@@ -99,12 +98,12 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
         while file_io_data.log.sync_all().is_err() {
             yield_now();
         }
-    }
 
-    file_io_data
-        .batch_sequence_number
-        .swap(batch_sequence_number + 1, Release);
-    file_io_data.waker_bag.pop_all((), |_, w| w.wake());
+        file_io_data
+            .batch_sequence_number
+            .store(batch_sequence_number + 1, Release);
+        file_io_data.waker_bag.pop_all((), |_, w| w.wake());
+    }
 }
 
 /// Takes the specified [`FileLogBuffer`] linked list.
@@ -120,6 +119,7 @@ fn take_log_buffer_link(
         current_log_buffer.set_fingerprint(batch_sequence_number);
         let mut next_log_buffer_opt = current_log_buffer.take_next();
         while let Some(next_log_buffer) = next_log_buffer_opt.take() {
+            next_log_buffer.set_fingerprint(batch_sequence_number);
             // Invert the direction of links to make it a FIFO queue.
             let next_after_next_log_buffer = next_log_buffer.take_next();
             next_log_buffer
@@ -129,7 +129,6 @@ fn take_log_buffer_link(
                 current_log_buffer = next_log_buffer;
                 next_log_buffer_opt.replace(next_after_next_log_buffer);
             } else {
-                next_log_buffer.set_fingerprint(batch_sequence_number);
                 return Some(next_log_buffer);
             }
         }

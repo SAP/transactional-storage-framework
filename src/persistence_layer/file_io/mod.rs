@@ -539,15 +539,15 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         &self,
         fingerprint: Option<NonZeroU64>,
         waker: &Waker,
-    ) -> Option<Result<u64, Error>> {
+    ) -> Option<Result<(), Error>> {
         if let Some(fingerprint) = fingerprint {
             if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
-                Some(Ok(u64::default()))
+                Some(Ok(()))
             } else {
                 // Push the `Waker` into the bag, and check the value again.
                 self.file_io_data.waker_bag.push(waker.clone());
-                if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
-                    Some(Ok(u64::default()))
+                if self.file_io_data.batch_sequence_number.load(Relaxed) >= fingerprint.get() {
+                    Some(Ok(()))
                 } else {
                     None
                 }

@@ -162,12 +162,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// operation is still in progress, the supplied [`Waker`] is kept in the [`PersistenceLayer`]
     /// and notifies it when the operation is completed.
     ///
-    /// It returns the latest known logical instant value of the database.
+    /// Returns `None` if the IO operation is not completed.
     fn check_io_completion(
         &self,
         fingerprint: Option<NonZeroU64>,
         waker: &Waker,
-    ) -> Option<Result<S::Instant, Error>>;
+    ) -> Option<Result<(), Error>>;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
@@ -262,7 +262,7 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
-    type Output = Result<S::Instant, Error>;
+    type Output = Result<(), Error>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
