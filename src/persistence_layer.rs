@@ -179,18 +179,20 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
+    /// A conservatively estimated fingerprint value for all the pending log buffers.
+    ///
+    /// The returned value must be safe, e.g., all the pending log buffers actually get the
+    /// returned value or any smaller value. If the value cannot be estimated, `None` is returned.
+    fn conservatively_estimated_fingerprint(&self) -> Option<NonZeroU64>;
+
     /// Checks if the IO operation associated with the supplied fingerprint data.
     ///
     /// The interpretation of the supplied fingerprint data is implementation-specific. If the IO
     /// operation is still in progress, the supplied [`Waker`] is kept in the [`PersistenceLayer`]
     /// and notifies it when the operation is completed.
     ///
-    /// Returns `None` if the IO operation is not completed.
-    fn check_io_completion(
-        &self,
-        fingerprint: Option<NonZeroU64>,
-        waker: &Waker,
-    ) -> Option<Result<(), Error>>;
+    /// Returns `false` if the IO operation is not completed.
+    fn check_io_completion(&self, fingerprint: Option<NonZeroU64>, waker: Option<&Waker>) -> bool;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
@@ -290,11 +292,11 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let fingerprint = self.log_buffer.get_fingerprint();
-        if let Some(result) = self
+        if self
             .persistence_layer
-            .check_io_completion(fingerprint, cx.waker())
+            .check_io_completion(fingerprint, Some(cx.waker()))
         {
-            Poll::Ready(result)
+            Poll::Ready(Ok(()))
         } else if self
             .deadline
             .as_ref()

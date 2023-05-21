@@ -555,27 +555,29 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn check_io_completion(
-        &self,
-        fingerprint: Option<NonZeroU64>,
-        waker: &Waker,
-    ) -> Option<Result<(), Error>> {
+    fn conservatively_estimated_fingerprint(&self) -> Option<NonZeroU64> {
+        // `+2` is required to ensure that all the currently pending log buffers are persisted.
+        NonZeroU64::new(self.file_io_data.batch_sequence_number.load(Relaxed) + 2)
+    }
+
+    #[inline]
+    fn check_io_completion(&self, fingerprint: Option<NonZeroU64>, waker: Option<&Waker>) -> bool {
         if let Some(fingerprint) = fingerprint {
             if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
-                Some(Ok(()))
-            } else {
-                // Push the `Waker` into the bag, and check the value again.
+                return true;
+            }
+
+            // Push the `Waker` into the bag, and check the value again.
+            if let Some(waker) = waker {
                 self.file_io_data.waker_bag.push(waker.clone());
                 if self.file_io_data.batch_sequence_number.load(Relaxed) >= fingerprint.get() {
-                    Some(Ok(()))
-                } else {
-                    None
+                    return true;
                 }
             }
-        } else {
+        } else if let Some(waker) = waker {
             self.file_io_data.waker_bag.push(waker.clone());
-            None
         }
+        false
     }
 
     #[inline]

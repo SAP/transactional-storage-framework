@@ -515,6 +515,8 @@ impl<S: Sequencer> Anchor<S> {
 
     /// Wakes up any waiting transactions.
     pub(super) fn commit(&self, task_processor: &TaskProcessor) {
+        debug_assert!(self.submitted.load(Relaxed));
+        debug_assert!(!self.rolled_back.load(Relaxed));
         self.wake_up_others(task_processor);
     }
 
