@@ -20,12 +20,12 @@ use std::ptr::addr_of;
 /// -- TODO: page reorganization.
 /// - If `transaction opcode = 0b100`, the event happened in a transaction.
 /// -- 61-bit journal ID, 3-bit opcode.
-/// -- If `opcode = 0b000`, the journal created data identified as the `u64` value that follows.
-/// -- If `opcode = 0b001`, the journal created data identified as the two `u64` values that
-/// follow.
-/// -- If `opcode = 0b010`, the journal deleted data identified as the `u64` value that follows.
-/// -- If `opcode = 0b011`, the journal deleted data identified as the two `u64` values that
-/// follow.
+/// -- If `opcode = 0b000`, the journal created data identified as a `u64` value that follows.
+/// -- If `opcode = 0b001`, the journal created data identified as a `u64` and two `u32` values
+/// that follow.
+/// -- If `opcode = 0b010`, the journal deleted data identified as a `u64` value that follows.
+/// -- If `opcode = 0b011`, the journal deleted data identified as a `u64` and two `u32` values
+/// that follow.
 /// -- If `opcode = 0b100`, the journal was submitted.
 /// -- If `opcode = 0b101`, the journal was discarded.
 /// - If `transaction opcode = 0b101`, the transaction is being prepared for commit, and

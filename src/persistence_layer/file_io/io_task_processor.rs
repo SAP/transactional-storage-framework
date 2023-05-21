@@ -6,6 +6,7 @@
 
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
+use super::Fingerprint;
 use super::{FileIOData, FileLogBuffer, Sequencer};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -57,14 +58,10 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
     log_offset: &mut u64,
 ) {
-    // TODO: `batch_sequence_number` is not optimal.
     let batch_sequence_number = file_io_data.batch_sequence_number.load(Relaxed);
-    debug_assert_eq!(batch_sequence_number % 2, 0);
-
-    file_io_data
-        .batch_sequence_number
-        .swap(batch_sequence_number + 1, Release);
-    if let Some(mut log_buffer) = take_log_buffer_link(&file_io_data.log_buffer_link) {
+    if let Some(mut log_buffer) =
+        take_log_buffer_link(&file_io_data.log_buffer_link, batch_sequence_number + 1)
+    {
         loop {
             if file_io_data
                 .log
@@ -76,14 +73,14 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
             }
             *log_offset += log_buffer.pos() as u64;
 
-            if log_buffer.eoj_logging {
+            if log_buffer.eoj_logging.load(Relaxed) {
                 let mut eoj_buffer = [0_u8; 8];
-                if log_buffer.submit_instant == 0 {
+                if log_buffer.submit_instant.load(Relaxed) == 0 {
                     let discard_log_record = LogRecord::<S>::BufferDiscarded;
                     discard_log_record.write(&mut eoj_buffer);
                 } else {
                     let submit_log_record =
-                        LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant);
+                        LogRecord::<S>::BufferSubmitted(log_buffer.submit_instant.load(Relaxed));
                     submit_log_record.write(&mut eoj_buffer);
                 }
                 while file_io_data.log.write(&eoj_buffer, *log_offset).is_err() {
@@ -101,26 +98,33 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
         while file_io_data.log.sync_all().is_err() {
             yield_now();
         }
-    }
 
-    file_io_data
-        .batch_sequence_number
-        .swap(batch_sequence_number + 2, Release);
-    file_io_data.waker_bag.pop_all((), |_, w| w.wake());
+        file_io_data
+            .batch_sequence_number
+            .store(batch_sequence_number + 1, Release);
+        file_io_data.waker_bag.pop_all((), |_, w| w.wake());
+    }
 }
 
 /// Takes the specified [`FileLogBuffer`] linked list.
-fn take_log_buffer_link(log_buffer_link: &AtomicUsize) -> Option<Box<FileLogBuffer>> {
+fn take_log_buffer_link(
+    log_buffer_link: &AtomicUsize,
+    batch_sequence_number: u64,
+) -> Option<Arc<FileLogBuffer>> {
     let current_head = log_buffer_link.swap(0, Acquire);
     if current_head != 0 {
         let current_head_ptr = current_head as *mut FileLogBuffer;
         // Safety: the pointer was provided by `Box::into_raw`.
-        let mut current_log_buffer = unsafe { Box::from_raw(current_head_ptr) };
+        let mut current_log_buffer = unsafe { Arc::from_raw(current_head_ptr) };
+        current_log_buffer.set_fingerprint(batch_sequence_number);
         let mut next_log_buffer_opt = current_log_buffer.take_next();
-        while let Some(mut next_log_buffer) = next_log_buffer_opt.take() {
+        while let Some(next_log_buffer) = next_log_buffer_opt.take() {
+            next_log_buffer.set_fingerprint(batch_sequence_number);
             // Invert the direction of links to make it a FIFO queue.
             let next_after_next_log_buffer = next_log_buffer.take_next();
-            next_log_buffer.next = Box::into_raw(current_log_buffer) as usize;
+            next_log_buffer
+                .next
+                .store(Arc::into_raw(current_log_buffer) as usize, Relaxed);
             if let Some(next_after_next_log_buffer) = next_after_next_log_buffer {
                 current_log_buffer = next_log_buffer;
                 next_log_buffer_opt.replace(next_after_next_log_buffer);

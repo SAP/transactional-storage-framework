@@ -10,11 +10,12 @@ use scc::Bag;
 use std::collections::hash_map;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
 use std::ptr::addr_of;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Arc;
 use std::task::Waker;
 use std::task::{Context, Poll};
 
@@ -29,10 +30,13 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// commit.
     database: &'d Database<S, P>,
 
+    /// The fingerprint value that ensures the durability of changes made in this transaction.
+    durability_ensured_fingerprint: AtomicU64,
+
     /// End-of-transaction log buffer.
     ///
     /// End-of-transaction log records can only be generated once per transaction.
-    eot_log_buffer: Option<Box<P::LogBuffer>>,
+    eot_log_buffer: Option<Arc<P::LogBuffer>>,
 
     /// The changes made by the transaction.
     ///
@@ -329,13 +333,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let new_instant = current.as_ref().and_then(|r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
-        let io_completion = self
-            .database
+        self.database
             .persistence_layer()
             .rewind(self.id(), new_instant, None);
-
-        // Do not wait for an IO completion.
-        io_completion.forget();
 
         Ok(new_instant)
     }
@@ -378,12 +378,25 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 .store(State::Committing.into(), Release);
         }
 
+        // The commit log record must be written to the disk after all the other log records in the
+        // transaction have been fully persisted.
         let io_completion =
             self.database
                 .persistence_layer()
                 .prepare(self.id(), prepare_instant, None);
-
-        if self.xid.is_some() {
+        if self.xid.is_some()
+            || NonZeroU64::new(self.durability_ensured_fingerprint.load(Relaxed)).map_or(
+                false,
+                |f| {
+                    !self
+                        .database
+                        .persistence_layer()
+                        .check_io_completion(Some(f), None)
+                },
+            )
+        {
+            // If it is a part of a distributed transaction, or the changes are yet to be
+            // persisted, await it.
             io_completion.await?;
         }
 
@@ -446,7 +459,8 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub(crate) fn new(database: &'d Database<S, P>) -> Transaction<'d, S, P> {
         Transaction {
             database,
-            eot_log_buffer: Some(Box::default()),
+            durability_ensured_fingerprint: AtomicU64::new(0),
+            eot_log_buffer: Some(Arc::default()),
             journal_strand: ebr::AtomicArc::null(),
             xid: None,
             anchor: ebr::Arc::new(Anchor::new()),
@@ -463,20 +477,56 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         self.database
     }
 
-    /// Takes a [`JournalAnchor`].
-    pub(super) fn record(&self, record: &ebr::Arc<JournalAnchor<S>>) -> NonZeroU32 {
+    /// Submits a [`Journal`].
+    pub(super) fn submit_journal(
+        &self,
+        anchor: &ebr::Arc<JournalAnchor<S>>,
+        log_buffer: Option<Arc<P::LogBuffer>>,
+    ) -> NonZeroU32 {
         let barrier = ebr::Barrier::new();
         let mut current = self.journal_strand.load(Relaxed, &barrier);
         loop {
-            let submit_instant = record.set_next(current.get_arc(), Relaxed).1;
+            let submit_instant = anchor.set_next(current.get_arc(), Relaxed).1;
             match self.journal_strand.compare_exchange(
                 current,
-                (Some(record.clone()), ebr::Tag::None),
+                (Some(anchor.clone()), ebr::Tag::None),
                 Release,
                 Relaxed,
                 &barrier,
             ) {
-                Ok(_) => return submit_instant,
+                Ok(_) => {
+                    // Pass the log buffer to the persistence layer.
+                    if let Some(log_buffer) = log_buffer {
+                        self.database.persistence_layer().submit(
+                            log_buffer,
+                            self.id(),
+                            anchor.id(),
+                            Some(submit_instant),
+                            None,
+                        );
+                        let new_fingerprint = self
+                            .database
+                            .persistence_layer()
+                            .conservatively_estimated_fingerprint()
+                            .map_or(u64::MAX, NonZeroU64::get);
+                        let mut current = self.durability_ensured_fingerprint.load(Relaxed);
+                        while current < new_fingerprint {
+                            if let Err(actual) = self
+                                .durability_ensured_fingerprint
+                                .compare_exchange_weak(current, new_fingerprint, Relaxed, Relaxed)
+                            {
+                                current = actual;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Write access to any changes made in the journal can be granted after the
+                    // anchor is marked `submitted`.
+                    anchor.submit(self.database().task_processor());
+                    return submit_instant;
+                }
                 Err((_, actual)) => current = actual,
             }
         }
@@ -653,6 +703,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
         debug_assert_ne!(transaction_instant, 0);
         if let Some(journal_anchor) = self.journal_anchor_map.remove(&id) {
             journal_anchor.set_submit_instant(transaction_instant);
+            journal_anchor.submit(self.database.task_processor());
             if transaction_instant == u32::MAX {
                 self.submitted_unbounded_journal_anchors
                     .push(journal_anchor);
