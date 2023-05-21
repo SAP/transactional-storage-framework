@@ -375,14 +375,12 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 .store(State::Committing.into(), Release);
         }
 
-        let io_completion =
-            self.database
-                .persistence_layer()
-                .prepare(self.id(), prepare_instant, None);
-
-        if self.xid.is_some() {
-            io_completion.await?;
-        }
+        // The commit log record must be written to the disk after all the other log records in the
+        // transaction have been fully persisted.
+        self.database
+            .persistence_layer()
+            .prepare(self.id(), prepare_instant, None)
+            .await?;
 
         Ok(Committable {
             transaction: Some(self),

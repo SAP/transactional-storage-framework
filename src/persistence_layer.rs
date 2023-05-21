@@ -51,6 +51,29 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitRecovery<S, Self>, Error>;
 
+    /// Backs up the complete database.
+    ///
+    /// If a path is specified, backed up data is stored in it, otherwise a default path set by the
+    /// persistence layer will be used.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the database could not be backed up.
+    fn backup(
+        &self,
+        database: &Database<S, Self>,
+        catalog_only: bool,
+        path: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self>;
+
+    /// Manually generates a checkpoint.
+    fn checkpoint(
+        &self,
+        database: &Database<S, Self>,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self>;
+
     /// The transaction is participating in a distributed transaction.
     fn participate(
         &self,

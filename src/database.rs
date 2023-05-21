@@ -96,15 +96,17 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// Returns an error if the persistence layer failed to back up the database, memory allocation
     /// failed, or the deadline was reached.
-    #[allow(clippy::missing_panics_doc, clippy::unused_async)]
     #[inline]
     pub async fn backup(
         &self,
-        _catalog_only: bool,
-        _path: Option<&str>,
-        _deadline: Option<Instant>,
-    ) -> Result<S::Instant, Error> {
-        todo!();
+        catalog_only: bool,
+        path: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> Result<(), Error> {
+        self.kernel
+            .persistence_layer
+            .backup(self, catalog_only, path, deadline)
+            .await
     }
 
     /// Manually generates a checkpoint.
@@ -113,10 +115,10 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     ///
     /// Returns an error if the persistence layer failed to make a checkpoint, memory allocation
     /// failed, or the deadline was reached.
-    #[allow(clippy::missing_panics_doc, clippy::unused_async)]
     #[inline]
-    pub async fn checkpoint(&self, _deadline: Option<Instant>) -> Result<S::Instant, Error> {
-        todo!();
+    pub async fn checkpoint(&self, deadline: Option<Instant>) -> Result<(), Error> {
+        let io_completion = self.kernel.persistence_layer.checkpoint(self, deadline);
+        io_completion.await
     }
 
     /// Starts a [`Transaction`].

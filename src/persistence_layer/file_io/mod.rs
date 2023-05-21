@@ -77,8 +77,8 @@ pub struct FileLogBuffer {
     /// Flag indicating that the end-of-journal log record should be generated on-the-fly.
     eoj_logging: AtomicBool,
 
-    /// Fingerprint.
-    fingerprint: AtomicU64,
+    /// The assigned batch sequence number.
+    batch_sequence_number: AtomicU64,
 
     /// The address of the next [`FileLogBuffer`].
     next: AtomicUsize,
@@ -250,6 +250,26 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             deadline,
             _phantom: PhantomData,
         })
+    }
+
+    #[inline]
+    fn backup(
+        &self,
+        _database: &Database<S, Self>,
+        _catalog_only: bool,
+        _path: Option<&str>,
+        _deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self> {
+        todo!()
+    }
+
+    #[inline]
+    fn checkpoint(
+        &self,
+        _database: &Database<S, Self>,
+        _deadline: Option<Instant>,
+    ) -> AwaitIO<S, Self> {
+        todo!()
     }
 
     #[inline]
@@ -623,13 +643,13 @@ impl Fingerprint for FileLogBuffer {
     #[inline]
     fn set_fingerprint(&self, fingerprint: u64) {
         debug_assert_ne!(fingerprint, 0);
-        let prev = self.fingerprint.swap(fingerprint, Relaxed);
+        let prev = self.batch_sequence_number.swap(fingerprint, Relaxed);
         debug_assert_eq!(prev, 0);
     }
 
     #[inline]
     fn get_fingerprint(&self) -> Option<NonZeroU64> {
-        NonZeroU64::new(self.fingerprint.load(Acquire))
+        NonZeroU64::new(self.batch_sequence_number.load(Acquire))
     }
 }
 
