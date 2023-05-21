@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::ptr::addr_of;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::Arc;
 use std::task::Waker;
 use std::task::{Context, Poll};
 
@@ -32,7 +33,7 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// End-of-transaction log buffer.
     ///
     /// End-of-transaction log records can only be generated once per transaction.
-    eot_log_buffer: Option<Box<P::LogBuffer>>,
+    eot_log_buffer: Option<Arc<P::LogBuffer>>,
 
     /// The changes made by the transaction.
     ///
@@ -329,13 +330,9 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let new_instant = current.as_ref().and_then(|r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
-        let io_completion = self
-            .database
+        self.database
             .persistence_layer()
             .rewind(self.id(), new_instant, None);
-
-        // Do not wait for an IO completion.
-        io_completion.forget();
 
         Ok(new_instant)
     }
@@ -446,7 +443,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub(crate) fn new(database: &'d Database<S, P>) -> Transaction<'d, S, P> {
         Transaction {
             database,
-            eot_log_buffer: Some(Box::default()),
+            eot_log_buffer: Some(Arc::default()),
             journal_strand: ebr::AtomicArc::null(),
             xid: None,
             anchor: ebr::Arc::new(Anchor::new()),

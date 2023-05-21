@@ -99,15 +99,11 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     #[inline]
     pub async fn backup(
         &self,
-        catalog_only: bool,
-        path: Option<&str>,
-        deadline: Option<Instant>,
+        _catalog_only: bool,
+        _path: Option<&str>,
+        _deadline: Option<Instant>,
     ) -> Result<S::Instant, Error> {
-        let io_completion =
-            self.kernel
-                .persistence_layer
-                .backup(self, catalog_only, path, deadline)?;
-        io_completion.await
+        todo!();
     }
 
     /// Manually generates a checkpoint.
@@ -117,9 +113,8 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
     /// Returns an error if the persistence layer failed to make a checkpoint, memory allocation
     /// failed, or the deadline was reached.
     #[inline]
-    pub async fn checkpoint(&self, deadline: Option<Instant>) -> Result<S::Instant, Error> {
-        let io_completion = self.kernel.persistence_layer.checkpoint(self, deadline);
-        io_completion.await
+    pub async fn checkpoint(&self, _deadline: Option<Instant>) -> Result<S::Instant, Error> {
+        todo!();
     }
 
     /// Starts a [`Transaction`].

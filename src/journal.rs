@@ -27,7 +27,7 @@ pub struct Journal<'d, 't, S: Sequencer, P: PersistenceLayer<S>> {
     transaction: &'t Transaction<'d, S, P>,
 
     /// Own log buffer.
-    log_buffer: Option<Box<P::LogBuffer>>,
+    log_buffer: Option<Arc<P::LogBuffer>>,
 
     /// [`Anchor`] may outlive the [`Journal`].
     anchor: ebr::Arc<Anchor<S>>,
@@ -198,17 +198,13 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
     pub fn submit(mut self) -> NonZeroU32 {
         let submit_instant = self.transaction.record(&self.anchor);
         if let Some(log_buffer) = self.log_buffer.take() {
-            self.transaction
-                .database()
-                .persistence_layer()
-                .submit(
-                    log_buffer,
-                    self.transaction.id(),
-                    self.id(),
-                    Some(submit_instant),
-                    None,
-                )
-                .forget();
+            self.transaction.database().persistence_layer().submit(
+                log_buffer,
+                self.transaction.id(),
+                self.id(),
+                Some(submit_instant),
+                None,
+            );
         }
         submit_instant
     }
@@ -252,7 +248,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
                 .create(*id, self, deadline)
                 .await?;
         }
-        let log_buffer = self.log_buffer.take().map_or_else(Box::default, |b| b);
+        let log_buffer = self.log_buffer.take().map_or_else(Arc::default, |b| b);
         let log_buffer = self.transaction.database().persistence_layer().create(
             log_buffer,
             self.transaction.id(),
@@ -281,7 +277,7 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Journal<'d, 't, S, P> {
                 .delete(*id, self, deadline)
                 .await?;
         }
-        let log_buffer = self.log_buffer.take().map_or_else(Box::default, |b| b);
+        let log_buffer = self.log_buffer.take().map_or_else(Arc::default, |b| b);
         let log_buffer = self.transaction.database().persistence_layer().delete(
             log_buffer,
             self.transaction.id(),
@@ -327,11 +323,12 @@ impl<'d, 't, S: Sequencer, P: PersistenceLayer<S>> Drop for Journal<'d, 't, S, P
             self.anchor
                 .rollback(self.transaction.database().task_processor());
             if let Some(log_buffer) = self.log_buffer.take() {
-                self.transaction
-                    .database()
-                    .persistence_layer()
-                    .discard(log_buffer, self.transaction.id(), self.id(), None)
-                    .forget();
+                self.transaction.database().persistence_layer().discard(
+                    log_buffer,
+                    self.transaction.id(),
+                    self.id(),
+                    None,
+                );
             }
         }
     }

@@ -15,6 +15,7 @@ mod page_manager;
 mod random_access_file;
 mod recovery;
 
+use super::Fingerprint;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use io_task_processor::IOTask;
@@ -27,7 +28,7 @@ use std::fs::{create_dir_all, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
 use std::mem::take;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
@@ -76,8 +77,11 @@ pub struct FileLogBuffer {
     /// Flag indicating that the end-of-journal log record should be generated on-the-fly.
     eoj_logging: bool,
 
+    /// Fingerprint.
+    fingerprint: AtomicU64,
+
     /// The address of the next [`FileLogBuffer`].
-    next: usize,
+    next: AtomicUsize,
 }
 
 /// [`FileIOData`] is shared among the worker and database threads.
@@ -175,13 +179,13 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
     }
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list.
-    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *mut FileLogBuffer) {
+    fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *const FileLogBuffer) {
         let mut head = log_buffer_link.load(Acquire);
         loop {
             // SAFETY: it assumes that the caller provided a valid pointer.
             let log_buffer = unsafe { &mut (*log_buffer_ptr) };
             debug_assert_ne!(log_buffer.bytes_written, 0);
-            log_buffer.next = head;
+            log_buffer.next.store(head, Relaxed);
 
             // `Acquire` is needed to correctly load `batch_sequence_number` afterwards.
             if let Err(actual) =
@@ -195,12 +199,12 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
     }
 
     /// Flushes a log buffer.
-    fn flush(&self, log_buffer: Box<FileLogBuffer>, deadline: Option<Instant>) -> AwaitIO<S, Self> {
-        let file_log_buffer_ptr = Box::into_raw(log_buffer);
+    fn flush(&self, log_buffer: Arc<FileLogBuffer>, deadline: Option<Instant>) -> AwaitIO<S, Self> {
+        let log_buffer_clone = log_buffer.clone();
+        let file_log_buffer_ptr = Arc::into_raw(log_buffer);
         Self::push_log_buffer(&self.file_io_data.log_buffer_link, file_log_buffer_ptr);
-        let batch_sequence_number = self.file_io_data.batch_sequence_number.load(Relaxed);
         drop(self.file_io_task_sender.try_send(IOTask::Flush));
-        AwaitIO::with_fingerprint(self, batch_sequence_number).set_deadline(deadline)
+        AwaitIO::with_log_buffer(self, log_buffer_clone, deadline)
     }
 }
 
@@ -249,43 +253,23 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn backup(
-        &self,
-        _database: &Database<S, Self>,
-        _catalog_only: bool,
-        _path: Option<&str>,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error> {
-        Ok(AwaitIO::with_fingerprint(self, 0).set_deadline(deadline))
-    }
-
-    #[inline]
-    fn checkpoint(
-        &self,
-        _database: &Database<S, Self>,
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self> {
-        AwaitIO::with_fingerprint(self, 0).set_deadline(deadline)
-    }
-
-    #[inline]
     fn participate(
         &self,
         _id: TransactionID,
         _xid: &[u8],
-        deadline: Option<Instant>,
+        _deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        AwaitIO::with_fingerprint(self, 0).set_deadline(deadline)
+        todo!()
     }
 
     #[inline]
     fn create(
         &self,
-        mut log_buffer: Box<Self::LogBuffer>,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Box<Self::LogBuffer>, Error> {
+    ) -> Result<Arc<Self::LogBuffer>, Error> {
         let mut current_log: Option<LogRecord<S>> = None;
         for id in object_ids {
             let new_log = if let Some(log) = current_log.take() {
@@ -335,7 +319,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                                 bytes_written
                             } else {
                                 // The log buffer is full, therefore flush it.
-                                self.flush(take(&mut log_buffer), None).forget();
+                                self.flush(take(&mut log_buffer), None);
                                 log.write(log_buffer.buffer_mut()).unwrap()
                             };
                         log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
@@ -354,7 +338,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 bytes_written
             } else {
                 // The log buffer is full, therefore flush it.
-                self.flush(take(&mut log_buffer), None).forget();
+                self.flush(take(&mut log_buffer), None);
                 log.write(log_buffer.buffer_mut()).unwrap()
             };
             log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
@@ -366,11 +350,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn delete(
         &self,
-        mut log_buffer: Box<Self::LogBuffer>,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Box<Self::LogBuffer>, Error> {
+    ) -> Result<Arc<Self::LogBuffer>, Error> {
         let mut current_log: Option<LogRecord<S>> = None;
         for id in object_ids {
             let new_log = if let Some(log) = current_log.take() {
@@ -420,7 +404,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                                 bytes_written
                             } else {
                                 // The log buffer is full, therefore flush it.
-                                self.flush(take(&mut log_buffer), None).forget();
+                                self.flush(take(&mut log_buffer), None);
                                 log.write(log_buffer.buffer_mut()).unwrap()
                             };
                         log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
@@ -439,7 +423,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 bytes_written
             } else {
                 // The log buffer is full, therefore flush it.
-                self.flush(take(&mut log_buffer), None).forget();
+                self.flush(take(&mut log_buffer), None);
                 log.write(log_buffer.buffer_mut()).unwrap()
             };
             log_buffer.set_buffer_position(log_buffer.pos() + bytes_written);
@@ -451,12 +435,12 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn submit(
         &self,
-        mut log_buffer: Box<Self::LogBuffer>,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, FileIO<S>> {
+    ) {
         debug_assert!(!log_buffer.eoj_logging);
         debug_assert_eq!(log_buffer.submit_instant, 0);
         if let Some(transaction_instant) = transaction_instant {
@@ -474,17 +458,17 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
                 log_buffer.eoj_logging = true;
             }
         }
-        self.flush(log_buffer, deadline)
+        self.flush(log_buffer, deadline);
     }
 
     #[inline]
     fn discard(
         &self,
-        mut log_buffer: Box<Self::LogBuffer>,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self> {
+    ) {
         debug_assert!(!log_buffer.eoj_logging);
         debug_assert_eq!(log_buffer.submit_instant, 0);
         if log_buffer.bytes_written == 0 {
@@ -495,7 +479,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         } else {
             log_buffer.eoj_logging = true;
         }
-        self.flush(log_buffer, deadline)
+        self.flush(log_buffer, deadline);
     }
 
     #[inline]
@@ -504,8 +488,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         transaction_id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self> {
-        let mut log_buffer = Box::<Self::LogBuffer>::default();
+    ) {
+        let mut log_buffer = Arc::<Self::LogBuffer>::default();
         let Some(new_pos) = LogRecord::<S>::TransactionRolledBack(
             transaction_id,
             transaction_instant.map_or(0, NonZeroU32::get))
@@ -513,7 +497,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
-        self.flush(log_buffer, deadline)
+        self.flush(log_buffer, deadline);
     }
 
     #[inline]
@@ -523,7 +507,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         prepare_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        let mut log_buffer = Box::<Self::LogBuffer>::default();
+        let mut log_buffer = Arc::<Self::LogBuffer>::default();
         let Some(new_pos) = LogRecord::<S>::TransactionPrepared(transaction_id, prepare_instant)
             .write(&mut log_buffer.buffer) else {
             unreachable!("logic error");
@@ -535,7 +519,7 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn commit(
         &self,
-        mut log_buffer: Box<Self::LogBuffer>,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         commit_instant: u64,
         deadline: Option<Instant>,
@@ -551,30 +535,24 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn check_io_completion(
         &self,
-        batch_sequence_number: u64,
+        fingerprint: Option<NonZeroU64>,
         waker: &Waker,
     ) -> Option<Result<u64, Error>> {
-        let desired_batch_sequence_number = if batch_sequence_number % 2 == 0 {
-            // The IO task processor was idle.
-            batch_sequence_number + 2
-        } else {
-            // The file was working.
-            batch_sequence_number + 3
-        };
-        if self.file_io_data.batch_sequence_number.load(Acquire) >= desired_batch_sequence_number {
-            Some(Ok(u64::default()))
-        } else {
-            // Push the `Waker` into the bag, and check the value again.
-            self.file_io_data.waker_bag.push(waker.clone());
-            if self.file_io_data.batch_sequence_number.load(Acquire)
-                >= desired_batch_sequence_number
-            {
+        if let Some(fingerprint) = fingerprint {
+            if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
                 Some(Ok(u64::default()))
             } else {
-                // In order to make sure that a new batch is processed, send a message.
-                drop(self.file_io_task_sender.try_send(IOTask::Flush));
-                None
+                // Push the `Waker` into the bag, and check the value again.
+                self.file_io_data.waker_bag.push(waker.clone());
+                if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
+                    Some(Ok(u64::default()))
+                } else {
+                    None
+                }
             }
+        } else {
+            self.file_io_data.waker_bag.push(waker.clone());
+            None
         }
     }
 
@@ -627,15 +605,29 @@ impl FileLogBuffer {
     }
 
     /// Takes the next [`FileLogBuffer`].
-    fn take_next(&mut self) -> Option<Box<FileLogBuffer>> {
-        if self.next == 0 {
+    fn take_next(&mut self) -> Option<Arc<FileLogBuffer>> {
+        if self.next.load(Relaxed) == 0 {
             return None;
         }
-        let log_buffer_ptr = self.next as *mut FileLogBuffer;
+        let log_buffer_ptr = self.next.load(Relaxed) as *mut FileLogBuffer;
         // Safety: the pointer was provided by `Box::into_raw`.
-        let log_buffer = unsafe { Box::from_raw(log_buffer_ptr) };
-        self.next = 0;
+        let log_buffer = unsafe { Arc::from_raw(log_buffer_ptr) };
+        self.next.store(0, Relaxed);
         Some(log_buffer)
+    }
+}
+
+impl Fingerprint for FileLogBuffer {
+    #[inline]
+    fn generate_fingerprint(&self, fingerprint: u64) {
+        debug_assert_ne!(fingerprint, 0);
+        let prev = self.fingerprint.swap(fingerprint, Relaxed);
+        debug_assert_eq!(prev, 0);
+    }
+
+    #[inline]
+    fn get_fingerprint(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.fingerprint.load(Acquire))
     }
 }
 
@@ -647,7 +639,7 @@ mod test {
     use std::time::Duration;
     use tokio::fs::remove_dir_all;
 
-    assert_eq_size!(FileLogBuffer, ([u64; 5], usize));
+    assert_eq_size!(FileLogBuffer, ([u64; 6], usize));
 
     const TIMEOUT_UNEXPECTED: Duration = Duration::from_secs(60);
 
@@ -666,22 +658,22 @@ mod test {
         let path = Path::new(DIR);
         let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
 
-        let mut log_buffer_1 = Box::<FileLogBuffer>::default();
+        let mut log_buffer_1 = Arc::<FileLogBuffer>::default();
         let pos = LogRecord::<MonotonicU64>::TransactionCommitted(0, 3)
             .write(&mut log_buffer_1.buffer)
             .unwrap();
         log_buffer_1.set_buffer_position(pos);
-        let mut log_buffer_2 = Box::<FileLogBuffer>::default();
+        let mut log_buffer_2 = Arc::<FileLogBuffer>::default();
         let pos = LogRecord::<MonotonicU64>::TransactionCommitted(16, 3)
             .write(&mut log_buffer_2.buffer)
             .unwrap();
         log_buffer_2.set_buffer_position(pos);
-        let mut log_buffer_3 = Box::<FileLogBuffer>::default();
+        let mut log_buffer_3 = Arc::<FileLogBuffer>::default();
         let pos = LogRecord::<MonotonicU64>::TransactionCommitted(32, 3)
             .write(&mut log_buffer_3.buffer)
             .unwrap();
         log_buffer_3.set_buffer_position(pos);
-        let mut log_buffer_4 = Box::<FileLogBuffer>::default();
+        let mut log_buffer_4 = Arc::<FileLogBuffer>::default();
         let pos = LogRecord::<MonotonicU64>::TransactionCommitted(48, 3)
             .write(&mut log_buffer_4.buffer)
             .unwrap();

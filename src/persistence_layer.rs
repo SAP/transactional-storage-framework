@@ -9,8 +9,9 @@ use super::{Database, Error, JournalID, Sequencer, TransactionID};
 use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
@@ -29,7 +30,7 @@ use std::time::Instant;
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
     /// [`PersistenceLayer::LogBuffer`] is kept in a transaction journal to store own log records
     /// until the transaction or journal is ended.
-    type LogBuffer: Debug + Default + Send + Sized;
+    type LogBuffer: Fingerprint;
 
     /// Recovers the database before serving any other requests.
     ///
@@ -50,36 +51,8 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> Result<AwaitRecovery<S, Self>, Error>;
 
-    /// Backs up the complete database.
-    ///
-    /// If a path is specified, backed up data is stored in it, otherwise a default path set by the
-    /// persistence layer will be used.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if the database could not be backed up.
-    fn backup(
-        &self,
-        database: &Database<S, Self>,
-        catalog_only: bool,
-        path: Option<&str>,
-        deadline: Option<Instant>,
-    ) -> Result<AwaitIO<S, Self>, Error>;
-
-    /// Manually generates a checkpoint.
-    fn checkpoint(
-        &self,
-        database: &Database<S, Self>,
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
-
     /// The transaction is participating in a distributed transaction.
-    fn participate(
-        &self,
-        transaction_id: TransactionID,
-        xid: &[u8],
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
+    fn participate(&self, transaction_id: TransactionID, xid: &[u8], deadline: Option<Instant>) -> AwaitIO<S, Self>;
 
     /// Writes the fact that the supplied database objects have been created.
     ///
@@ -92,11 +65,11 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Returns an [`Error`] if it fails to write the data to the log buffer.
     fn create(
         &self,
-        log_buffer: Box<Self::LogBuffer>,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Box<Self::LogBuffer>, Error>;
+    ) -> Result<Arc<Self::LogBuffer>, Error>;
 
     /// Writes the fact that the supplied database objects have been deleted.
     ///
@@ -109,11 +82,11 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Returns an [`Error`] if it fails to write the data to the log buffer.
     fn delete(
         &self,
-        log_buffer: Box<Self::LogBuffer>,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         object_ids: &[u64],
-    ) -> Result<Box<Self::LogBuffer>, Error>;
+    ) -> Result<Arc<Self::LogBuffer>, Error>;
 
     /// Submits the content of the log buffer.
     ///
@@ -122,12 +95,12 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// `transaction_instant` is given `None` if the journal is still usable.
     fn submit(
         &self,
-        log_buffer: Box<Self::LogBuffer>,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
+    );
 
     /// Discards the content of the log buffer.
     ///
@@ -135,11 +108,11 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// the transaction.
     fn discard(
         &self,
-        log_buffer: Box<Self::LogBuffer>,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         journal_id: JournalID,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
+    );
 
     /// A transaction is being rewound.
     ///
@@ -151,7 +124,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         transaction_id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
+    );
 
     /// A transaction is being prepared for commit.
     ///
@@ -172,7 +145,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// for the content to be persisted.
     fn commit(
         &self,
-        log_buffer: Box<Self::LogBuffer>,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         commit_instant: S::Instant,
         deadline: Option<Instant>,
@@ -187,7 +160,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// It returns the latest known logical instant value of the database.
     fn check_io_completion(
         &self,
-        fingerprint: u64,
+        fingerprint: Option<NonZeroU64>,
         waker: &Waker,
     ) -> Option<Result<S::Instant, Error>>;
 
@@ -202,6 +175,18 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
 
     /// Cancels database recovery.
     fn cancel_recovery(&self);
+}
+
+/// The fingerprint interface of a log buffer type.
+pub trait Fingerprint: Debug + Default + Send + Sized {
+    /// The log buffer processor generates the fingerprint of a log buffer.
+    fn generate_fingerprint(&self, fingerprint: u64);
+
+    /// The [`AwaitIO`] associated with the log buffer uses the fingerprint value assigned by the
+    /// log buffer processor to check the status of the log buffer.
+    ///
+    /// Returns `None` if a fingerprint has yet to be assigned to it.
+    fn get_fingerprint(&self) -> Option<NonZeroU64>;
 }
 
 /// The result of database recovery.
@@ -230,14 +215,11 @@ pub struct AwaitIO<'p, S: Sequencer, P: PersistenceLayer<S>> {
     /// The persistence layer by which the IO operation is performed.
     persistence_layer: &'p P,
 
-    /// The fingerprint of the [`AwaitIO`].
-    fingerprint: u64,
+    /// The log buffer.
+    log_buffer: Arc<P::LogBuffer>,
 
     /// The deadline of the IO operation.
     deadline: Option<Instant>,
-
-    /// Phantom to use `S`.
-    _phantom: PhantomData<S>,
 }
 
 /// [`AwaitRecovery`] is returned by a [`PersistenceLayer`] after triggering a database recovery.
@@ -258,31 +240,16 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
     /// Creates an [`AwaitIO`] from a fingerprint.
     #[inline]
-    pub fn with_fingerprint(persistence_layer: &'p P, fingerprint: u64) -> AwaitIO<'p, S, P> {
+    pub fn with_log_buffer(
+        persistence_layer: &'p P,
+        log_buffer: Arc<P::LogBuffer>,
+        deadline: Option<Instant>,
+    ) -> AwaitIO<'p, S, P> {
         AwaitIO {
             persistence_layer,
-            fingerprint,
-            deadline: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Sets the deadline.
-    #[inline]
-    #[must_use]
-    pub fn set_deadline(self, deadline: Option<Instant>) -> AwaitIO<'p, S, P> {
-        AwaitIO {
-            persistence_layer: self.persistence_layer,
-            fingerprint: self.fingerprint,
+            log_buffer,
             deadline,
-            _phantom: PhantomData,
         }
-    }
-
-    /// Forgets the IO operation.
-    #[inline]
-    pub fn forget(self) {
-        // Do nothing.
     }
 }
 
@@ -291,9 +258,10 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fingerprint = self.log_buffer.get_fingerprint();
         if let Some(result) = self
             .persistence_layer
-            .check_io_completion(self.fingerprint, cx.waker())
+            .check_io_completion(fingerprint, cx.waker())
         {
             Poll::Ready(result)
         } else if self
@@ -304,6 +272,11 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
             Poll::Ready(Err(Error::Timeout))
         } else {
             // It assumes that the persistence layer will wake up the executor when ready.
+            let new_fingerprint = self.log_buffer.get_fingerprint();
+            if fingerprint != new_fingerprint {
+                // Poll again since the fingerprint has changed.
+                cx.waker().wake_by_ref();
+            }
             Poll::Pending
         }
     }
