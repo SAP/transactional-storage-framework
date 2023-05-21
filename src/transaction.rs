@@ -384,17 +384,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
             self.database
                 .persistence_layer()
                 .prepare(self.id(), prepare_instant, None);
-        if self.xid.is_some()
-            || NonZeroU64::new(self.durability_ensured_fingerprint.load(Relaxed)).map_or(
-                false,
-                |f| {
-                    !self
-                        .database
-                        .persistence_layer()
-                        .check_io_completion(Some(f), None)
-                },
-            )
-        {
+        if self.wait_io_completion(false) {
             // If it is a part of a distributed transaction, or the changes are yet to be
             // persisted, await it.
             io_completion.await?;
@@ -538,6 +528,25 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         TransactionSnapshot::new(self.id(), instant)
     }
 
+    /// Returns `true` if the transaction needs to wait for an IO completion.
+    fn wait_io_completion(&self, commit: bool) -> bool {
+        // The transaction is a part of a distributed transaction, or the transaction has modified
+        // the database and the modification log has yet to be persisted.
+        self.xid.is_some()
+            || NonZeroU64::new(self.durability_ensured_fingerprint.load(Relaxed)).map_or(
+                false,
+                |f| {
+                    // Commit log records should always be completed before the transaction is
+                    // closed if the transaction has modified the database.
+                    commit
+                        || !self
+                            .database
+                            .persistence_layer()
+                            .check_io_completion(Some(f), None)
+                },
+            )
+    }
+
     /// Generates a commit log record.
     fn generate_commit_log_record(&mut self) -> Result<(AwaitIO<'d, S, P>, S::Instant), Error> {
         if let Some(eot_log_buffer) = self.eot_log_buffer.take() {
@@ -627,6 +636,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
             }
             match transaction.generate_commit_log_record() {
                 Ok(commit_log_io) => {
+                    if !transaction.wait_io_completion(true) {
+                        // The transaction has not modified the database.
+                        transaction.post_commit(commit_log_io.1);
+                        return Poll::Ready(Ok(commit_log_io.1));
+                    }
                     self.transaction.replace(transaction);
                     self.commit_log_io.replace(commit_log_io);
                     cx.waker().wake_by_ref();
