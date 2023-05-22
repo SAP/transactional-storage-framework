@@ -30,7 +30,7 @@ use std::time::Instant;
 pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync {
     /// [`PersistenceLayer::LogBuffer`] is kept in a transaction journal to store own log records
     /// until the transaction or journal is ended.
-    type LogBuffer: Fingerprint;
+    type LogBuffer: LogBufferInterface;
 
     /// Recovers the database before serving any other requests.
     ///
@@ -179,20 +179,17 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
-    /// A conservatively estimated fingerprint value for all the pending log buffers.
+    /// Returns the current flush epoch.
     ///
-    /// The returned value must be safe, e.g., all the pending log buffers actually get the
-    /// returned value or any smaller value. If the value cannot be estimated, `None` is returned.
-    fn conservatively_estimated_fingerprint(&self) -> Option<NonZeroU64>;
+    /// If the persistence layer has never been synchronized with the device, `None` is returned.
+    fn current_flush_epoch(&self) -> Option<NonZeroU64>;
 
-    /// Checks if the IO operation associated with the supplied fingerprint data.
+    /// Checks if the IO operation became durable by comparing the current flush epoch of the
+    /// persistence layer and the specified one.
     ///
-    /// The interpretation of the supplied fingerprint data is implementation-specific. If the IO
-    /// operation is still in progress, the supplied [`Waker`] is kept in the [`PersistenceLayer`]
-    /// and notifies it when the operation is completed.
-    ///
-    /// Returns `false` if the IO operation is not completed.
-    fn check_io_completion(&self, fingerprint: Option<NonZeroU64>, waker: Option<&Waker>) -> bool;
+    /// If `None` is given as `expected_flush_epoch` or the current flush epoch has not reached the
+    /// specified one, it stores the supplied [`Waker`] in it and returns `false`.
+    fn check_io_completion(&self, expected_flush_epoch: Option<NonZeroU64>, waker: &Waker) -> bool;
 
     /// Checks if the database has been recovered from the persistence layer.
     ///
@@ -207,19 +204,20 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     fn cancel_recovery(&self);
 }
 
-/// The fingerprint interface of a log buffer type.
-pub trait Fingerprint: Debug + Default + Send + Sized {
-    /// The log buffer processor sets the fingerprint of a log buffer.
+/// The interface between a log buffer and the persistence layer.
+pub trait LogBufferInterface: Debug + Default + Send + Sized {
+    /// The closest flush epoch when the log buffer will be durable.
     ///
-    /// Fingerprints are set only one-time, and setting different fingerprints result in undefined
+    /// The flush epoch values are set only once, calling the method more than once is undefined
     /// behavior.
-    fn set_fingerprint(&self, fingerprint: u64);
+    fn set_durable_flush_epoch(&self, flush_epoch: u64);
 
-    /// The [`AwaitIO`] associated with the log buffer uses the fingerprint value assigned by the
-    /// log buffer processor to check the status of the log buffer.
+    /// The [`AwaitIO`] associated with the log buffer uses the flush epoch value assigned by the
+    /// log buffer processor to check whether the persistence layer is synchronized with the device
+    /// after the log buffer was processed.
     ///
-    /// Returns `None` if a fingerprint has yet to be assigned to it.
-    fn get_fingerprint(&self) -> Option<NonZeroU64>;
+    /// Returns `None` if a durable flush epoch has yet to be assigned to it.
+    fn get_durable_flush_epoch(&self) -> Option<NonZeroU64>;
 }
 
 /// The result of database recovery.
@@ -271,7 +269,7 @@ pub struct AwaitRecovery<'p, S: Sequencer, P: PersistenceLayer<S>> {
 }
 
 impl<'p, S: Sequencer, P: PersistenceLayer<S>> AwaitIO<'p, S, P> {
-    /// Creates an [`AwaitIO`] from a fingerprint.
+    /// Creates an [`AwaitIO`] from a log buffer.
     #[inline]
     pub fn with_log_buffer(
         persistence_layer: &'p P,
@@ -291,10 +289,10 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let fingerprint = self.log_buffer.get_fingerprint();
+        let flush_epoch = self.log_buffer.get_durable_flush_epoch();
         if self
             .persistence_layer
-            .check_io_completion(fingerprint, Some(cx.waker()))
+            .check_io_completion(flush_epoch, cx.waker())
         {
             Poll::Ready(Ok(()))
         } else if self
@@ -305,9 +303,9 @@ impl<'p, S: Sequencer, P: PersistenceLayer<S>> Future for AwaitIO<'p, S, P> {
             Poll::Ready(Err(Error::Timeout))
         } else {
             // It assumes that the persistence layer will wake up the executor when ready.
-            let new_fingerprint = self.log_buffer.get_fingerprint();
-            if fingerprint != new_fingerprint {
-                // Poll again since the fingerprint has changed.
+            let new_flush_epoch = self.log_buffer.get_durable_flush_epoch();
+            if flush_epoch != new_flush_epoch {
+                // Poll again since the flush epoch has changed.
                 cx.waker().wake_by_ref();
             }
             Poll::Pending

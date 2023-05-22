@@ -15,7 +15,7 @@ mod page_manager;
 mod random_access_file;
 mod recovery;
 
-use super::Fingerprint;
+use super::LogBufferInterface;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};
 use crate::{utils, Database, Error, JournalID, PersistenceLayer, Sequencer, TransactionID};
 use io_task_processor::IOTask;
@@ -77,8 +77,11 @@ pub struct FileLogBuffer {
     /// Flag indicating that the end-of-journal log record should be generated on-the-fly.
     eoj_logging: AtomicBool,
 
-    /// The assigned batch sequence number.
-    batch_sequence_number: AtomicU64,
+    /// The flush epoch since when the log buffer will be fully durable.
+    ///
+    /// A value is set once the IO task processor start processing the log buffer, and the log
+    /// buffer shall be persisted in the next epoch.
+    durable_flush_epoch: AtomicU64,
 
     /// The address of the next [`FileLogBuffer`].
     next: AtomicUsize,
@@ -107,8 +110,8 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     #[allow(dead_code)]
     page_manager: PageManager,
 
-    /// Increments every time a log file is flushed.
-    batch_sequence_number: AtomicU64,
+    /// The current flush epoch.
+    flush_epoch: AtomicU64,
 
     /// [`Waker`] bag.
     waker_bag: Bag<Waker>,
@@ -144,7 +147,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
             log,
             log_buffer_link: AtomicUsize::new(0),
             page_manager,
-            batch_sequence_number: AtomicU64::new(0),
+            flush_epoch: AtomicU64::new(0),
             waker_bag: Bag::default(),
         });
         let file_io_data_clone = file_io_data.clone();
@@ -555,28 +558,28 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     }
 
     #[inline]
-    fn conservatively_estimated_fingerprint(&self) -> Option<NonZeroU64> {
-        // `+2` is required to ensure that all the currently pending log buffers are persisted.
-        NonZeroU64::new(self.file_io_data.batch_sequence_number.load(Relaxed) + 2)
+    fn current_flush_epoch(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.file_io_data.flush_epoch.load(Relaxed))
     }
 
     #[inline]
-    fn check_io_completion(&self, fingerprint: Option<NonZeroU64>, waker: Option<&Waker>) -> bool {
-        if let Some(fingerprint) = fingerprint {
-            if self.file_io_data.batch_sequence_number.load(Acquire) >= fingerprint.get() {
-                return true;
-            }
-
-            // Push the `Waker` into the bag, and check the value again.
-            if let Some(waker) = waker {
-                self.file_io_data.waker_bag.push(waker.clone());
-                if self.file_io_data.batch_sequence_number.load(Relaxed) >= fingerprint.get() {
-                    return true;
-                }
-            }
-        } else if let Some(waker) = waker {
+    fn check_io_completion(&self, expected_flush_epoch: Option<NonZeroU64>, waker: &Waker) -> bool {
+        let expected_flush_epoch = expected_flush_epoch.map_or(0, NonZeroU64::get);
+        if expected_flush_epoch == 0 {
             self.file_io_data.waker_bag.push(waker.clone());
+            return false;
         }
+
+        if self.file_io_data.flush_epoch.load(Acquire) >= expected_flush_epoch {
+            return true;
+        }
+
+        // Push the `Waker` into the bag, and check the value again.
+        self.file_io_data.waker_bag.push(waker.clone());
+        if self.file_io_data.flush_epoch.load(Relaxed) >= expected_flush_epoch {
+            return true;
+        }
+
         false
     }
 
@@ -641,17 +644,17 @@ impl FileLogBuffer {
     }
 }
 
-impl Fingerprint for FileLogBuffer {
+impl LogBufferInterface for FileLogBuffer {
     #[inline]
-    fn set_fingerprint(&self, fingerprint: u64) {
-        debug_assert_ne!(fingerprint, 0);
-        let prev = self.batch_sequence_number.swap(fingerprint, Relaxed);
+    fn set_durable_flush_epoch(&self, flush_epoch: u64) {
+        debug_assert_ne!(flush_epoch, 0);
+        let prev = self.durable_flush_epoch.swap(flush_epoch, Relaxed);
         debug_assert_eq!(prev, 0);
     }
 
     #[inline]
-    fn get_fingerprint(&self) -> Option<NonZeroU64> {
-        NonZeroU64::new(self.batch_sequence_number.load(Acquire))
+    fn get_durable_flush_epoch(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.durable_flush_epoch.load(Acquire))
     }
 }
 
