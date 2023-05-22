@@ -11,6 +11,7 @@ use super::evictable_page::EvictablePage;
 use super::io_task_processor::IOTask;
 use super::RandomAccessFile;
 use crate::Error;
+use scc::hash_cache::Entry;
 use scc::HashCache;
 use std::sync::mpsc::SyncSender;
 
@@ -45,6 +46,43 @@ impl PageManager {
             page_cache: HashCache::with_capacity(0x10, 0x100_0000),
             file_io_task_sender,
         })
+    }
+
+    /// Reads a page in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page could not be read.
+    #[inline]
+    pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
+        &self,
+        offset: u64,
+        reader: F,
+    ) -> Result<R, Error> {
+        let mut reader = Some(reader);
+        if let Some(result) = self
+            .page_cache
+            .read_async(&offset, |_, v| reader.take().unwrap()(v))
+            .await
+        {
+            return Ok(result);
+        }
+
+        match self.page_cache.entry_async(offset).await {
+            Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
+            Entry::Vacant(v) => {
+                let evictable_page = EvictablePage::from_file(&self.db, offset)?;
+                let (evicted, mut inserted) = v.put_entry(evictable_page);
+                if let Some((_, mut evicted)) = evicted {
+                    if let Err(e) = evicted.evict(&self.db, offset) {
+                        // Do not evict the entry.
+                        inserted.put(evicted);
+                        return Err(e);
+                    }
+                }
+                Ok(reader.unwrap()(inserted.get()))
+            }
+        }
     }
 }
 

@@ -333,9 +333,14 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         let new_instant = current.as_ref().and_then(|r| r.submit_instant());
         self.journal_strand.swap((current, ebr::Tag::None), Relaxed);
 
-        self.database
-            .persistence_layer()
-            .rewind(self.id(), new_instant, None);
+        if let Some(eot_log_buffer) = self.eot_log_buffer.take() {
+            self.database
+                .persistence_layer()
+                .rewind(eot_log_buffer, self.id(), new_instant, None);
+        }
+        if instant.is_some() {
+            self.eot_log_buffer.replace(Arc::default());
+        }
 
         Ok(new_instant)
     }
@@ -378,15 +383,13 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                 .store(State::Committing.into(), Release);
         }
 
-        // The commit log record must be written to the disk after all the other log records in the
-        // transaction have been fully persisted.
-        let io_completion =
-            self.database
-                .persistence_layer()
-                .prepare(self.id(), prepare_instant, None);
+        let io_completion = self.database.persistence_layer().prepare(
+            Arc::default(),
+            self.id(),
+            prepare_instant,
+            None,
+        );
         if self.determine_need_for_io_completion(false) {
-            // If it is a part of a distributed transaction, or the changes are yet to be
-            // persisted, await it.
             io_completion.await?;
         }
 
