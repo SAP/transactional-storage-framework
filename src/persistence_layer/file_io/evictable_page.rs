@@ -4,9 +4,8 @@
 
 //! Persistent page implementation.
 
-#![allow(dead_code)]
-
-use super::{db_header::PAGE_SIZE, random_access_file::RandomAccessFile};
+use super::db_header::PAGE_SIZE;
+use super::random_access_file::RandomAccessFile;
 use crate::Error;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -16,35 +15,15 @@ use std::sync::atomic::Ordering::Relaxed;
 #[derive(Debug)]
 pub struct EvictablePage {
     /// The type of the page.
-    pub page_type: PageType,
+    page_buffer: PageBuffer,
 
     /// Dirty flag.
-    pub dirty: AtomicBool,
+    dirty: AtomicBool,
 }
 
 /// The type of a page buffer.
+#[allow(clippy::cast_possible_truncation)]
 pub type PageBuffer = Box<[u8; PAGE_SIZE as usize]>;
-
-/// The type of pages.
-#[derive(Debug)]
-pub enum PageType {
-    /// The page is free.
-    Free(PageBuffer),
-
-    /// The page is used as log space.
-    Log(PageBuffer),
-
-    /// The page is used as a directory.
-    ///
-    /// A directory is a list of `u64` values where each `u64` value represents the offset in the
-    /// database file.
-    ///
-    /// The `u64` value prepended to the buffer points to the next directory page of the same kind.
-    Directory(u64, PageBuffer),
-
-    /// The page is used as raw data container.
-    Raw(PageBuffer),
-}
 
 impl EvictablePage {
     /// Creates an [`EvictablePage`] from a file.
@@ -56,19 +35,31 @@ impl EvictablePage {
     #[inline]
     pub fn from_file(db: &RandomAccessFile, offset: u64) -> Result<EvictablePage, Error> {
         #[allow(clippy::uninit_assumed_init, invalid_value)]
-        let mut buffer: PageBuffer = Box::new(
+        let mut page_buffer: PageBuffer = Box::new(
             // Safety: the buffer will be filled by the following file IO.
             unsafe { MaybeUninit::uninit().assume_init() },
         );
 
-        db.read(buffer.as_mut_slice(), offset)
+        db.read(page_buffer.as_mut_slice(), offset)
             .map_err(|e| Error::IO(e.kind()))?;
 
-        // TODO: interpret the page header.
         Ok(Self {
-            page_type: PageType::Raw(buffer),
+            page_buffer,
             dirty: AtomicBool::new(false),
         })
+    }
+
+    /// Reads the content of the page.
+    #[inline]
+    pub fn read<R, F: FnOnce(&[u8]) -> R>(&self, reader: F) -> R {
+        reader(self.page_buffer.as_slice())
+    }
+
+    /// Writes data to the page.
+    #[inline]
+    pub fn write<R, F: FnOnce(&mut [u8]) -> R>(&mut self, writer: F) -> R {
+        self.dirty.store(true, Relaxed);
+        writer(self.page_buffer.as_mut_slice())
     }
 
     /// Evicts the page.
@@ -76,20 +67,16 @@ impl EvictablePage {
     /// # Errors
     ///
     /// Returns an error if writing back the content failed.
+    #[inline]
     pub fn evict(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        let buffer = match &self.page_type {
-            PageType::Free(buffer)
-            | PageType::Log(buffer)
-            | PageType::Directory(_, buffer)
-            | PageType::Raw(buffer) => buffer,
-        };
-        Self::write_back(db, buffer, offset)
+        self.write_back(db, offset)
     }
 
     /// Writes back the buffer.
-    fn write_back(db: &RandomAccessFile, buffer: &PageBuffer, offset: u64) -> Result<(), Error> {
-        db.write(buffer.as_slice(), offset)
+    fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
+        db.write(self.page_buffer.as_slice(), offset)
             .map_err(|e| Error::IO(e.kind()))?;
+        self.dirty.store(false, Relaxed);
         Ok(())
     }
 }
