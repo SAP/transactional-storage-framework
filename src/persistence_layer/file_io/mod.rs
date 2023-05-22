@@ -510,11 +510,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn rewind(
         &self,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
     ) {
-        let mut log_buffer = Arc::<Self::LogBuffer>::default();
         let Some(new_pos) = LogRecord::<S>::TransactionRolledBack(
             transaction_id,
             transaction_instant.map_or(0, NonZeroU32::get))
@@ -528,11 +528,11 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     #[inline]
     fn prepare(
         &self,
+        mut log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         prepare_instant: u64,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
-        let mut log_buffer = Arc::<Self::LogBuffer>::default();
         let Some(new_pos) = LogRecord::<S>::TransactionPrepared(transaction_id, prepare_instant)
             .write(log_buffer.buffer_mut()) else {
             unreachable!("logic error");

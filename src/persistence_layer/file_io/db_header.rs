@@ -14,14 +14,14 @@ pub struct DatabaseHeader {
     /// Version.
     pub version: u64,
 
-    /// The offset in the file that indicates the start page of the log space.
-    pub log_offset: u64,
+    /// The offset in the file that points to the log directory.
+    pub log_directory: u64,
 
-    /// The offset in the file that indicates the start page of the directory space.
-    pub directory_offset: u64,
+    /// The offset in the file that points to the container directory.
+    pub container_directory: u64,
 
-    /// A linked list of free pages.
-    pub free_page_link: u64,
+    /// The offset in the file that points to the free page directory.
+    pub free_page_directory: u64,
 }
 
 /// The database version.
@@ -52,9 +52,9 @@ impl DatabaseHeader {
             let free_page_link = u64::from_le_bytes(buffer);
             Ok(Self {
                 version,
-                log_offset,
-                directory_offset,
-                free_page_link,
+                log_directory: log_offset,
+                container_directory: directory_offset,
+                free_page_directory: free_page_link,
             })
         }
     }
@@ -63,17 +63,17 @@ impl DatabaseHeader {
     #[allow(dead_code)]
     #[inline]
     pub fn flush_header(&self, db: &RandomAccessFile) -> Result<(), Error> {
-        if db.len(Relaxed) < PAGE_SIZE * 3 {
-            db.set_len(PAGE_SIZE * 3).map_err(|e| Error::IO(e.kind()))?;
+        if db.len(Relaxed) < PAGE_SIZE * 4 {
+            db.set_len(PAGE_SIZE * 4).map_err(|e| Error::IO(e.kind()))?;
         }
         let mut buffer;
         buffer = self.version.to_le_bytes();
         db.write(&buffer, 0).map_err(|e| Error::IO(e.kind()))?;
-        buffer = self.log_offset.to_le_bytes();
+        buffer = self.log_directory.to_le_bytes();
         db.write(&buffer, 8).map_err(|e| Error::IO(e.kind()))?;
-        buffer = self.directory_offset.to_le_bytes();
+        buffer = self.container_directory.to_le_bytes();
         db.write(&buffer, 16).map_err(|e| Error::IO(e.kind()))?;
-        buffer = self.free_page_link.to_le_bytes();
+        buffer = self.free_page_directory.to_le_bytes();
         db.write(&buffer, 24).map_err(|e| Error::IO(e.kind()))?;
         db.sync_all().map_err(|e| Error::IO(e.kind()))?;
         Ok(())
@@ -85,9 +85,9 @@ impl Default for DatabaseHeader {
     fn default() -> Self {
         Self {
             version: VERSION,
-            log_offset: PAGE_SIZE,
-            directory_offset: PAGE_SIZE * 2,
-            free_page_link: Default::default(),
+            log_directory: PAGE_SIZE,
+            container_directory: PAGE_SIZE * 2,
+            free_page_directory: PAGE_SIZE * 3,
         }
     }
 }

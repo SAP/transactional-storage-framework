@@ -149,6 +149,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// back, and the corresponding unreachable database objects are cleaned up in the background.
     fn rewind(
         &self,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         transaction_instant: Option<NonZeroU32>,
         deadline: Option<Instant>,
@@ -161,6 +162,7 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// Returns an [`Error`] if the content of the log record could not be passed to the device.
     fn prepare(
         &self,
+        log_buffer: Arc<Self::LogBuffer>,
         transaction_id: TransactionID,
         prepare_instant: S::Instant,
         deadline: Option<Instant>,
