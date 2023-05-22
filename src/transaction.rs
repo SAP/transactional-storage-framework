@@ -30,8 +30,8 @@ pub struct Transaction<'d, S: Sequencer, P: PersistenceLayer<S>> {
     /// commit.
     database: &'d Database<S, P>,
 
-    /// The fingerprint value that ensures the durability of changes made in this transaction.
-    durability_ensured_fingerprint: AtomicU64,
+    /// The flush epoch value that ensures the durability of changes made in this transaction.
+    durable_flush_epoch: AtomicU64,
 
     /// End-of-transaction log buffer.
     ///
@@ -384,17 +384,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
             self.database
                 .persistence_layer()
                 .prepare(self.id(), prepare_instant, None);
-        if self.xid.is_some()
-            || NonZeroU64::new(self.durability_ensured_fingerprint.load(Relaxed)).map_or(
-                false,
-                |f| {
-                    !self
-                        .database
-                        .persistence_layer()
-                        .check_io_completion(Some(f), None)
-                },
-            )
-        {
+        if self.determine_need_for_io_completion(false) {
             // If it is a part of a distributed transaction, or the changes are yet to be
             // persisted, await it.
             io_completion.await?;
@@ -459,7 +449,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub(crate) fn new(database: &'d Database<S, P>) -> Transaction<'d, S, P> {
         Transaction {
             database,
-            durability_ensured_fingerprint: AtomicU64::new(0),
+            durable_flush_epoch: AtomicU64::new(0),
             eot_log_buffer: Some(Arc::default()),
             journal_strand: ebr::AtomicArc::null(),
             xid: None,
@@ -504,17 +494,23 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
                             Some(submit_instant),
                             None,
                         );
-                        let new_fingerprint = self
+
+                        // At least `2` epochs should be ended to make sure that the log buffer is
+                        // fully persisted.
+                        let durable_flush_epoch = self
                             .database
                             .persistence_layer()
-                            .conservatively_estimated_fingerprint()
-                            .map_or(u64::MAX, NonZeroU64::get);
-                        let mut current = self.durability_ensured_fingerprint.load(Relaxed);
-                        while current < new_fingerprint {
-                            if let Err(actual) = self
-                                .durability_ensured_fingerprint
-                                .compare_exchange_weak(current, new_fingerprint, Relaxed, Relaxed)
-                            {
+                            .current_flush_epoch()
+                            .map_or(0, NonZeroU64::get)
+                            + 2;
+                        let mut current = self.durable_flush_epoch.load(Relaxed);
+                        while current < durable_flush_epoch {
+                            if let Err(actual) = self.durable_flush_epoch.compare_exchange_weak(
+                                current,
+                                durable_flush_epoch,
+                                Relaxed,
+                                Relaxed,
+                            ) {
                                 current = actual;
                             } else {
                                 break;
@@ -536,6 +532,18 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     pub(super) fn transaction_snapshot(&self, instant: Option<NonZeroU32>) -> TransactionSnapshot {
         debug_assert!(instant <= self.now());
         TransactionSnapshot::new(self.id(), instant)
+    }
+
+    /// Returns `true` if the transaction needs to wait for an IO completion.
+    fn determine_need_for_io_completion(&self, commit: bool) -> bool {
+        // The transaction is a part of a distributed transaction, or the transaction has modified
+        // the database and the modification log has yet to be persisted.
+        (!commit && self.xid.is_some())
+            || NonZeroU64::new(self.durable_flush_epoch.load(Relaxed)).map_or(false, |f| {
+                // A commit log record should always be completed before the transaction is closed
+                // if the transaction has modified the database.
+                commit || self.database.persistence_layer().current_flush_epoch() < Some(f)
+            })
     }
 
     /// Generates a commit log record.
@@ -627,6 +635,11 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Future for Committable<'d, S, P> 
             }
             match transaction.generate_commit_log_record() {
                 Ok(commit_log_io) => {
+                    if !transaction.determine_need_for_io_completion(true) {
+                        // The transaction has not modified the database.
+                        transaction.post_commit(commit_log_io.1);
+                        return Poll::Ready(Ok(commit_log_io.1));
+                    }
                     self.transaction.replace(transaction);
                     self.commit_log_io.replace(commit_log_io);
                     cx.waker().wake_by_ref();

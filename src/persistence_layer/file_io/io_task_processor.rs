@@ -2,11 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Log IO task processor.
+//! IO task processor.
 
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
-use super::Fingerprint;
+use super::LogBufferInterface;
 use super::{FileIOData, FileLogBuffer, Sequencer};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -17,13 +17,13 @@ use std::thread::yield_now;
 /// Types of file IO related tasks.
 #[derive(Debug)]
 pub enum IOTask {
-    /// The [`FileIO`](super::FileIO) needs to flush log buffers.
+    /// Flushes any pending log buffers.
     Flush,
 
-    /// The [`FileIO`](super::FileIO) needs to recover the database.
+    /// Recovers the database.
     Recover,
 
-    /// The [`FileIO`](super::FileIO) is shutting down.
+    /// Shuts down the IO task processor.
     Shutdown,
 }
 
@@ -58,9 +58,9 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
     file_io_data: &Arc<FileIOData<S>>,
     log_offset: &mut u64,
 ) {
-    let batch_sequence_number = file_io_data.batch_sequence_number.load(Relaxed);
+    let durable_flush_epoch = file_io_data.flush_epoch.load(Relaxed) + 1;
     if let Some(mut log_buffer) =
-        take_log_buffer_link(&file_io_data.log_buffer_link, batch_sequence_number + 1)
+        take_log_buffer_link(&file_io_data.log_buffer_link, durable_flush_epoch)
     {
         loop {
             if file_io_data
@@ -99,9 +99,7 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
             yield_now();
         }
 
-        file_io_data
-            .batch_sequence_number
-            .store(batch_sequence_number + 1, Release);
+        file_io_data.flush_epoch.store(durable_flush_epoch, Release);
         file_io_data.waker_bag.pop_all((), |_, w| w.wake());
     }
 }
@@ -109,17 +107,17 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
 /// Takes the specified [`FileLogBuffer`] linked list.
 fn take_log_buffer_link(
     log_buffer_link: &AtomicUsize,
-    batch_sequence_number: u64,
+    durable_flush_epoch: u64,
 ) -> Option<Arc<FileLogBuffer>> {
     let current_head = log_buffer_link.swap(0, Acquire);
     if current_head != 0 {
         let current_head_ptr = current_head as *mut FileLogBuffer;
-        // Safety: the pointer was provided by `Box::into_raw`.
+        // Safety: the pointer was provided by `Arc::into_raw`.
         let mut current_log_buffer = unsafe { Arc::from_raw(current_head_ptr) };
-        current_log_buffer.set_fingerprint(batch_sequence_number);
+        current_log_buffer.set_durable_flush_epoch(durable_flush_epoch);
         let mut next_log_buffer_opt = current_log_buffer.take_next();
         while let Some(next_log_buffer) = next_log_buffer_opt.take() {
-            next_log_buffer.set_fingerprint(batch_sequence_number);
+            next_log_buffer.set_durable_flush_epoch(durable_flush_epoch);
             // Invert the direction of links to make it a FIFO queue.
             let next_after_next_log_buffer = next_log_buffer.take_next();
             next_log_buffer
