@@ -11,6 +11,7 @@ mod db_header;
 mod evictable_page;
 mod io_task_processor;
 mod log_record;
+mod page_header;
 mod page_manager;
 mod random_access_file;
 mod recovery;
@@ -230,6 +231,12 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     type LogBuffer = FileLogBuffer;
 
     #[inline]
+    fn wait_prepare_logging() -> bool {
+        // Log records do not represent full database change history.
+        true
+    }
+
+    #[inline]
     fn recover(
         &self,
         database: Database<S, Self>,
@@ -261,15 +268,6 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         _database: &Database<S, Self>,
         _catalog_only: bool,
         _path: Option<&str>,
-        _deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self> {
-        todo!()
-    }
-
-    #[inline]
-    fn checkpoint(
-        &self,
-        _database: &Database<S, Self>,
         _deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         todo!()
