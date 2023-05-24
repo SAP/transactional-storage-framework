@@ -50,7 +50,7 @@ impl PageManager {
 
     /// Creates a new page.
     #[allow(clippy::unused_async)]
-    pub async fn create_page<R, F: FnOnce(u64, &mut [u8]) -> R>(
+    pub async fn create_page<R, F: FnOnce(u64, &mut EvictablePage) -> R>(
         &self,
         _writer: F,
     ) -> Result<R, Error> {
@@ -74,7 +74,7 @@ impl PageManager {
     ///
     /// Returns an error if the page could not be read.
     #[inline]
-    pub async fn read_page<R, F: FnOnce(&[u8]) -> R>(
+    pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
         &self,
         offset: u64,
         reader: F,
@@ -83,14 +83,14 @@ impl PageManager {
         let mut reader = Some(reader);
         if let Some(result) = self
             .page_cache
-            .read_async(&offset, |_, v| v.read(reader.take().unwrap()))
+            .read_async(&offset, |_, v| reader.take().unwrap()(v))
             .await
         {
             return Ok(result);
         }
 
         match self.page_cache.entry_async(offset).await {
-            Entry::Occupied(o) => Ok(o.get().read(reader.unwrap())),
+            Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, offset)?;
                 let (evicted, mut inserted) = v.put_entry(evictable_page);
@@ -101,7 +101,7 @@ impl PageManager {
                         return Err(e);
                     }
                 }
-                Ok(inserted.get().read(reader.unwrap()))
+                Ok(reader.unwrap()(inserted.get()))
             }
         }
     }
@@ -112,14 +112,14 @@ impl PageManager {
     ///
     /// Returns an error if the page could not be modified.
     #[inline]
-    pub async fn write_page<R, F: FnOnce(&mut [u8]) -> R>(
+    pub async fn write_page<R, F: FnOnce(&mut EvictablePage) -> R>(
         &self,
         offset: u64,
         writer: F,
     ) -> Result<R, Error> {
         debug_assert_eq!(offset % PAGE_SIZE, 0);
         match self.page_cache.entry_async(offset).await {
-            Entry::Occupied(mut o) => Ok(o.get_mut().write(writer)),
+            Entry::Occupied(mut o) => Ok(writer(o.get_mut())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, offset)?;
                 let (evicted, mut inserted) = v.put_entry(evictable_page);
@@ -130,7 +130,7 @@ impl PageManager {
                         return Err(e);
                     }
                 }
-                Ok(inserted.get_mut().write(writer))
+                Ok(writer(inserted.get_mut()))
             }
         }
     }
