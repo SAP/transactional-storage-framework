@@ -538,14 +538,18 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
     }
 
     /// Returns `true` if the transaction needs to wait for an IO completion.
-    fn determine_need_for_io_completion(&self, commit: bool) -> bool {
+    fn determine_need_for_io_completion(&self, commit_log_record: bool) -> bool {
+        debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
+
         // The transaction is a part of a distributed transaction, or the transaction has modified
         // the database and the modification log has yet to be persisted.
-        (!commit && self.xid.is_some())
+        (!commit_log_record && self.xid.is_some())
             || NonZeroU64::new(self.durable_flush_epoch.load(Relaxed)).map_or(false, |f| {
                 // A commit log record should always be completed before the transaction is closed
                 // if the transaction has modified the database.
-                commit || self.database.persistence_layer().current_flush_epoch() < Some(f)
+                commit_log_record
+                    || (P::wait_prepare_logging()
+                        && self.database.persistence_layer().current_flush_epoch() < Some(f))
             })
     }
 

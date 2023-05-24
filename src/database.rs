@@ -109,18 +109,6 @@ impl<S: Sequencer, P: PersistenceLayer<S>> Database<S, P> {
             .await
     }
 
-    /// Manually generates a checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the persistence layer failed to make a checkpoint, memory allocation
-    /// failed, or the deadline was reached.
-    #[inline]
-    pub async fn checkpoint(&self, deadline: Option<Instant>) -> Result<(), Error> {
-        let io_completion = self.kernel.persistence_layer.checkpoint(self, deadline);
-        io_completion.await
-    }
-
     /// Starts a [`Transaction`].
     ///
     /// # Examples

@@ -32,6 +32,13 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
     /// until the transaction or journal is ended.
     type LogBuffer: LogBufferInterface;
 
+    /// Returns `true` if the prepare log record of the transaction needs to be persisted before
+    /// committing the transaction.
+    ///
+    /// If the log records generated in the transaction are able to fully reconstruct the
+    /// transaction, fully persisting the prepare log record is unnecessary.
+    fn wait_prepare_logging() -> bool;
+
     /// Recovers the database before serving any other requests.
     ///
     /// A call to `recover` must precede any other calls to other methods in the
@@ -64,13 +71,6 @@ pub trait PersistenceLayer<S: Sequencer>: 'static + Debug + Send + Sized + Sync 
         database: &Database<S, Self>,
         catalog_only: bool,
         path: Option<&str>,
-        deadline: Option<Instant>,
-    ) -> AwaitIO<S, Self>;
-
-    /// Manually generates a checkpoint.
-    fn checkpoint(
-        &self,
-        database: &Database<S, Self>,
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self>;
 
