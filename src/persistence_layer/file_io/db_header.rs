@@ -4,6 +4,7 @@
 
 //! The header of the database file.
 
+use super::segment::PAGE_SIZE;
 use super::RandomAccessFile;
 use crate::Error;
 use std::sync::atomic::Ordering::Relaxed;
@@ -26,9 +27,6 @@ pub struct DatabaseHeader {
 
 /// The database version.
 pub const VERSION: u64 = 1;
-
-/// The size of a page.
-pub const PAGE_SIZE: u64 = 1_u64 << 9;
 
 impl DatabaseHeader {
     /// Reads the header from the database file.

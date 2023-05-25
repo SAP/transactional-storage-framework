@@ -11,10 +11,10 @@ mod db_header;
 mod evictable_page;
 mod io_task_processor;
 mod log_record;
-mod page_header;
 mod page_manager;
 mod random_access_file;
 mod recovery;
+mod segment;
 
 use super::LogBufferInterface;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};

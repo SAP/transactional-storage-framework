@@ -4,8 +4,8 @@
 
 //! Persistent page implementation.
 
-use super::db_header::PAGE_SIZE;
 use super::random_access_file::RandomAccessFile;
+use super::segment::PAGE_SIZE;
 use crate::Error;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -49,31 +49,28 @@ impl EvictablePage {
         })
     }
 
-    /// Reads the content of the page.
+    /// Gets a reference to the buffer.
+    #[allow(dead_code)]
     #[inline]
-    pub fn read<R, F: FnOnce(&[u8]) -> R>(&self, reader: F) -> R {
-        reader(self.page_buffer.as_slice())
+    pub fn buffer(&self) -> &[u8] {
+        self.page_buffer.as_slice()
     }
 
-    /// Writes data to the page.
+    /// gets a mutable reference to the buffer.
+    #[allow(dead_code)]
     #[inline]
-    pub fn write<R, F: FnOnce(&mut [u8]) -> R>(&mut self, writer: F) -> R {
+    pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.dirty.store(true, Relaxed);
-        writer(self.page_buffer.as_mut_slice())
+        self.page_buffer.as_mut_slice()
     }
 
-    /// Evicts the page.
+    /// Writes back the page buffer to the file.
     ///
     /// # Errors
     ///
     /// Returns an error if writing back the content failed.
     #[inline]
-    pub fn evict(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        self.write_back(db, offset)
-    }
-
-    /// Writes back the buffer.
-    fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
+    pub fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
         db.write(self.page_buffer.as_slice(), offset)
             .map_err(|e| Error::IO(e.kind()))?;
         self.dirty.store(false, Relaxed);
