@@ -4,9 +4,8 @@
 
 //! Persistent page implementation.
 
-use super::db_header::PAGE_SIZE;
-use super::page_header::PageHeader;
 use super::random_access_file::RandomAccessFile;
+use super::segment::PAGE_SIZE;
 use crate::Error;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -15,9 +14,6 @@ use std::sync::atomic::Ordering::Relaxed;
 /// The in-memory representation of a persistent page.
 #[derive(Debug)]
 pub struct EvictablePage {
-    /// The header of the page.
-    page_header: PageHeader,
-
     /// The type of the page.
     page_buffer: PageBuffer,
 
@@ -46,35 +42,18 @@ impl EvictablePage {
 
         db.read(page_buffer.as_mut_slice(), offset)
             .map_err(|e| Error::IO(e.kind()))?;
-        let page_header = PageHeader::from_buffer(&page_buffer);
 
         Ok(Self {
-            page_header,
             page_buffer,
             dirty: AtomicBool::new(false),
         })
-    }
-
-    /// Gets a reference to the page header.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn header(&self) -> &PageHeader {
-        &self.page_header
-    }
-
-    /// Gets a mutable reference to the page header.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn header_mut(&mut self) -> &mut PageHeader {
-        self.dirty.store(true, Relaxed);
-        &mut self.page_header
     }
 
     /// Gets a reference to the buffer.
     #[allow(dead_code)]
     #[inline]
     pub fn buffer(&self) -> &[u8] {
-        &self.page_buffer[1..]
+        self.page_buffer.as_slice()
     }
 
     /// gets a mutable reference to the buffer.
@@ -82,22 +61,16 @@ impl EvictablePage {
     #[inline]
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.dirty.store(true, Relaxed);
-        &mut self.page_buffer[1..]
+        self.page_buffer.as_mut_slice()
     }
 
-    /// Evicts the page.
+    /// Writes back the page buffer to the file.
     ///
     /// # Errors
     ///
     /// Returns an error if writing back the content failed.
     #[inline]
-    pub fn evict(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        self.write_back(db, offset)
-    }
-
-    /// Writes back the buffer.
-    fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        self.page_header.flush_header(&mut self.page_buffer);
+    pub fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
         db.write(self.page_buffer.as_slice(), offset)
             .map_err(|e| Error::IO(e.kind()))?;
         self.dirty.store(false, Relaxed);

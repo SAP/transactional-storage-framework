@@ -6,9 +6,10 @@
 
 #![allow(dead_code)]
 
-use super::db_header::{DatabaseHeader, PAGE_SIZE};
+use super::db_header::DatabaseHeader;
 use super::evictable_page::EvictablePage;
 use super::io_task_processor::IOTask;
+use super::segment::PAGE_SIZE;
 use super::RandomAccessFile;
 use crate::Error;
 use scc::hash_cache::Entry;
@@ -95,7 +96,7 @@ impl PageManager {
                 let evictable_page = EvictablePage::from_file(&self.db, offset)?;
                 let (evicted, mut inserted) = v.put_entry(evictable_page);
                 if let Some((_, mut evicted)) = evicted {
-                    if let Err(e) = evicted.evict(&self.db, offset) {
+                    if let Err(e) = evicted.write_back(&self.db, offset) {
                         // Do not evict the entry.
                         inserted.put(evicted);
                         return Err(e);
@@ -124,7 +125,7 @@ impl PageManager {
                 let evictable_page = EvictablePage::from_file(&self.db, offset)?;
                 let (evicted, mut inserted) = v.put_entry(evictable_page);
                 if let Some((_, mut evicted)) = evicted {
-                    if let Err(e) = evicted.evict(&self.db, offset) {
+                    if let Err(e) = evicted.write_back(&self.db, offset) {
                         // Do not evict the entry.
                         inserted.put(evicted);
                         return Err(e);
