@@ -15,45 +15,28 @@
 pub struct Segment {
     /// Free page bitmap.
     ///
-    /// The bitmap is able to manage `2048` pages, and the size of the bitmap is `256-byte`.
-    free_pages: [u64; BITMAP_ARRAY_LEN],
-
-    /// The offset in the database file.
-    offset: u64,
-
-    /// The type of the pages in the [`Segment`].
-    page_type: PageType,
+    /// The bitmap is able to address `4096` pages.
+    free_page_bitmap: [[u64; BITMAP_ARRAY_LEN]; 2],
 }
 
-/// The type of pages in a [`Segment`].
-#[derive(Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub enum PageType {
-    /// The pages in the segment contains data.
-    #[default]
-    Data,
-
-    /// The pages in the segment are for log records.
-    Log,
-}
-
-/// The size of a page which is `512-byte`.
+/// The size of a page which is `512B`.
 pub const PAGE_SIZE: u64 = 1_u64 << 9;
 
-/// The size of a [`Segment`] which is `1-megabyte`.
-pub const SEGMENT_SIZE: u64 = 1_u64 << 20;
+/// The size of a [`Segment`] which is `2MB`.
+pub const SEGMENT_SIZE: u64 = 1_u64 << 21;
 
-/// The number of pages in a [`Segment`] which is `2048`.
+/// The number of pages in a [`Segment`] which is `4096`.
 pub const PAGES_PER_SEGMENT: usize = (SEGMENT_SIZE / PAGE_SIZE) as usize;
 
 /// The size of the bitmap in a [`Segment`] which is `32`.
-pub const BITMAP_ARRAY_LEN: usize = PAGES_PER_SEGMENT / (u64::BITS as usize);
+pub const BITMAP_ARRAY_LEN: usize = (PAGES_PER_SEGMENT / (u64::BITS as usize)) / 2;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use static_assertions::const_assert;
 
-    const_assert!(SEGMENT_SIZE == 1_048_576);
-    const_assert!(PAGES_PER_SEGMENT == 2_048);
+    const_assert!(SEGMENT_SIZE == 2_097_152);
+    const_assert!(PAGES_PER_SEGMENT == 4_096);
     const_assert!(BITMAP_ARRAY_LEN == 32);
 }

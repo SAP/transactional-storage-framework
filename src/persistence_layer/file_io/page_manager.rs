@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use super::db_header::DatabaseHeader;
+use super::database_header::DatabaseHeader;
 use super::evictable_page::EvictablePage;
 use super::io_task_processor::IOTask;
 use super::segment::PAGE_SIZE;
