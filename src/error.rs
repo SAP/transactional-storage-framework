@@ -13,6 +13,9 @@ pub enum Error {
     /// The operation conflicts with others.
     Conflict,
 
+    /// The database is corrupt.
+    CorruptDatabase,
+
     /// The operation causes a deadlock.
     Deadlock,
 
