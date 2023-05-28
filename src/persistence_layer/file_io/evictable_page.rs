@@ -14,7 +14,11 @@ use std::sync::atomic::Ordering::Relaxed;
 /// The in-memory representation of a persistent page.
 #[derive(Debug)]
 pub struct EvictablePage {
-    /// The type of the page.
+    /// The content of the page.
+    ///
+    /// The first bit being marked `1` for a page used as a segment directory header or a segment
+    /// indicates that the whole segments in the segment directory were deleted or the segment was
+    /// deleted from the database.
     page_buffer: PageBuffer,
 
     /// Dirty flag.
@@ -47,6 +51,27 @@ impl EvictablePage {
             page_buffer,
             dirty: AtomicBool::new(false),
         })
+    }
+
+    /// Returns `true` if the first bit is marked `1`.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn is_first_bit_set(&self) -> bool {
+        (self.page_buffer[0] & 1_u8) == 1_u8
+    }
+
+    /// Sets the first bit.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn set_first_bit(&mut self) {
+        self.page_buffer[0] |= 1_u8;
+    }
+
+    /// Unsets the first bit.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn unset_first_bit(&mut self) {
+        self.page_buffer[0] &= 1_u8;
     }
 
     /// Gets a reference to the buffer.
