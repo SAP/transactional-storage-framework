@@ -77,8 +77,9 @@ pub const SEGMENT_BITS: u32 = 12;
 
 /// The size of a segment is `2MB`, and each segment contains `4096` pages.
 ///
-/// The first bit of a segment is always `0` until the whole segment is permanently deleted from
-/// the database.
+/// The first bit of a segment is always `1` until the whole segment is permanently deleted from
+/// the database. In other words, a segment with the first bit unset is regarded as a deleted
+/// segment.
 pub const SEGMENT_SIZE: u64 = 1_u64 << (SEGMENT_BITS + PAGE_BITS);
 
 /// The number of pages in a segment which is `4096`.
@@ -90,8 +91,9 @@ pub const PAGES_PER_SEGMENT: usize = (SEGMENT_SIZE / PAGE_SIZE) as usize;
 /// The first page that follows the first segment directory is the database header. Segment
 /// directories are always located at `8GB` boundaries.
 ///
-/// The first bit of a segment directory is always `0` until the whole segments and the segment
-/// directory are permanently deleted from the database.
+/// The first bit of a segment directory is always `1` until the whole segments and the segment
+/// directory are permanently deleted from the database. In other words, a segment directory with
+/// the first bit unset is regarded as an empty and deleted segment directory.
 pub const SEGMENT_DIRECTORY_BITS: u32 = SEGMENT_BITS + PAGE_BITS;
 
 /// The size of a segment directory.
