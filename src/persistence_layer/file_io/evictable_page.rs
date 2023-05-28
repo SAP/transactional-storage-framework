@@ -67,6 +67,13 @@ impl EvictablePage {
         self.page_buffer[0] |= 1_u8;
     }
 
+    /// Unsets the first bit.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn unset_first_bit(&mut self) {
+        self.page_buffer[0] &= 1_u8;
+    }
+
     /// Gets a reference to the buffer.
     #[allow(dead_code)]
     #[inline]
