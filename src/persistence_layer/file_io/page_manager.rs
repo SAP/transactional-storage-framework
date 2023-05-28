@@ -6,10 +6,10 @@
 
 #![allow(dead_code)]
 
+use super::addressing::PAGE_SIZE;
 use super::database_header::DatabaseHeader;
 use super::evictable_page::EvictablePage;
 use super::io_task_processor::IOTask;
-use super::segment::PAGE_SIZE;
 use super::RandomAccessFile;
 use crate::Error;
 use scc::hash_cache::Entry;

@@ -4,8 +4,8 @@
 
 //! Persistent page implementation.
 
+use super::addressing::PAGE_SIZE;
 use super::random_access_file::RandomAccessFile;
-use super::segment::PAGE_SIZE;
 use crate::Error;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
