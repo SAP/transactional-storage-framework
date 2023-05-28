@@ -59,6 +59,13 @@ impl From<u64> for Address {
     }
 }
 
+impl From<Address> for u64 {
+    #[inline]
+    fn from(value: Address) -> Self {
+        value.offset
+    }
+}
+
 /// The number of bits to address every byte in a page.
 pub const PAGE_BITS: u32 = 9;
 
@@ -69,6 +76,9 @@ pub const PAGE_SIZE: u64 = 1_u64 << PAGE_BITS;
 pub const SEGMENT_BITS: u32 = 12;
 
 /// The size of a segment is `2MB`, and each segment contains `4096` pages.
+///
+/// The first bit of a segment is always `0` until the whole segment is permanently deleted from
+/// the database.
 pub const SEGMENT_SIZE: u64 = 1_u64 << (SEGMENT_BITS + PAGE_BITS);
 
 /// The number of pages in a segment which is `4096`.
