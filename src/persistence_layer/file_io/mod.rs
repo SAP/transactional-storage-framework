@@ -7,6 +7,7 @@
 //!
 //! The [`FileIO`] persistence layer only supports `u64` [`Sequencer`] types.
 
+mod addressing;
 mod database_header;
 mod evictable_page;
 mod io_task_processor;
@@ -46,7 +47,6 @@ use std::time::Instant;
 ///
 /// [`FileIO`] spawns two additional threads that are dedicated to file IO operations.
 ///
-/// TODO: implement page cache.
 /// TODO: implement checkpoint.
 #[derive(Debug)]
 pub struct FileIO<S: Sequencer<Instant = u64>> {
