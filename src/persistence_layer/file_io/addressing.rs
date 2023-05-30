@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 /// [`Address`] is an offset in a database file.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Address {
     /// The offset in a database file that the [`Address`] is pointing to.
     offset: u64,
