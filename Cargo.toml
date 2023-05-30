@@ -17,9 +17,9 @@ keywords = ["async", "concurrent", "database"]
 scc = "1.8"
 
 [dev-dependencies]
-criterion = { version = "0.4", features = ["async_futures"] }
+criterion = { version = "0.5", features = ["async_futures"] }
 futures = "0.3"
-proptest = "1.1"
+proptest = "1.2"
 static_assertions = "1.1"
 tokio = { version = "1.2", features = ["full"] }
 
