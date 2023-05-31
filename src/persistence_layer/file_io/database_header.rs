@@ -28,16 +28,12 @@ impl DatabaseHeader {
         let mut buffer = [0_u8; 8];
         if db.len(Relaxed) == 0 {
             // The file is empty, creating a new database.
-            db.set_len(SEGMENT_DIRECTORY_SIZE + PAGE_SIZE)
-                .map_err(|e| Error::IO(e.kind()))?;
+            db.set_len(SEGMENT_DIRECTORY_SIZE + PAGE_SIZE)?;
             buffer = VERSION.to_le_bytes();
-            db.write(&buffer, SEGMENT_DIRECTORY_SIZE)
-                .map_err(|e| Error::IO(e.kind()))?;
-            db.sync_all().map_err(|e| Error::IO(e.kind()))?;
+            db.write(&buffer, SEGMENT_DIRECTORY_SIZE)?;
             Ok(Self { version: VERSION })
         } else {
-            db.read(&mut buffer, SEGMENT_DIRECTORY_SIZE)
-                .map_err(|e| Error::IO(e.kind()))?;
+            db.read(&mut buffer, SEGMENT_DIRECTORY_SIZE)?;
             let version = u64::from_le_bytes(buffer);
             Ok(Self { version })
         }

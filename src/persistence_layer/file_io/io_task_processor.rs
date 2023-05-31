@@ -4,6 +4,7 @@
 
 //! IO task processor.
 
+use super::addressing::Address;
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::LogBufferInterface;
@@ -19,6 +20,10 @@ use std::thread::yield_now;
 pub enum IOTask {
     /// Flushes any pending log buffers.
     Flush,
+
+    /// Writes back the specified page.
+    #[allow(dead_code)]
+    WriteBack(Address),
 
     /// Recovers the database.
     Recover,
@@ -40,6 +45,9 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
         match task {
             IOTask::Flush => {
                 process_log_buffer_batch(file_io_data, &mut log_offset);
+            }
+            IOTask::WriteBack(page_address) => {
+                file_io_data.page_manager.write_back_sync(page_address);
             }
             IOTask::Recover => {
                 recover_database(file_io_data);
@@ -95,10 +103,6 @@ fn process_log_buffer_batch<S: Sequencer<Instant = u64>>(
                 break;
             }
         }
-        while file_io_data.log.sync_all().is_err() {
-            yield_now();
-        }
-
         file_io_data.flush_epoch.store(durable_flush_epoch, Release);
         file_io_data.waker_bag.pop_all((), |_, w| w.wake());
     }

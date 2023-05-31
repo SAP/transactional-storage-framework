@@ -14,6 +14,7 @@ categories = ["asynchronous", "concurrency", "database-implementations"]
 keywords = ["async", "concurrent", "database"]
 
 [dependencies]
+libc = "0.2"
 scc = "1.8"
 
 [dev-dependencies]

@@ -15,6 +15,7 @@ use crate::Error;
 use scc::hash_cache::Entry;
 use scc::HashCache;
 use std::sync::mpsc::SyncSender;
+use std::thread::yield_now;
 
 /// [`PageManager`] provides an interface between the database workers and the persistence layer to
 /// make use of persistent pages.
@@ -160,6 +161,24 @@ impl PageManager {
                 }
                 Ok(writer(inserted.get_mut()))
             }
+        }
+    }
+
+    /// Writes back a dirty page.
+    ///
+    /// It is a synchronous method, therefore it should be run in the background.
+    #[inline]
+    pub fn write_back_sync(&self, page_address: Address) {
+        debug_assert_eq!(page_address, page_address.page_address());
+        while let Some(mut o) = self.page_cache.get(&page_address) {
+            if o.get_mut()
+                .write_back(&self.db, page_address.into())
+                .is_ok()
+            {
+                break;
+            }
+            drop(o);
+            yield_now();
         }
     }
 }

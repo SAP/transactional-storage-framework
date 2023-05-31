@@ -49,9 +49,7 @@ impl EvictablePage {
             // Safety: the buffer will be filled by the following file IO.
             unsafe { MaybeUninit::uninit().assume_init() },
         );
-
-        db.read(page_buffer.as_mut_slice(), offset)
-            .map_err(|e| Error::IO(e.kind()))?;
+        db.read(page_buffer.as_mut_slice(), offset)?;
 
         Ok(Self {
             page_buffer,
@@ -126,8 +124,7 @@ impl EvictablePage {
     /// Returns an error if writing back the content failed.
     #[inline]
     pub fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        db.write(self.page_buffer.as_slice(), offset)
-            .map_err(|e| Error::IO(e.kind()))?;
+        db.write(self.page_buffer.as_slice(), offset)?;
         self.dirty.store(false, Relaxed);
         Ok(())
     }

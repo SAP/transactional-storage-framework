@@ -8,7 +8,13 @@ SPDX-License-Identifier: Apache-2.0
 
 This documentation describes how the framework and the file-IO persistence layer ensure the ACID properties and implement multi-version concurrency control.
 
-## Control flow
+## Persistence Layer
+
+* WORK IN PROGRESS.
+
+The default persistence layer implementation heavily relies on [io_uring](https://en.wikipedia.org/wiki/Io_uring) which is unfortunately only available on `Linux`. The details can be found in [file_io](file_io.md).
+
+## Control Flow
 
 ### Insert data into the database
 
