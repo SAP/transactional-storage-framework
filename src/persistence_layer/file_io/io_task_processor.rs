@@ -55,7 +55,9 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
                 file_io_data.page_manager.write_back_sync(page_address);
             }
             IOTask::WriteBackEvicted(mut evictable_page) => {
-                file_io_data.page_manager.write_back_evicted_sync(&mut evictable_page);
+                file_io_data
+                    .page_manager
+                    .write_back_evicted_sync(&mut evictable_page);
             }
             IOTask::Recover => {
                 recover_database(file_io_data);
