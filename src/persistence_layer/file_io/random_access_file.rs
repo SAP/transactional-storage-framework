@@ -88,13 +88,6 @@ impl RandomAccessFile {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn custom_flag() -> c_int {
-    // Synchronous direct access to the device.
-    O_DIRECT | O_SYNC
-}
-
-#[cfg(target_os = "macos")]
 fn custom_flag() -> c_int {
     // `O_DIRECT` is unavailable.
     O_SYNC
