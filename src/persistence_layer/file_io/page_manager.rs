@@ -4,8 +4,6 @@
 
 //! Page management.
 
-#![allow(dead_code)]
-
 use super::addressing::Address;
 use super::database_header::DatabaseHeader;
 use super::evictable_page::EvictablePage;
@@ -15,6 +13,7 @@ use crate::Error;
 use scc::hash_cache::Entry;
 use scc::HashCache;
 use std::sync::mpsc::SyncSender;
+use std::thread::yield_now;
 
 /// [`PageManager`] provides an interface between the database workers and the persistence layer to
 /// make use of persistent pages.
@@ -24,10 +23,11 @@ pub struct PageManager {
     db: RandomAccessFile,
 
     /// The database header.
+    #[allow(dead_code)]
     db_header: DatabaseHeader,
 
     /// Cached pages.
-    page_cache: HashCache<Address, EvictablePage>,
+    page_cache: HashCache<Address, Box<EvictablePage>>,
 
     /// File IO task sender.
     file_io_task_sender: SyncSender<IOTask>,
@@ -53,7 +53,7 @@ impl PageManager {
     ///
     /// This tries to search for a free page in the corresponding segment of the supplied address,
     /// and then search the associated segment directory, and then the entire database file.
-    #[allow(clippy::unused_async)]
+    #[allow(dead_code, clippy::unused_async)]
     pub async fn create_page<R, F: FnOnce(u64, &mut EvictablePage) -> R>(
         &self,
         known_address: Address,
@@ -90,7 +90,7 @@ impl PageManager {
     /// Deletes an existing page.
     ///
     /// Returns the new size of the file.
-    #[allow(clippy::unused_async)]
+    #[allow(dead_code, clippy::unused_async)]
     pub async fn delete_page(&self, _page_address: Address) -> Result<u64, Error> {
         // TODO: push the page into the free page directory or truncate the file.
         Err(Error::UnexpectedState)
@@ -101,6 +101,7 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be read.
+    #[allow(dead_code)]
     #[inline]
     pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
         &self,
@@ -121,9 +122,9 @@ impl PageManager {
             Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
-                let (evicted, mut inserted) = v.put_entry(evictable_page);
+                let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
                 if let Some((_, mut evicted)) = evicted {
-                    if let Err(e) = evicted.write_back(&self.db, page_address.into()) {
+                    if let Err(e) = evicted.write_back(&self.db) {
                         // Do not evict the entry.
                         inserted.put(evicted);
                         return Err(e);
@@ -146,20 +147,47 @@ impl PageManager {
         writer: F,
     ) -> Result<R, Error> {
         debug_assert_eq!(page_address, page_address.page_address());
-        match self.page_cache.entry_async(page_address).await {
-            Entry::Occupied(mut o) => Ok(writer(o.get_mut())),
+        let (evicted, result) = match self.page_cache.entry_async(page_address).await {
+            Entry::Occupied(mut o) => return Ok(writer(o.get_mut())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
-                let (evicted, mut inserted) = v.put_entry(evictable_page);
-                if let Some((_, mut evicted)) = evicted {
-                    if let Err(e) = evicted.write_back(&self.db, page_address.into()) {
-                        // Do not evict the entry.
-                        inserted.put(evicted);
-                        return Err(e);
-                    }
-                }
-                Ok(writer(inserted.get_mut()))
+                let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
+                (evicted, writer(inserted.get_mut()))
             }
+        };
+        if let Some((_, evicted)) = evicted {
+            if evicted.is_dirty() {
+                drop(
+                    self.file_io_task_sender
+                        .send(IOTask::WriteBackEvicted(evicted)),
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    /// Writes back a dirty page.
+    ///
+    /// It is a synchronous method, therefore it should be run in the background.
+    #[inline]
+    pub fn write_back_sync(&self, page_address: Address) {
+        debug_assert_eq!(page_address, page_address.page_address());
+        while let Some(mut o) = self.page_cache.get(&page_address) {
+            if o.get_mut().write_back(&self.db).is_ok() {
+                break;
+            }
+            drop(o);
+            yield_now();
+        }
+    }
+
+    /// Write back the evicted page.
+    ///
+    /// It is a synchronous method, therefore it should be run in the background.
+    #[inline]
+    pub fn write_back_evicted_sync(&self, page: &mut EvictablePage) {
+        while page.write_back(&self.db).is_err() {
+            yield_now();
         }
     }
 }

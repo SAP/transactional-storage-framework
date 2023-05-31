@@ -26,8 +26,7 @@ use page_manager::PageManager;
 use random_access_file::RandomAccessFile;
 use recovery::RecoveryData;
 use scc::Bag;
-use std::fs::{create_dir_all, OpenOptions};
-use std::io;
+use std::fs::create_dir_all;
 use std::marker::PhantomData;
 use std::mem::take;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -108,7 +107,6 @@ struct FileIOData<S: Sequencer<Instant = u64>> {
     log_buffer_link: AtomicUsize,
 
     /// The page manager.
-    #[allow(dead_code)]
     page_manager: PageManager,
 
     /// The current flush epoch.
@@ -168,18 +166,9 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         file_name: &'static str,
     ) -> Result<RandomAccessFile, Error> {
         path_buffer.push(Path::new(file_name));
-        let Some(file_path) = path_buffer.to_str() else {
-            return Err(Error::IO(io::ErrorKind::NotFound));
-        };
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(file_path)
-            .map_err(|e| Error::IO(e.kind()))?;
-        let metadata = file.metadata().map_err(|e| Error::IO(e.kind()))?;
+        let file = RandomAccessFile::from_file(path_buffer.as_path())?;
         path_buffer.pop();
-        Ok(RandomAccessFile::from_file(file, &metadata))
+        Ok(file)
     }
 
     /// Pushes a [`FileLogBuffer`] into the log buffer linked list.

@@ -36,8 +36,8 @@ jobs:
       run: cargo test --release --verbose
     - name: Doc
       run: cargo doc --document-private-items
-  basic-windows:
-    runs-on: windows-latest
+  basic-macos:
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v3

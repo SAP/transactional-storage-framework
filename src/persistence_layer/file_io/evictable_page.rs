@@ -14,6 +14,9 @@ use std::sync::atomic::Ordering::Relaxed;
 /// The in-memory representation of a persistent page.
 #[derive(Debug)]
 pub struct EvictablePage {
+    /// The offset in the file.
+    offset: u64,
+
     /// The content of the page.
     ///
     /// The first bit being `0` for a special page represents a special state of the page.
@@ -49,11 +52,10 @@ impl EvictablePage {
             // Safety: the buffer will be filled by the following file IO.
             unsafe { MaybeUninit::uninit().assume_init() },
         );
-
-        db.read(page_buffer.as_mut_slice(), offset)
-            .map_err(|e| Error::IO(e.kind()))?;
+        db.read(page_buffer.as_mut_slice(), offset)?;
 
         Ok(Self {
+            offset,
             page_buffer,
             dirty: AtomicBool::new(false),
         })
@@ -113,6 +115,12 @@ impl EvictablePage {
         self.page_buffer.as_mut_slice()
     }
 
+    /// Returns `true` if the page is dirty.
+    #[inline]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Relaxed)
+    }
+
     /// Sets the page dirty.
     #[inline]
     pub fn set_dirty(&mut self) {
@@ -125,9 +133,8 @@ impl EvictablePage {
     ///
     /// Returns an error if writing back the content failed.
     #[inline]
-    pub fn write_back(&mut self, db: &RandomAccessFile, offset: u64) -> Result<(), Error> {
-        db.write(self.page_buffer.as_slice(), offset)
-            .map_err(|e| Error::IO(e.kind()))?;
+    pub fn write_back(&mut self, db: &RandomAccessFile) -> Result<(), Error> {
+        db.write(self.page_buffer.as_slice(), self.offset)?;
         self.dirty.store(false, Relaxed);
         Ok(())
     }
