@@ -5,8 +5,6 @@
 //! Abstraction over an operating system file for random access operations.
 
 use crate::Error;
-#[cfg(target_os = "linux")]
-use libc::O_DIRECT;
 use libc::O_SYNC;
 use std::fs::{File, OpenOptions};
 use std::os::raw::c_int;
@@ -90,6 +88,8 @@ impl RandomAccessFile {
 
 fn custom_flag() -> c_int {
     // `O_DIRECT` is unavailable.
+    //
+    // TODO: replace it with io_uring.
     O_SYNC
 }
 

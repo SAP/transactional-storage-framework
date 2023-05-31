@@ -5,6 +5,7 @@
 //! IO task processor.
 
 use super::addressing::Address;
+use super::evictable_page::EvictablePage;
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
 use super::LogBufferInterface;
@@ -24,6 +25,10 @@ pub enum IOTask {
     /// Writes back the specified page.
     #[allow(dead_code)]
     WriteBack(Address),
+
+    /// Writes back the evicted page.
+    #[allow(dead_code)]
+    WriteBackEvicted(Box<EvictablePage>),
 
     /// Recovers the database.
     Recover,
@@ -48,6 +53,9 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
             }
             IOTask::WriteBack(page_address) => {
                 file_io_data.page_manager.write_back_sync(page_address);
+            }
+            IOTask::WriteBackEvicted(mut evictable_page) => {
+                file_io_data.page_manager.write_back_evicted_sync(&mut evictable_page);
             }
             IOTask::Recover => {
                 recover_database(file_io_data);
