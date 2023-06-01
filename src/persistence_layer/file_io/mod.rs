@@ -15,7 +15,6 @@ mod log_record;
 mod page_manager;
 mod random_access_file;
 mod recovery;
-mod segment;
 
 use super::LogBufferInterface;
 use crate::persistence_layer::{AwaitIO, AwaitRecovery, RecoveryResult};

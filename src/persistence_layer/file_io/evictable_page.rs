@@ -54,7 +54,8 @@ pub struct EvictablePage {
 #[allow(clippy::cast_possible_truncation)]
 pub type PageBuffer = [u8; PAGE_SIZE as usize];
 
-const PAGE_HEADER_LEN: usize = 16;
+/// The length of the page header of a page.
+pub const PAGE_HEADER_LEN: usize = 16;
 
 impl EvictablePage {
     /// Creates an [`EvictablePage`] from a file.
