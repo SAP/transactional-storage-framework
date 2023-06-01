@@ -49,42 +49,16 @@ impl PageManager {
         })
     }
 
-    /// Creates a new page.
-    ///
-    /// This tries to search for a free page in the corresponding segment of the supplied address,
-    /// and then search the associated segment directory, and then the entire database file.
+    /// Creates a new page and appends the newly created page to the specified page.
     #[allow(dead_code, clippy::unused_async)]
     pub async fn create_page<R, F: FnOnce(u64, &mut EvictablePage) -> R>(
         &self,
-        known_address: Address,
+        _previous_page: Address,
         _writer: F,
     ) -> Result<R, Error> {
         // TODO: check out the free page directory, and send a request to the IO task processor to
         // get a new page if none is free.
-        let segment_address = known_address.segment_address();
-        let free_page_in_segment = self
-            .write_page(segment_address, |page| {
-                if page.is_first_bit_set() {
-                    // The segment was deleted.
-                    return 0;
-                }
-                for (offset, d) in page.buffer_mut().iter_mut().enumerate() {
-                    let free_index = d.trailing_ones();
-                    if free_index < u8::BITS {
-                        *d |= 1_u8 << free_index;
-                        page.set_dirty();
-                        return offset * (u8::BITS as usize) + free_index as usize;
-                    }
-                }
-                0
-            })
-            .await?;
-        if free_page_in_segment == 0 {
-            // Search the segment directory.
-            Err(Error::UnexpectedState)
-        } else {
-            todo!()
-        }
+        Err(Error::UnexpectedState)
     }
 
     /// Deletes an existing page.
@@ -122,12 +96,13 @@ impl PageManager {
             Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
-                let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
-                if let Some((_, mut evicted)) = evicted {
-                    if let Err(e) = evicted.write_back(&self.db) {
-                        // Do not evict the entry.
-                        inserted.put(evicted);
-                        return Err(e);
+                let (evicted, inserted) = v.put_entry(Box::new(evictable_page));
+                if let Some((_, evicted)) = evicted {
+                    if evicted.is_dirty() {
+                        drop(
+                            self.file_io_task_sender
+                                .send(IOTask::WriteBackEvicted(evicted)),
+                        );
                     }
                 }
                 Ok(reader.unwrap()(inserted.get()))
@@ -140,6 +115,7 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be modified.
+    #[allow(dead_code)]
     #[inline]
     pub async fn write_page<R, F: FnOnce(&mut EvictablePage) -> R>(
         &self,
@@ -147,26 +123,25 @@ impl PageManager {
         writer: F,
     ) -> Result<R, Error> {
         debug_assert_eq!(page_address, page_address.page_address());
-        let (evicted, result) = match self.page_cache.entry_async(page_address).await {
-            Entry::Occupied(mut o) => return Ok(writer(o.get_mut())),
+        match self.page_cache.entry_async(page_address).await {
+            Entry::Occupied(mut o) => Ok(writer(o.get_mut())),
             Entry::Vacant(v) => {
                 let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
                 let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
-                (evicted, writer(inserted.get_mut()))
-            }
-        };
-        if let Some((_, evicted)) = evicted {
-            if evicted.is_dirty() {
-                drop(
-                    self.file_io_task_sender
-                        .send(IOTask::WriteBackEvicted(evicted)),
-                );
+                if let Some((_, evicted)) = evicted {
+                    if evicted.is_dirty() {
+                        drop(
+                            self.file_io_task_sender
+                                .send(IOTask::WriteBackEvicted(evicted)),
+                        );
+                    }
+                }
+                Ok(writer(inserted.get_mut()))
             }
         }
-        Ok(result)
     }
 
-    /// Writes back a dirty page.
+    /// Writes back a dirty page with the page retained in the cache.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
     #[inline]
