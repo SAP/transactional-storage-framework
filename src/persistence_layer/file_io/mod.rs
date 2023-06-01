@@ -7,7 +7,6 @@
 //!
 //! The [`FileIO`] persistence layer only supports `u64` [`Sequencer`] types.
 
-mod addressing;
 mod database_header;
 mod evictable_page;
 mod io_task_processor;

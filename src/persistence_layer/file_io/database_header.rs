@@ -4,8 +4,7 @@
 
 //! The header of the database file.
 
-use super::addressing::PAGE_SIZE;
-use super::evictable_page::{EvictablePage, PAGE_HEADER_LEN};
+use super::evictable_page::{EvictablePage, PAGE_HEADER_LEN, PAGE_SIZE};
 use super::RandomAccessFile;
 use crate::Error;
 use std::sync::atomic::Ordering::Relaxed;
