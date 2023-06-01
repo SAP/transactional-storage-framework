@@ -4,7 +4,6 @@
 
 //! IO task processor.
 
-use super::addressing::Address;
 use super::evictable_page::EvictablePage;
 use super::log_record::LogRecord;
 use super::recovery::recover_database;
@@ -24,7 +23,7 @@ pub enum IOTask {
 
     /// Writes back the specified page.
     #[allow(dead_code)]
-    WriteBack(Address),
+    WriteBack(u64),
 
     /// Writes back the evicted page.
     #[allow(dead_code)]

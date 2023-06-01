@@ -4,9 +4,8 @@
 
 //! Page management.
 
-use super::addressing::Address;
 use super::database_header::DatabaseHeader;
-use super::evictable_page::EvictablePage;
+use super::evictable_page::{EvictablePage, PAGE_SIZE};
 use super::io_task_processor::IOTask;
 use super::RandomAccessFile;
 use crate::Error;
@@ -27,7 +26,7 @@ pub struct PageManager {
     db_header: DatabaseHeader,
 
     /// Cached pages.
-    page_cache: HashCache<Address, Box<EvictablePage>>,
+    page_cache: HashCache<u64, Box<EvictablePage>>,
 
     /// File IO task sender.
     file_io_task_sender: SyncSender<IOTask>,
@@ -53,20 +52,55 @@ impl PageManager {
     #[allow(dead_code, clippy::unused_async)]
     pub async fn create_page<R, F: FnOnce(u64, &mut EvictablePage) -> R>(
         &self,
-        _previous_page: Address,
-        _writer: F,
+        prev_page_address: u64,
+        writer: F,
     ) -> Result<R, Error> {
-        // TODO: check out the free page directory, and send a request to the IO task processor to
-        // get a new page if none is free.
-        Err(Error::UnexpectedState)
+        debug_assert_eq!(prev_page_address % PAGE_SIZE, 0);
+        let free_page = self.get_free_page(prev_page_address).await?;
+        let free_page_address = free_page.address();
+        match self.page_cache.entry_async(free_page.address()).await {
+            Entry::Occupied(mut o) => {
+                // The page was already cached.
+                if o.get().is_dirty() {
+                    // TODO: handle this.
+                    unimplemented!();
+                } else if o.get().prev_page_address() != prev_page_address {
+                    // TODO: handle this.
+                    unimplemented!();
+                }
+                Ok(writer(free_page_address, o.get_mut()))
+            }
+            Entry::Vacant(v) => {
+                let (evicted, mut inserted) = v.put_entry(Box::new(free_page));
+                if let Some((_, evicted)) = evicted {
+                    if evicted.is_dirty() {
+                        drop(
+                            self.file_io_task_sender
+                                .send(IOTask::WriteBackEvicted(evicted)),
+                        );
+                    }
+                }
+                Ok(writer(free_page_address, inserted.get_mut()))
+            }
+        }
     }
 
     /// Deletes an existing page.
-    ///
-    /// Returns the new size of the file.
     #[allow(dead_code, clippy::unused_async)]
-    pub async fn delete_page(&self, _page_address: Address) -> Result<u64, Error> {
-        // TODO: push the page into the free page directory or truncate the file.
+    pub async fn delete_page(&self, page_address: u64) -> Result<(), Error> {
+        debug_assert_eq!(page_address % PAGE_SIZE, 0);
+        let (_prev_page_address, _next_page_address) = self
+            .write_page(page_address, |e| {
+                let prev_page_address = e.prev_page_address();
+                e.set_prev_page_address(0);
+                e.set_dirty();
+                (prev_page_address, e.next_page_address())
+            })
+            .await?;
+        // TODO: set the `NEXT_OFFSET` field of the previous page and set the `PREV_OFFSET` field
+        // of the next page.
+        self.add_free_page(page_address).await?;
+
         Err(Error::UnexpectedState)
     }
 
@@ -79,10 +113,10 @@ impl PageManager {
     #[inline]
     pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
         &self,
-        page_address: Address,
+        page_address: u64,
         reader: F,
     ) -> Result<R, Error> {
-        debug_assert_eq!(page_address, page_address.page_address());
+        debug_assert_eq!(page_address % PAGE_SIZE, 0);
         let mut reader = Some(reader);
         if let Some(result) = self
             .page_cache
@@ -95,7 +129,7 @@ impl PageManager {
         match self.page_cache.entry_async(page_address).await {
             Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
             Entry::Vacant(v) => {
-                let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
+                let evictable_page = EvictablePage::from_file(&self.db, page_address)?;
                 let (evicted, inserted) = v.put_entry(Box::new(evictable_page));
                 if let Some((_, evicted)) = evicted {
                     if evicted.is_dirty() {
@@ -119,14 +153,14 @@ impl PageManager {
     #[inline]
     pub async fn write_page<R, F: FnOnce(&mut EvictablePage) -> R>(
         &self,
-        page_address: Address,
+        page_address: u64,
         writer: F,
     ) -> Result<R, Error> {
-        debug_assert_eq!(page_address, page_address.page_address());
+        debug_assert_eq!(page_address % PAGE_SIZE, 0);
         match self.page_cache.entry_async(page_address).await {
             Entry::Occupied(mut o) => Ok(writer(o.get_mut())),
             Entry::Vacant(v) => {
-                let evictable_page = EvictablePage::from_file(&self.db, page_address.into())?;
+                let evictable_page = EvictablePage::from_file(&self.db, page_address)?;
                 let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
                 if let Some((_, evicted)) = evicted {
                     if evicted.is_dirty() {
@@ -145,8 +179,8 @@ impl PageManager {
     ///
     /// It is a synchronous method, therefore it should be run in the background.
     #[inline]
-    pub fn write_back_sync(&self, page_address: Address) {
-        debug_assert_eq!(page_address, page_address.page_address());
+    pub fn write_back_sync(&self, page_address: u64) {
+        debug_assert_eq!(page_address % PAGE_SIZE, 0);
         while let Some(mut o) = self.page_cache.get(&page_address) {
             if o.get_mut().write_back(&self.db).is_ok() {
                 break;
@@ -165,11 +199,46 @@ impl PageManager {
             yield_now();
         }
     }
+
+    /// Gets a free page.
+    #[allow(clippy::unused_async)]
+    #[inline]
+    async fn get_free_page(&self, _prev_page_address: u64) -> Result<EvictablePage, Error> {
+        todo!()
+    }
+
+    /// Adds a free page.
+    #[allow(clippy::unused_async)]
+    #[inline]
+    async fn add_free_page(&self, _free_page_address: u64) -> Result<(), Error> {
+        todo!()
+    }
 }
 
 impl Drop for PageManager {
     #[inline]
     fn drop(&mut self) {
         // TODO: cleanup pages.
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{FileIO, MonotonicU64};
+    use std::path::Path;
+    use tokio::fs::remove_dir_all;
+
+    #[tokio::test]
+    async fn create() {
+        const DIR: &str = "page_manager_create_test";
+        let path = Path::new(DIR);
+
+        let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        drop(file_io);
+
+        let file_io_recovered = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        drop(file_io_recovered);
+
+        assert!(remove_dir_all(path).await.is_ok());
     }
 }

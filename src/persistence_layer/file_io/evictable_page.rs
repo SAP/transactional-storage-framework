@@ -4,7 +4,6 @@
 
 //! Persistent page implementation.
 
-use super::addressing::PAGE_SIZE;
 use super::random_access_file::RandomAccessFile;
 use crate::Error;
 use std::mem::MaybeUninit;
@@ -39,10 +38,10 @@ use std::mem::MaybeUninit;
 ///    page list.
 #[derive(Debug)]
 pub struct EvictablePage {
-    /// The offset in the file and the dirty flag of the page.
+    /// The address of the page and the dirty flag of the page.
     ///
-    /// The layout of the field is `offset: 63-bit|dirty_flag: 1-bit`.
-    offset_and_dirty_flag: u64,
+    /// The layout of the field is `address: 63-bit|dirty_flag: 1-bit`.
+    address_and_dirty_flag: u64,
 
     /// The content of the page.
     ///
@@ -53,6 +52,9 @@ pub struct EvictablePage {
 /// The type of a page buffer.
 #[allow(clippy::cast_possible_truncation)]
 pub type PageBuffer = [u8; PAGE_SIZE as usize];
+
+/// The size of a page.
+pub const PAGE_SIZE: u64 = 512;
 
 /// The length of the page header of a page.
 pub const PAGE_HEADER_LEN: usize = 16;
@@ -65,29 +67,68 @@ impl EvictablePage {
     ///
     /// TODO: it is a blocking system call, therefore need to replace it with an AIO lib.
     #[inline]
-    pub fn from_file(db: &RandomAccessFile, offset: u64) -> Result<EvictablePage, Error> {
+    pub fn from_file(db: &RandomAccessFile, address: u64) -> Result<EvictablePage, Error> {
         #[allow(clippy::uninit_assumed_init, invalid_value)]
         // Safety: the buffer will be filled by the following file IO.
         let mut page_buffer: PageBuffer = unsafe { MaybeUninit::uninit().assume_init() };
-        db.read(page_buffer.as_mut_slice(), offset)?;
+        db.read(page_buffer.as_mut_slice(), address)?;
 
         Ok(Self {
-            offset_and_dirty_flag: offset,
+            address_and_dirty_flag: address,
             page_buffer,
         })
+    }
+
+    /// Returns the address of the page.
+    #[inline]
+    pub fn address(&self) -> u64 {
+        self.address_and_dirty_flag & (!1_u64)
     }
 
     /// Returns `true` if the page is dirty.
     #[inline]
     pub fn is_dirty(&self) -> bool {
-        (self.offset_and_dirty_flag & 1_u64) != 0
+        (self.address_and_dirty_flag & 1_u64) != 0
     }
 
     /// Sets the page dirty.
     #[allow(dead_code)]
     #[inline]
     pub fn set_dirty(&mut self) {
-        self.offset_and_dirty_flag |= 1_u64;
+        self.address_and_dirty_flag |= 1_u64;
+    }
+
+    /// Returns the previous page address.
+    #[inline]
+    pub fn prev_page_address(&self) -> u64 {
+        u64::from_le_bytes(self.page_buffer[0..8].try_into().unwrap())
+    }
+
+    /// Sets the previous page address.
+    #[inline]
+    pub fn set_prev_page_address(&mut self, prev_page: u64) {
+        prev_page
+            .to_le_bytes()
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, d)| self.page_buffer[i] = d);
+    }
+
+    /// Returns the next page address.
+    #[inline]
+    pub fn next_page_address(&self) -> u64 {
+        u64::from_le_bytes(self.page_buffer[8..16].try_into().unwrap())
+    }
+
+    /// Sets the next page address.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn set_next_page_address(&mut self, next_page: u64) {
+        next_page
+            .to_le_bytes()
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, d)| self.page_buffer[i + 8] = d);
     }
 
     /// Gets a reference to the buffer.
@@ -113,9 +154,9 @@ impl EvictablePage {
     pub fn write_back(&mut self, db: &RandomAccessFile) -> Result<(), Error> {
         db.write(
             self.page_buffer.as_slice(),
-            self.offset_and_dirty_flag & (!1_u64),
+            self.address_and_dirty_flag & (!1_u64),
         )?;
-        self.offset_and_dirty_flag &= !1_u64;
+        self.address_and_dirty_flag &= !1_u64;
         Ok(())
     }
 }
