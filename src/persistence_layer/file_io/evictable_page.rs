@@ -12,6 +12,7 @@ use std::mem::MaybeUninit;
 ///
 /// The layout of the header of a page is as follows.
 /// - `PREV_OFFSET 64-bit|NEXT_OFFSET 64-bit`.
+/// - _This assumes that any operations on the page header are atomically applied to the device.
 ///
 /// The layout suggests that a database consists of linked list of pages, and the `PREV_OFFSET`
 /// field represents the state of a page.
@@ -20,22 +21,21 @@ use std::mem::MaybeUninit;
 ///
 /// Creating a new page entails linking the new page to an existing page, which requires one
 /// synchronous IO.
-/// 1. Synchronously set the address of the existing page to the `PREV_OFFSET` field.
+/// 1. Set the address of the existing page to the `PREV_OFFSET` field.
 /// - The page to create cannot be owned by any other transaction at runtime.
 /// - If the server crashes, the page is regarded as free if the previous page does not point to
 ///   it, and the page will be eventually added to a free page list.
+/// - This must happen before 2.
 /// 2. Set the `NEXT_OFFSET` field of the existing page to the address of the new page.
 ///
 /// Deleting an existing page from the linked list requires one synchronous IO.
-/// 1. Synchronously reset the `PREV_OFFSET` field of the page to delete.
+/// 1. Connect `PREV_OFFSET` and `NEXT_OFFSET`.
+/// - This must happen before 3.
+/// 2. Reset the `PREV_OFFSET` and `NEXT_OFFSET` field of the page to delete.
 /// - The page to delete cannot be owned by any other transaction at runtime.
 /// - If the server crashes, the linked list state is fixed during recovery; this inconsistency can
-///   be easily detected by back-tracking `PREV_OFFSET` values.
-/// 2. Set the `NEXT_OFFSET` field of the previous page to the `NEXT_OFFSET` field value of the
-///    page to delete.
-/// 3. Set the `PREV_OFFSET` field of the next page to the address of the previous page.
-/// 4. After all the operations above have been persisted, the page can be inserted into a free
-///    page list.
+///   be easily detected by back-tracking `PREV_OFFSET`.
+/// 4. The page is inserted into a free page list.
 #[derive(Debug)]
 pub struct EvictablePage {
     /// The address of the page and the dirty flag of the page.
