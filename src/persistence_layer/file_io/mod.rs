@@ -158,6 +158,13 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         })
     }
 
+    /// Returns its page manager.
+    #[inline]
+    #[must_use]
+    pub fn page_manager(&self) -> &PageManager {
+        &self.file_io_data.page_manager
+    }
+
     /// Opens the specified file.
     fn open_file(
         path_buffer: &mut PathBuf,
