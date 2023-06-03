@@ -222,6 +222,7 @@ impl PageManager {
                     });
             if let Ok(read_from) = read_from {
                 for i in 0..num_pages_to_read {
+                    #[allow(clippy::no_effect_underscore_binding)]
                     let _offset = read_from + PAGE_SIZE * i;
                     // TODO: asynchronously read the header.
                 }
