@@ -49,38 +49,28 @@ impl PageManager {
     }
 
     /// Creates a new page and appends the newly created page to the specified page.
-    #[allow(dead_code, clippy::unused_async)]
-    pub async fn create_page<R, F: FnOnce(u64, &mut EvictablePage) -> R>(
-        &self,
-        prev_page_address: u64,
-        writer: F,
-    ) -> Result<R, Error> {
+    #[allow(dead_code)]
+    pub async fn create_page(&self, prev_page_address: u64) -> Result<u64, Error> {
         debug_assert_eq!(prev_page_address % PAGE_SIZE, 0);
-        let free_page = self.get_free_page(prev_page_address).await?;
-        let free_page_address = free_page.address();
-        match self.page_cache.entry_async(free_page.address()).await {
-            Entry::Occupied(mut o) => {
-                // The page was already cached.
-                if o.get().is_dirty() {
-                    // TODO: handle this.
-                    unimplemented!();
-                } else if o.get().prev_page_address() != prev_page_address {
-                    // TODO: handle this.
-                    unimplemented!();
-                }
-                Ok(writer(free_page_address, o.get_mut()))
-            }
-            Entry::Vacant(v) => {
-                let (evicted, mut inserted) = v.put_entry(Box::new(free_page));
-                if let Some((_, evicted)) = evicted {
-                    if evicted.is_dirty() {
-                        drop(
-                            self.file_io_task_sender
-                                .send(IOTask::WriteBackEvicted(evicted)),
-                        );
+        loop {
+            let free_page_address = self.get_free_page().await?;
+            let result = self
+                .write_page(free_page_address, |free_page| {
+                    if free_page.prev_page_address() != 0 {
+                        // The free page is linked to another page.
+                        return false;
                     }
-                }
-                Ok(writer(free_page_address, inserted.get_mut()))
+                    free_page.set_prev_page_address(prev_page_address);
+                    true
+                })
+                .await?;
+            if result {
+                // Need to write back the data before writing anything to the free page.
+                drop(
+                    self.file_io_task_sender
+                        .send(IOTask::WriteBack(free_page_address)),
+                );
+                return Ok(free_page_address);
             }
         }
     }
@@ -203,8 +193,12 @@ impl PageManager {
     /// Gets a free page.
     #[allow(clippy::unused_async)]
     #[inline]
-    async fn get_free_page(&self, _prev_page_address: u64) -> Result<EvictablePage, Error> {
-        todo!()
+    async fn get_free_page(&self) -> Result<u64, Error> {
+        if let Some(free_page_address) = self.db_header.free_pages.pop() {
+            Ok(free_page_address)
+        } else {
+            unimplemented!();
+        }
     }
 
     /// Adds a free page.
@@ -224,6 +218,7 @@ impl Drop for PageManager {
 
 #[cfg(test)]
 mod test {
+    use super::PAGE_SIZE;
     use crate::{FileIO, MonotonicU64};
     use std::path::Path;
     use tokio::fs::remove_dir_all;
@@ -233,10 +228,27 @@ mod test {
         const DIR: &str = "page_manager_create_test";
         let path = Path::new(DIR);
 
+        let data: u8 = 17;
+
         let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let free_page = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+        assert_ne!(free_page, 0);
+        assert!(file_io
+            .page_manager()
+            .write_page(free_page, |e| e.buffer_mut()[0] = data)
+            .await
+            .is_ok());
+        file_io.page_manager().write_back_sync(free_page);
         drop(file_io);
 
         let file_io_recovered = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let result = file_io_recovered
+            .page_manager()
+            .read_page(free_page, |e| e.buffer()[0])
+            .await
+            .unwrap();
+        assert_eq!(result, data);
+
         drop(file_io_recovered);
 
         assert!(remove_dir_all(path).await.is_ok());
