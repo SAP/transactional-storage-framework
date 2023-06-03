@@ -11,6 +11,7 @@ use super::RandomAccessFile;
 use crate::Error;
 use scc::hash_cache::Entry;
 use scc::HashCache;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::SyncSender;
 use std::thread::yield_now;
 
@@ -22,7 +23,6 @@ pub struct PageManager {
     db: RandomAccessFile,
 
     /// The database header.
-    #[allow(dead_code)]
     db_header: DatabaseHeader,
 
     /// Cached pages.
@@ -50,6 +50,7 @@ impl PageManager {
 
     /// Creates a new page and appends the newly created page to the specified page.
     #[allow(dead_code)]
+    #[inline]
     pub async fn create_page(&self, prev_page_address: u64) -> Result<u64, Error> {
         debug_assert_eq!(prev_page_address % PAGE_SIZE, 0);
         loop {
@@ -119,6 +120,7 @@ impl PageManager {
         match self.page_cache.entry_async(page_address).await {
             Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
             Entry::Vacant(v) => {
+                // TODO: it is synchronous and blocking, make it asynchronous.
                 let evictable_page = EvictablePage::from_file(&self.db, page_address)?;
                 let (evicted, inserted) = v.put_entry(Box::new(evictable_page));
                 if let Some((_, evicted)) = evicted {
@@ -194,10 +196,42 @@ impl PageManager {
     #[allow(clippy::unused_async)]
     #[inline]
     async fn get_free_page(&self) -> Result<u64, Error> {
-        if let Some(free_page_address) = self.db_header.free_pages.pop() {
-            Ok(free_page_address)
-        } else {
-            unimplemented!();
+        loop {
+            if let Some(free_page_address) = self.db_header.free_pages.pop() {
+                return Ok(free_page_address);
+            }
+
+            // It is mandated to read at least `2048` pages.
+            let file_len = self.db.len(Relaxed);
+            let num_pages_to_read = 2048;
+            let mut resize_file = false;
+            let read_from =
+                self.db_header
+                    .free_page_scanner_offset
+                    .fetch_update(Relaxed, Relaxed, |o| {
+                        if let Some(new_offset) = o.checked_add(PAGE_SIZE * num_pages_to_read) {
+                            if new_offset >= file_len {
+                                resize_file = true;
+                            } else {
+                                return Some(new_offset);
+                            }
+                        }
+
+                        // Integer overflow.
+                        None
+                    });
+            if let Ok(read_from) = read_from {
+                for i in 0..num_pages_to_read {
+                    let _offset = read_from + PAGE_SIZE * i;
+                    // TODO: asynchronously read the header.
+                }
+            } else if resize_file {
+                // TODO: asynchronously resize the file.
+                todo!();
+            } else {
+                // TODO: handle the integer overflow.
+                todo!();
+            }
         }
     }
 
