@@ -21,12 +21,13 @@ pub enum IOTask {
     /// Flushes any pending log buffers.
     Flush,
 
+    /// Resizes the database file.
+    Resize(u64),
+
     /// Writes back the specified page.
-    #[allow(dead_code)]
     WriteBack(u64),
 
     /// Writes back the evicted page.
-    #[allow(dead_code)]
     WriteBackEvicted(Box<EvictablePage>),
 
     /// Recovers the database.
@@ -49,6 +50,9 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
         match task {
             IOTask::Flush => {
                 process_log_buffer_batch(file_io_data, &mut log_offset);
+            }
+            IOTask::Resize(new_size) => {
+                file_io_data.page_manager.resize_sync(new_size);
             }
             IOTask::WriteBack(page_address) => {
                 file_io_data.page_manager.write_back_sync(page_address);

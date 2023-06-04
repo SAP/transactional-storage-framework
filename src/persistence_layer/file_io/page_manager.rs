@@ -10,9 +10,12 @@ use super::io_task_processor::IOTask;
 use super::RandomAccessFile;
 use crate::Error;
 use scc::hash_cache::Entry;
-use scc::HashCache;
+use scc::{Bag, HashCache};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::SyncSender;
+use std::task::{Context, Poll, Waker};
 use std::thread::yield_now;
 
 /// [`PageManager`] provides an interface between the database workers and the persistence layer to
@@ -30,6 +33,19 @@ pub struct PageManager {
 
     /// File IO task sender.
     file_io_task_sender: SyncSender<IOTask>,
+
+    /// [`Waker`] bag.
+    waker_bag: Bag<Waker>,
+}
+
+/// Free page allocation unit.
+pub const ALLOCATION_UNIT: u64 = PAGE_SIZE * 2048;
+
+/// [`AwaitFreePage`] waits until a free page is available for the corresponding page manager.
+#[derive(Debug)]
+pub struct AwaitFreePage<'p> {
+    /// The page manager to provide free pages for which the [`AwaitFreePage`] waits.
+    page_manager: &'p PageManager,
 }
 
 impl PageManager {
@@ -45,6 +61,7 @@ impl PageManager {
             db_header,
             page_cache: HashCache::with_capacity(0x10, 0x100_0000),
             file_io_task_sender,
+            waker_bag: Bag::default(),
         })
     }
 
@@ -77,7 +94,8 @@ impl PageManager {
     }
 
     /// Deletes an existing page.
-    #[allow(dead_code, clippy::unused_async)]
+    #[allow(dead_code)]
+    #[inline]
     pub async fn delete_page(&self, page_address: u64) -> Result<(), Error> {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
         let (_prev_page_address, _next_page_address) = self
@@ -90,7 +108,7 @@ impl PageManager {
             .await?;
         // TODO: set the `NEXT_OFFSET` field of the previous page and set the `PREV_OFFSET` field
         // of the next page.
-        self.add_free_page(page_address).await?;
+        self.add_free_page(page_address);
 
         Err(Error::UnexpectedState)
     }
@@ -167,6 +185,23 @@ impl PageManager {
         }
     }
 
+    /// Resizes the database file.
+    ///
+    /// It is a synchronous method, therefore it should be run in the background.
+    #[inline]
+    pub fn resize_sync(&self, new_size: u64) {
+        debug_assert_eq!(new_size % PAGE_SIZE, 0);
+        let old_size = self.db.len(Relaxed);
+        debug_assert_eq!(old_size % PAGE_SIZE, 0);
+        while self.db.set_len(new_size).is_err() {
+            yield_now();
+        }
+        for i in old_size / PAGE_SIZE..new_size / PAGE_SIZE {
+            let free_page_address = i * PAGE_SIZE;
+            self.add_free_page(free_page_address);
+        }
+    }
+
     /// Writes back a dirty page with the page retained in the cache.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
@@ -193,7 +228,6 @@ impl PageManager {
     }
 
     /// Gets a free page.
-    #[allow(clippy::unused_async)]
     #[inline]
     async fn get_free_page(&self) -> Result<u64, Error> {
         loop {
@@ -203,13 +237,13 @@ impl PageManager {
 
             // It is mandated to read at least `2048` pages.
             let file_len = self.db.len(Relaxed);
-            let num_pages_to_read = 2048;
+            let num_pages_to_read = ALLOCATION_UNIT / PAGE_SIZE;
             let mut resize_file = false;
             let read_from =
                 self.db_header
                     .free_page_scanner_offset
                     .fetch_update(Relaxed, Relaxed, |o| {
-                        if let Some(new_offset) = o.checked_add(PAGE_SIZE * num_pages_to_read) {
+                        if let Some(new_offset) = o.checked_add(ALLOCATION_UNIT) {
                             if new_offset >= file_len {
                                 resize_file = true;
                             } else {
@@ -227,8 +261,11 @@ impl PageManager {
                     // TODO: asynchronously read the header.
                 }
             } else if resize_file {
-                // TODO: asynchronously resize the file.
-                todo!();
+                drop(
+                    self.file_io_task_sender
+                        .send(IOTask::Resize(file_len + ALLOCATION_UNIT)),
+                );
+                AwaitFreePage { page_manager: self }.await;
             } else {
                 // TODO: handle the integer overflow.
                 todo!();
@@ -237,10 +274,11 @@ impl PageManager {
     }
 
     /// Adds a free page.
-    #[allow(clippy::unused_async)]
     #[inline]
-    async fn add_free_page(&self, _free_page_address: u64) -> Result<(), Error> {
-        todo!()
+    fn add_free_page(&self, free_page_address: u64) {
+        debug_assert_eq!(free_page_address % PAGE_SIZE, 0);
+        self.db_header.free_pages.push(free_page_address);
+        self.waker_bag.pop_all((), |_, w| w.wake());
     }
 }
 
@@ -248,6 +286,20 @@ impl Drop for PageManager {
     #[inline]
     fn drop(&mut self) {
         // TODO: cleanup pages.
+    }
+}
+
+impl<'p> Future for AwaitFreePage<'p> {
+    type Output = ();
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.page_manager.db_header.free_pages.is_empty() {
+            self.page_manager.waker_bag.push(cx.waker().clone());
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
     }
 }
 
@@ -266,23 +318,32 @@ mod test {
         let data: u8 = 17;
 
         let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
-        let free_page = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
-        assert_ne!(free_page, 0);
-        assert!(file_io
-            .page_manager()
-            .write_page(free_page, |e| e.buffer_mut()[0] = data)
-            .await
-            .is_ok());
-        file_io.page_manager().write_back_sync(free_page);
+        let mut free_pages = Vec::new();
+        for i in 0..4 {
+            let free_page = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+            assert_ne!(free_page, 0);
+            assert!(file_io
+                .page_manager()
+                .write_page(free_page, |e| e.buffer_mut()[0] = data + i)
+                .await
+                .is_ok());
+            file_io.page_manager().write_back_sync(free_page);
+            free_pages.push(free_page);
+        }
         drop(file_io);
 
         let file_io_recovered = FileIO::<MonotonicU64>::with_path(path).unwrap();
-        let result = file_io_recovered
-            .page_manager()
-            .read_page(free_page, |e| e.buffer()[0])
-            .await
-            .unwrap();
-        assert_eq!(result, data);
+        for (offset, free_page) in free_pages.iter().enumerate() {
+            let result = file_io_recovered
+                .page_manager()
+                .read_page(*free_page, |e| e.buffer()[0])
+                .await
+                .unwrap();
+            {
+                #![allow(clippy::cast_possible_truncation)]
+                assert_eq!(result, data + offset as u8);
+            }
+        }
 
         drop(file_io_recovered);
 
