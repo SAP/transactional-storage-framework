@@ -136,7 +136,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
         let log = Self::open_file(&mut path_buffer, "l.log")?;
         let db = Self::open_file(&mut path_buffer, "db.dat")?;
         let (file_io_task_sender, mut file_io_task_receiver) =
-            mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 4);
+            mpsc::sync_channel::<IOTask>(utils::advise_num_shards() * 16);
         let page_manager = PageManager::from_db(db, file_io_task_sender.clone())?;
         let file_io_data = Arc::new(FileIOData {
             recovery_data: Mutex::default(),

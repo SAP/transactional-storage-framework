@@ -376,7 +376,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
 
         // Safety: it is the sole writer of its own `anchor`.
         unsafe {
-            let anchor_mut_ref = &mut *(addr_of!(*self.anchor) as *mut Anchor<S>);
+            let anchor_mut_ref = &mut *(addr_of!(*self.anchor).cast_mut());
             anchor_mut_ref.prepare_instant = prepare_instant;
             anchor_mut_ref
                 .state
@@ -577,7 +577,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Transaction<'d, S, P> {
         debug_assert_eq!(self.anchor.state.load(Relaxed), State::Committing.into());
 
         // Safety: it is the sole writer of its own `anchor`.
-        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor).cast_mut()) };
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
@@ -776,7 +776,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
 
         // Safety: it is the sole writer of its own `anchor`.
         unsafe {
-            let anchor_mut_ref = &mut *(addr_of!(*self.anchor) as *mut Anchor<S>);
+            let anchor_mut_ref = &mut *(addr_of!(*self.anchor).cast_mut());
             anchor_mut_ref.prepare_instant = prepare_instant;
             anchor_mut_ref
                 .state
@@ -801,7 +801,7 @@ impl<'d, S: Sequencer, P: PersistenceLayer<S>> Playback<'d, S, P> {
             self.database.sequencer().update(commit_instant, Release);
 
         // Safety: it is the sole writer of its own `anchor`.
-        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor) as *mut Anchor<S>) };
+        let anchor_mut_ref = unsafe { &mut *(addr_of!(*self.anchor).cast_mut()) };
         anchor_mut_ref.commit_instant = commit_instant;
         anchor_mut_ref.state.store(State::Committed.into(), Release);
         self.anchor.wake_up();
