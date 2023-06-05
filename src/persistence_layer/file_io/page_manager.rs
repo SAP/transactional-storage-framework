@@ -66,6 +66,8 @@ impl PageManager {
     }
 
     /// Creates a new page and appends the newly created page to the specified page.
+    ///
+    /// This assumes that the caller owns the page chain.
     #[allow(dead_code)]
     #[inline]
     pub async fn create_page(&self, prev_page_address: u64) -> Result<u64, Error> {
@@ -78,6 +80,7 @@ impl PageManager {
                         // The free page is linked to another page.
                         return false;
                     }
+                    // The free page is no longer free.
                     free_page.set_prev_page_address(prev_page_address);
                     true
                 })
@@ -94,23 +97,59 @@ impl PageManager {
     }
 
     /// Deletes an existing page.
+    ///
+    /// This assumes that the caller owns the page chain.
     #[allow(dead_code)]
     #[inline]
     pub async fn delete_page(&self, page_address: u64) -> Result<(), Error> {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
-        let (_prev_page_address, _next_page_address) = self
-            .write_page(page_address, |e| {
-                let prev_page_address = e.prev_page_address();
-                e.set_prev_page_address(0);
-                e.set_dirty();
-                (prev_page_address, e.next_page_address())
+        let (prev_page_address, next_page_address) = self
+            .read_page(page_address, |e| {
+                (e.prev_page_address(), e.next_page_address())
             })
             .await?;
-        // TODO: set the `NEXT_OFFSET` field of the previous page and set the `PREV_OFFSET` field
-        // of the next page.
+
+        // 1. Update `prev.next`, and write back.
+        if prev_page_address != 0 {
+            self.write_page(prev_page_address, |e| {
+                e.set_next_page_address(next_page_address);
+                e.set_dirty();
+            })
+            .await?;
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::WriteBack(prev_page_address)),
+            );
+        }
+
+        // 2. Update `next.prev`, and write back.
+        if next_page_address != 0 {
+            self.write_page(next_page_address, |e| {
+                e.set_prev_page_address(prev_page_address);
+                e.set_dirty();
+            })
+            .await?;
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::WriteBack(next_page_address)),
+            );
+        }
+
+        // 3. Update `free.prev`.
+        self.write_page(page_address, |e| {
+            e.set_prev_page_address(0);
+            e.set_dirty();
+        })
+        .await?;
+
+        // Two cases to handle.
+        // 1. 1 -> 2 -> Crash.
+        // - Backtrack from `next`; if reachable immediately, `3` shall be performed separately.
+        // 3. 1 -> Crash.
+        // - Backtrack from `next`; if reachable in two steps, proceed with `2` and `3`.
         self.add_free_page(page_address);
 
-        Err(Error::UnexpectedState)
+        Ok(())
     }
 
     /// Reads a page in the database.
@@ -345,6 +384,39 @@ mod test {
             }
         }
 
+        drop(file_io_recovered);
+
+        assert!(remove_dir_all(path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete() {
+        const DIR: &str = "page_manager_delete_test";
+        let path = Path::new(DIR);
+
+        let data: u8 = 19;
+
+        let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let free_page = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+        assert_ne!(free_page, 0);
+        assert!(file_io
+            .page_manager()
+            .write_page(free_page, |e| e.buffer_mut()[0] = data)
+            .await
+            .is_ok());
+        file_io.page_manager().write_back_sync(free_page);
+        assert!(file_io.page_manager().delete_page(free_page).await.is_ok());
+        let free_page_again = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+        assert_eq!(free_page_again, free_page);
+        drop(file_io);
+
+        let file_io_recovered = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let result = file_io_recovered
+            .page_manager()
+            .read_page(free_page, |e| e.buffer()[0])
+            .await
+            .unwrap();
+        assert_eq!(result, data);
         drop(file_io_recovered);
 
         assert!(remove_dir_all(path).await.is_ok());
