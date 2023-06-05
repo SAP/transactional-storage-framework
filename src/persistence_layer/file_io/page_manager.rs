@@ -66,6 +66,8 @@ impl PageManager {
     }
 
     /// Creates a new page and appends the newly created page to the specified page.
+    ///
+    /// This assumes that the caller owns the page chain.
     #[allow(dead_code)]
     #[inline]
     pub async fn create_page(&self, prev_page_address: u64) -> Result<u64, Error> {
@@ -78,6 +80,7 @@ impl PageManager {
                         // The free page is linked to another page.
                         return false;
                     }
+                    // The free page is no longer free.
                     free_page.set_prev_page_address(prev_page_address);
                     true
                 })
@@ -94,23 +97,62 @@ impl PageManager {
     }
 
     /// Deletes an existing page.
+    ///
+    /// This assumes that the caller owns the page chain.
     #[allow(dead_code)]
     #[inline]
     pub async fn delete_page(&self, page_address: u64) -> Result<(), Error> {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
-        let (_prev_page_address, _next_page_address) = self
-            .write_page(page_address, |e| {
-                let prev_page_address = e.prev_page_address();
-                e.set_prev_page_address(0);
-                e.set_dirty();
-                (prev_page_address, e.next_page_address())
+        let (prev_page_address, next_page_address) = self
+            .read_page(page_address, |e| {
+                (e.prev_page_address(), e.next_page_address())
             })
             .await?;
-        // TODO: set the `NEXT_OFFSET` field of the previous page and set the `PREV_OFFSET` field
-        // of the next page.
+
+        // 1. Update `prev.next`, and write back.
+        if prev_page_address != 0 {
+            self.write_page(prev_page_address, |e| {
+                e.set_next_page_address(next_page_address);
+                e.set_dirty();
+            })
+            .await?;
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::WriteBack(prev_page_address)),
+            );
+        }
+
+        // 2. Update `next.prev`, and write back.
+        if next_page_address != 0 {
+            self.write_page(next_page_address, |e| {
+                e.set_prev_page_address(prev_page_address);
+                e.set_dirty();
+            })
+            .await?;
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::WriteBack(next_page_address)),
+            );
+        }
+
+        // 3. Update `free.prev`.
+        self.write_page(page_address, |e| {
+            e.set_prev_page_address(0);
+            e.set_next_page_address(0);
+            e.set_dirty();
+        })
+        .await?;
+
+        // Two cases to handle during recovery.
+        // 1. `1 -> 2 -> Crash`.
+        // - Backtrack from `next`; if reachable immediately, `3` shall be performed separately by
+        //  a free page scanner.
+        // 3. `1 -> Crash`.
+        // - Backtrack from `next`; if reachable in two steps, proceed with `2` and `3`.
+
         self.add_free_page(page_address);
 
-        Err(Error::UnexpectedState)
+        Ok(())
     }
 
     /// Reads a page in the database.
@@ -118,7 +160,6 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be read.
-    #[allow(dead_code)]
     #[inline]
     pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
         &self,
@@ -159,7 +200,6 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be modified.
-    #[allow(dead_code)]
     #[inline]
     pub async fn write_page<R, F: FnOnce(&mut EvictablePage) -> R>(
         &self,
@@ -188,8 +228,7 @@ impl PageManager {
     /// Resizes the database file.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn resize_sync(&self, new_size: u64) {
+    pub(super) fn resize_sync(&self, new_size: u64) {
         debug_assert_eq!(new_size % PAGE_SIZE, 0);
         let old_size = self.db.len(Relaxed);
         debug_assert_eq!(old_size % PAGE_SIZE, 0);
@@ -205,8 +244,7 @@ impl PageManager {
     /// Writes back a dirty page with the page retained in the cache.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn write_back_sync(&self, page_address: u64) {
+    pub(super) fn write_back_sync(&self, page_address: u64) {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
         while let Some(mut o) = self.page_cache.get(&page_address) {
             if o.get_mut().write_back(&self.db).is_ok() {
@@ -220,15 +258,13 @@ impl PageManager {
     /// Write back the evicted page.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn write_back_evicted_sync(&self, page: &mut EvictablePage) {
+    pub(super) fn write_back_evicted_sync(&self, page: &mut EvictablePage) {
         while page.write_back(&self.db).is_err() {
             yield_now();
         }
     }
 
     /// Gets a free page.
-    #[inline]
     async fn get_free_page(&self) -> Result<u64, Error> {
         loop {
             if let Some(free_page_address) = self.db_header.free_pages.pop() {
@@ -274,18 +310,10 @@ impl PageManager {
     }
 
     /// Adds a free page.
-    #[inline]
     fn add_free_page(&self, free_page_address: u64) {
         debug_assert_eq!(free_page_address % PAGE_SIZE, 0);
         self.db_header.free_pages.push(free_page_address);
         self.waker_bag.pop_all((), |_, w| w.wake());
-    }
-}
-
-impl Drop for PageManager {
-    #[inline]
-    fn drop(&mut self) {
-        // TODO: cleanup pages.
     }
 }
 
@@ -345,6 +373,39 @@ mod test {
             }
         }
 
+        drop(file_io_recovered);
+
+        assert!(remove_dir_all(path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete() {
+        const DIR: &str = "page_manager_delete_test";
+        let path = Path::new(DIR);
+
+        let data: u8 = 19;
+
+        let file_io = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let free_page = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+        assert_ne!(free_page, 0);
+        assert!(file_io
+            .page_manager()
+            .write_page(free_page, |e| e.buffer_mut()[0] = data)
+            .await
+            .is_ok());
+        file_io.page_manager().write_back_sync(free_page);
+        assert!(file_io.page_manager().delete_page(free_page).await.is_ok());
+        let free_page_again = file_io.page_manager().create_page(PAGE_SIZE).await.unwrap();
+        assert_eq!(free_page_again, free_page);
+        drop(file_io);
+
+        let file_io_recovered = FileIO::<MonotonicU64>::with_path(path).unwrap();
+        let result = file_io_recovered
+            .page_manager()
+            .read_page(free_page, |e| e.buffer()[0])
+            .await
+            .unwrap();
+        assert_eq!(result, data);
         drop(file_io_recovered);
 
         assert!(remove_dir_all(path).await.is_ok());
