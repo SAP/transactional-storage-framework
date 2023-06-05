@@ -29,9 +29,11 @@ use std::mem::MaybeUninit;
 /// 2. Set the `NEXT_OFFSET` field of the existing page to the address of the new page.
 ///
 /// Deleting an existing page from the linked list requires one synchronous IO.
-/// 1. Connect `PREV_OFFSET` and `NEXT_OFFSET`.
+/// 1. Update the `NEXT_OFFSET` of the previous page.
+/// - This must happen before 2.
+/// 2. Update the `PREV_OFFSET` of the next page.
 /// - This must happen before 3.
-/// 2. Reset the `PREV_OFFSET` and `NEXT_OFFSET` field of the page to delete.
+/// 3. Reset the `PREV_OFFSET` and `NEXT_OFFSET` field of the page to delete.
 /// - The page to delete cannot be owned by any other transaction at runtime.
 /// - If the server crashes, the linked list state is fixed during recovery; this inconsistency can
 ///   be easily detected by back-tracking `PREV_OFFSET`.

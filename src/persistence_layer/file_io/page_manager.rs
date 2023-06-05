@@ -138,15 +138,18 @@ impl PageManager {
         // 3. Update `free.prev`.
         self.write_page(page_address, |e| {
             e.set_prev_page_address(0);
+            e.set_next_page_address(0);
             e.set_dirty();
         })
         .await?;
 
-        // Two cases to handle.
-        // 1. 1 -> 2 -> Crash.
-        // - Backtrack from `next`; if reachable immediately, `3` shall be performed separately.
-        // 3. 1 -> Crash.
+        // Two cases to handle during recovery.
+        // 1. `1 -> 2 -> Crash`.
+        // - Backtrack from `next`; if reachable immediately, `3` shall be performed separately by
+        //  a free page scanner.
+        // 3. `1 -> Crash`.
         // - Backtrack from `next`; if reachable in two steps, proceed with `2` and `3`.
+
         self.add_free_page(page_address);
 
         Ok(())
@@ -157,7 +160,6 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be read.
-    #[allow(dead_code)]
     #[inline]
     pub async fn read_page<R, F: FnOnce(&EvictablePage) -> R>(
         &self,
@@ -198,7 +200,6 @@ impl PageManager {
     /// # Errors
     ///
     /// Returns an error if the page could not be modified.
-    #[allow(dead_code)]
     #[inline]
     pub async fn write_page<R, F: FnOnce(&mut EvictablePage) -> R>(
         &self,
@@ -227,8 +228,7 @@ impl PageManager {
     /// Resizes the database file.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn resize_sync(&self, new_size: u64) {
+    pub(super) fn resize_sync(&self, new_size: u64) {
         debug_assert_eq!(new_size % PAGE_SIZE, 0);
         let old_size = self.db.len(Relaxed);
         debug_assert_eq!(old_size % PAGE_SIZE, 0);
@@ -244,8 +244,7 @@ impl PageManager {
     /// Writes back a dirty page with the page retained in the cache.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn write_back_sync(&self, page_address: u64) {
+    pub(super) fn write_back_sync(&self, page_address: u64) {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
         while let Some(mut o) = self.page_cache.get(&page_address) {
             if o.get_mut().write_back(&self.db).is_ok() {
@@ -259,15 +258,13 @@ impl PageManager {
     /// Write back the evicted page.
     ///
     /// It is a synchronous method, therefore it should be run in the background.
-    #[inline]
-    pub fn write_back_evicted_sync(&self, page: &mut EvictablePage) {
+    pub(super) fn write_back_evicted_sync(&self, page: &mut EvictablePage) {
         while page.write_back(&self.db).is_err() {
             yield_now();
         }
     }
 
     /// Gets a free page.
-    #[inline]
     async fn get_free_page(&self) -> Result<u64, Error> {
         loop {
             if let Some(free_page_address) = self.db_header.free_pages.pop() {
@@ -313,18 +310,10 @@ impl PageManager {
     }
 
     /// Adds a free page.
-    #[inline]
     fn add_free_page(&self, free_page_address: u64) {
         debug_assert_eq!(free_page_address % PAGE_SIZE, 0);
         self.db_header.free_pages.push(free_page_address);
         self.waker_bag.pop_all((), |_, w| w.wake());
-    }
-}
-
-impl Drop for PageManager {
-    #[inline]
-    fn drop(&mut self) {
-        // TODO: cleanup pages.
     }
 }
 
