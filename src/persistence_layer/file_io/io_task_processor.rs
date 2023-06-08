@@ -24,6 +24,9 @@ pub enum IOTask {
     /// Resizes the database file.
     Resize(u64),
 
+    /// Fills the cache entry for the page.
+    FillCache(u64),
+
     /// Writes back the specified page.
     WriteBack(u64),
 
@@ -53,6 +56,9 @@ pub(super) fn process_sync<S: Sequencer<Instant = u64>>(
             }
             IOTask::Resize(new_size) => {
                 file_io_data.page_manager.resize_sync(new_size);
+            }
+            IOTask::FillCache(page_address) => {
+                file_io_data.page_manager.fill_cache_sync(page_address);
             }
             IOTask::WriteBack(page_address) => {
                 file_io_data.page_manager.write_back_sync(page_address);

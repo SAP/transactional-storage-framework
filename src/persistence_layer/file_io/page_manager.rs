@@ -34,8 +34,11 @@ pub struct PageManager {
     /// File IO task sender.
     file_io_task_sender: SyncSender<IOTask>,
 
-    /// [`Waker`] bag.
-    waker_bag: Bag<Waker>,
+    /// [`Waker`] bag for free pages.
+    waker_bag_for_free_page: Bag<Waker>,
+
+    /// [`Waker`] bag for caching pages.
+    waker_bag_for_caching_page: Bag<Waker>,
 }
 
 /// Free page allocation unit.
@@ -46,6 +49,16 @@ pub const ALLOCATION_UNIT: u64 = PAGE_SIZE * 2048;
 pub struct AwaitFreePage<'p> {
     /// The page manager to provide free pages for which the [`AwaitFreePage`] waits.
     page_manager: &'p PageManager,
+}
+
+/// [`AwaitCachedPage`] waits until the specified page is cached from the file.
+#[derive(Debug)]
+pub struct AwaitCachedPage<'p> {
+    /// The page manager to provide free pages for which the [`AwaitCachedPage`] waits.
+    page_manager: &'p PageManager,
+
+    /// The page address.
+    page_address: u64,
 }
 
 impl PageManager {
@@ -61,7 +74,8 @@ impl PageManager {
             db_header,
             page_cache: HashCache::with_capacity(0x10, 0x100_0000),
             file_io_task_sender,
-            waker_bag: Bag::default(),
+            waker_bag_for_free_page: Bag::default(),
+            waker_bag_for_caching_page: Bag::default(),
         })
     }
 
@@ -168,30 +182,23 @@ impl PageManager {
     ) -> Result<R, Error> {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
         let mut reader = Some(reader);
-        if let Some(result) = self
-            .page_cache
-            .read_async(&page_address, |_, v| reader.take().unwrap()(v))
-            .await
-        {
-            return Ok(result);
-        }
-
-        match self.page_cache.entry_async(page_address).await {
-            Entry::Occupied(o) => Ok(reader.unwrap()(o.get())),
-            Entry::Vacant(v) => {
-                // TODO: it is synchronous and blocking, make it asynchronous.
-                let evictable_page = EvictablePage::from_file(&self.db, page_address)?;
-                let (evicted, inserted) = v.put_entry(Box::new(evictable_page));
-                if let Some((_, evicted)) = evicted {
-                    if evicted.is_dirty() {
-                        drop(
-                            self.file_io_task_sender
-                                .send(IOTask::WriteBackEvicted(evicted)),
-                        );
-                    }
-                }
-                Ok(reader.unwrap()(inserted.get()))
+        loop {
+            if let Some(result) = self
+                .page_cache
+                .read_async(&page_address, |_, v| reader.take().unwrap()(v))
+                .await
+            {
+                return Ok(result);
             }
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::FillCache(page_address)),
+            );
+            AwaitCachedPage {
+                page_manager: self,
+                page_address,
+            }
+            .await;
         }
     }
 
@@ -207,22 +214,44 @@ impl PageManager {
         writer: F,
     ) -> Result<R, Error> {
         debug_assert_eq!(page_address % PAGE_SIZE, 0);
-        match self.page_cache.entry_async(page_address).await {
-            Entry::Occupied(mut o) => Ok(writer(o.get_mut())),
-            Entry::Vacant(v) => {
-                let evictable_page = EvictablePage::from_file(&self.db, page_address)?;
-                let (evicted, mut inserted) = v.put_entry(Box::new(evictable_page));
-                if let Some((_, evicted)) = evicted {
-                    if evicted.is_dirty() {
-                        drop(
-                            self.file_io_task_sender
-                                .send(IOTask::WriteBackEvicted(evicted)),
-                        );
-                    }
-                }
-                Ok(writer(inserted.get_mut()))
+        loop {
+            if let Entry::Occupied(mut o) = self.page_cache.entry_async(page_address).await {
+                return Ok(writer(o.get_mut()));
             }
+            drop(
+                self.file_io_task_sender
+                    .send(IOTask::FillCache(page_address)),
+            );
+            AwaitCachedPage {
+                page_manager: self,
+                page_address,
+            }
+            .await;
         }
+    }
+
+    /// Fills the cache entry corresponding to the specified page address.
+    pub(super) fn fill_cache_sync(&self, page_address: u64) {
+        debug_assert_eq!(page_address % PAGE_SIZE, 0);
+        while let Entry::Vacant(v) = self.page_cache.entry(page_address) {
+            let Ok(evictable_page) = EvictablePage::from_file(&self.db, page_address) else {
+                drop(v);
+                yield_now();
+                continue;
+            };
+            let (evicted, inserted) = v.put_entry(Box::new(evictable_page));
+            if let Some((_, mut evicted)) = evicted {
+                if evicted.is_dirty() {
+                    drop(inserted);
+
+                    // It is OK to process it directly outside the critical section since a newer
+                    // version of the page, if there is any, shall be written back after it.
+                    self.write_back_evicted_sync(&mut evicted);
+                }
+            }
+            break;
+        }
+        self.waker_bag_for_caching_page.pop_all((), |_, w| w.wake());
     }
 
     /// Resizes the database file.
@@ -313,7 +342,7 @@ impl PageManager {
     fn add_free_page(&self, free_page_address: u64) {
         debug_assert_eq!(free_page_address % PAGE_SIZE, 0);
         self.db_header.free_pages.push(free_page_address);
-        self.waker_bag.pop_all((), |_, w| w.wake());
+        self.waker_bag_for_free_page.pop_all((), |_, w| w.wake());
     }
 }
 
@@ -322,12 +351,37 @@ impl<'p> Future for AwaitFreePage<'p> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.page_manager.db_header.free_pages.is_empty() {
+            return Poll::Ready(());
+        }
+
+        self.page_manager
+            .waker_bag_for_free_page
+            .push(cx.waker().clone());
         if self.page_manager.db_header.free_pages.is_empty() {
-            self.page_manager.waker_bag.push(cx.waker().clone());
             Poll::Pending
         } else {
             Poll::Ready(())
         }
+    }
+}
+
+impl<'p> Future for AwaitCachedPage<'p> {
+    type Output = ();
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // TODO: it is a synchronous call, fix me later.
+        if self.page_manager.page_cache.contains(&self.page_address) {
+            return Poll::Ready(());
+        }
+        self.page_manager
+            .waker_bag_for_caching_page
+            .push(cx.waker().clone());
+        if self.page_manager.page_cache.contains(&self.page_address) {
+            return Poll::Ready(());
+        }
+        Poll::Pending
     }
 }
 
