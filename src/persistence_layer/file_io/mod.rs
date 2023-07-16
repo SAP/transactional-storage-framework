@@ -509,8 +509,9 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
     ) {
         let Some(new_pos) = LogRecord::<S>::TransactionRolledBack(
             transaction_id,
-            transaction_instant.map_or(0, NonZeroU32::get))
-            .write(log_buffer.buffer_mut()) else {
+            transaction_instant.map_or(0, NonZeroU32::get),
+        )
+        .write(log_buffer.buffer_mut()) else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
@@ -526,7 +527,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         let Some(new_pos) = LogRecord::<S>::TransactionPrepared(transaction_id, prepare_instant)
-            .write(log_buffer.buffer_mut()) else {
+            .write(log_buffer.buffer_mut())
+        else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);
@@ -542,7 +544,8 @@ impl<S: Sequencer<Instant = u64>> PersistenceLayer<S> for FileIO<S> {
         deadline: Option<Instant>,
     ) -> AwaitIO<S, Self> {
         let Some(new_pos) = LogRecord::<S>::TransactionCommitted(transaction_id, commit_instant)
-            .write(log_buffer.buffer_mut()) else {
+            .write(log_buffer.buffer_mut())
+        else {
             unreachable!("logic error");
         };
         log_buffer.set_buffer_position(new_pos);

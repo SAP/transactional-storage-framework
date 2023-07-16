@@ -15,7 +15,7 @@ keywords = ["async", "concurrent", "database"]
 
 [dependencies]
 libc = "0.2"
-scc = "1.8"
+scc = "1.9"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_futures"] }
