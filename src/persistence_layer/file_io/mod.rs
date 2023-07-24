@@ -180,7 +180,7 @@ impl<S: Sequencer<Instant = u64>> FileIO<S> {
     fn push_log_buffer(log_buffer_link: &AtomicUsize, log_buffer_ptr: *const FileLogBuffer) {
         let mut head = log_buffer_link.load(Acquire);
         loop {
-            // SAFETY: it assumes that the caller provided a valid pointer.
+            // Safety: it assumes that the caller provided a valid pointer.
             let log_buffer = unsafe { &*log_buffer_ptr };
             debug_assert_ne!(log_buffer.bytes_written.load(Relaxed), 0);
             log_buffer.next.store(head, Relaxed);
