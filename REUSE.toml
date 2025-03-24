@@ -1,0 +1,5 @@
+version = 1
+SPDX-PackageName = "transactional-storage-framework"
+SPDX-PackageSupplier = "Changgyoo Park <wvwwvwwv@me.com>"
+SPDX-PackageDownloadLocation = "https://github.com/SAP/transactional-storage-framework"
+annotations = []
